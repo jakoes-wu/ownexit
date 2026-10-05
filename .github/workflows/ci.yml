@@ -22,6 +22,12 @@ jobs:
           shellcheck -S warning direct/*.sh direct/subctl chain/*.sh scripts/*.sh
       - name: Privacy scan
         run: scripts/check_public.sh
+      - name: README links
+        # README.md 同时是 PyPI 项目页的正文，PyPI 上相对链接会 404，所以只允许完整 URL 和页内锚点。
+        run: |
+          if grep -noE '\]\([^)]+\)' README.md | grep -vE '\]\((https?://|#)'; then
+            echo 'README.md has relative links; use https://github.com/jakoes-wu/ownexit/blob/main/... instead'; exit 1
+          fi
       - name: Help output
         # 每个入口的 --help 都要退出 0，未知参数都要非 0 退出。
         run: |
