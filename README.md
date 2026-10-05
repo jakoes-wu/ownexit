@@ -41,8 +41,8 @@ Everything runs on your laptop and talks to the servers over SSH. Configuration,
 
 | | Direct | Relay |
 | ---- | ---- | ---- |
-| Your computer | macOS (Linux untested) | Mac with Apple silicon |
-| Servers | 1 × Debian / Ubuntu VPS | 2 × Linux amd64 (relay + exit) |
+| Your computer | macOS (Linux untested) | macOS or Linux (WSL counts as Linux) |
+| Servers | 1 × Debian / Ubuntu VPS | 2 × Linux, both amd64 or both arm64 (relay + exit) |
 | Login | root password over SSH, used once | same, for each server |
 | Tools | `git`, `ssh`, `curl`, `openssl`, `expect` (`brew install expect`) | same |
 
@@ -82,7 +82,7 @@ The VPS is remembered, so later runs need no arguments: `./direct/setup_direct.s
    chain/setup_chain.sh init --relay 203.0.113.10 --exit 203.0.113.20
    ```
 
-   It sets up key login on both servers (one password prompt each), detects the exit IP and asks you to confirm it, checks whether the relay already runs sing-box, and writes `~/.config/ownexit/chains/main.env`. Nothing on the servers is changed yet. If your provider has a security group that only lets the relay reach the exit, add `--exit-source-filter provider` so deploy checks that strictly; a plain VPS works with the default.
+   It sets up key login on both servers (one password prompt each), detects the exit IP and asks you to confirm it, checks whether the relay already runs sing-box, and writes `~/.config/ownexit/chains/main.env`. Nothing on the servers is changed yet. By default deploy will also add an nftables rule on the exit so that only the relay can reach its Reality port (`--exit-source-filter managed`); use `provider` if your provider's security group already does that, or `none` to skip it.
 
 2. **Deploy**
 
@@ -90,7 +90,7 @@ The VPS is remembered, so later runs need no arguments: `./direct/setup_direct.s
    chain/setup_chain.sh --id main deploy
    ```
 
-   It deploys the exit first, then the relay, as one transaction, and verifies the exit IP three different ways. If anything fails, it cleans up.
+   Both servers download the pinned sing-box release from GitHub themselves (falling back to an upload from your computer). It deploys the exit first, then the relay, as one transaction, and verifies the exit IP three different ways. If anything fails, it cleans up; if your network drops halfway, run `deploy` or `rollback` again and it converges.
 
 3. **Import** the node from `~/.local/state/ownexit/chains/main/client/node.txt`, or run `chain/multi_chain_client.sh --chains main render` for QR codes and a Clash snippet.
 
@@ -100,20 +100,20 @@ Day to day: `chain/setup_chain.sh --id main status | verify | conns | rollback`.
 
 | | Direct | Relay |
 | ---- | ---- | ---- |
-| Control machine | macOS (tested); Linux (untested); Windows not supported — try WSL at your own risk | macOS on Apple silicon only |
-| Server OS | Debian, Ubuntu | Linux with systemd; the relay needs `systemd-socket-proxyd`; empty nftables, UFW inactive |
-| Server CPU | whatever 233boy/sing-box supports (amd64, arm64) | amd64 only |
+| Control machine | macOS (tested); Linux (untested); Windows not supported — try WSL at your own risk | macOS on Apple silicon (tested), macOS on Intel (untested), Linux amd64 (tested on Ubuntu 20.04), Linux arm64 and WSL (untested) |
+| Server OS | Debian, Ubuntu | Linux with systemd; the relay needs `systemd-socket-proxyd`; no nftables tables other than ownexit's own, UFW inactive |
+| Server CPU | whatever 233boy/sing-box supports (amd64, arm64) | amd64 (tested) or arm64 (untested); relay and exit must match |
 | Clients | Clash Verge, mihomo, Shadowrocket tested; any VLESS-Reality client via `vless://` | same |
 
-Wider relay support (Intel Macs, Linux and WSL as control machine, arm64 servers) is planned for 0.2.0.
+If your computer runs a proxy in TUN mode (Clash and similar), SSH to the servers may be cut off halfway through a deploy. Turn TUN off, or route the relay and exit IPs directly, while running chain commands.
 
 ## Security notes
 
 - No real IP, password or key ever goes into this repository. There is no "edit the IP at the top of the script" step and no `--password` option. Passwords are typed interactively (or passed via `OWNEXIT_SSH_PASSWORD` for non-interactive use), submitted once per try, and never written to disk.
 - A wrong password is retried at most 3 times, and each try is submitted to the server only once, so you are unlikely to trip fail2ban. Failures end with `reason=bad-password`, `reason=password-disabled` or `reason=unreachable`.
 - The direct subscription endpoint is plain HTTP protected by a random path. Keep it stopped (`subctl stop`) except while importing, and use `setup_direct.sh --rotate-token` if a URL leaks.
-- The relay only runs `systemd-socket-proxyd`; the Reality private key lives only on the exit server, in a mode-600 file.
-- The direct setup installs sing-box through the third-party script 233boy/sing-box. The relay setup downloads a pinned official sing-box release and checks its SHA-256.
+- The relay only runs `systemd-socket-proxyd`; the Reality private key lives only on the exit server, in a mode-600 file. By default the exit's Reality port only accepts connections from the relay (an nftables table that starts and stops with the exit service).
+- The direct setup installs sing-box through the third-party script 233boy/sing-box. The relay setup downloads a pinned official sing-box release on each server and checks the SHA-256 of both the archive and the binary.
 
 See [SECURITY.md](SECURITY.md) for how to report a vulnerability.
 

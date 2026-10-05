@@ -6,7 +6,7 @@
 # 本脚本完全不连中转机与出口机，只读本机 chain 产物（env + node.txt），写自己的产物目录。
 #
 # 前置:
-#   - 仅在 macOS arm64 本地运行，/bin/bash 3.2 及以上；必须从本仓库 Git worktree 内执行（git 是读取真实配置前的防泄漏闸门依赖）。
+#   - 控制端 macOS（Apple 芯片 / Intel）或 Linux（amd64 / arm64，含 WSL），/bin/bash 3.2 及以上；必须从本仓库 Git worktree 内执行（git 是读取真实配置前的防泄漏闸门依赖）。
 #   - --chains 里每个 CHAIN_ID 都已由 setup_chain.sh deploy 且 status=deployed/healthy：
 #     本脚本按固定路径读 ${XDG_CONFIG_HOME:-~/.config}/ownexit/chains/<id>.env（只取 CHAIN_ID / RELAY_HOST / EXPECTED_EXIT_IPV4）
 #     与 ${XDG_STATE_HOME:-~/.local/state}/ownexit/chains/<id>/client/node.txt（只读）。各链的 EXPECTED_EXIT_IPV4 必须相同。
@@ -19,10 +19,17 @@ set -euo pipefail
 umask 077
 export LC_ALL=C
 
-# 以下常量与 chain/setup_chain.sh 顶部的 SING_BOX_VERSION / DARWIN_ARCHIVE* / RELEASE_BASE_URL 保持同步（改版本先改那边，再同步这里）。
+# 以下常量与 chain/setup_chain.sh 顶部的 SING_BOX_VERSION / ARCHIVE_SHA256_* / BINARY_SHA256_* / RELEASE_BASE_URL 保持同步
+# （改版本先改那边，再同步这里）。verify 要在本机起 sing-box 做真实握手，按本机平台选包。
 readonly SING_BOX_VERSION='1.13.14'
-readonly DARWIN_ARCHIVE='sing-box-1.13.14-darwin-arm64.tar.gz'
-readonly DARWIN_ARCHIVE_SHA256='73e8967b0fc08e17bce4263ca56ebc394822401a16497a1c4e02316c888202ab'
+readonly ARCHIVE_SHA256_LINUX_AMD64='f48703461a15476951ac4967cdad339d986f4b8096b4eb3ff0829a500502d697'
+readonly BINARY_SHA256_LINUX_AMD64='68aeab83cc4ab2659a5b92232261a20746ccdafc3b3d1e19b2d63247eec3bbf7'
+readonly ARCHIVE_SHA256_LINUX_ARM64='4742df6a4314e8ecc41736849fca6d73b8f9e91b6e8b06ee794ff17ba180579e'
+readonly BINARY_SHA256_LINUX_ARM64='85f570b96754cd7c354d28e50f66e9340b374e06b5d77ec9e15e8d04f0c87a25'
+readonly ARCHIVE_SHA256_DARWIN_AMD64='5245d645e847f90bb708da74bc020ae078c28489690756419685c04f56b4e3bb'
+readonly BINARY_SHA256_DARWIN_AMD64='9e550c4cc3bdb8a6f3525bbaaf97624f517d1e37e0d5c76a439988483a5b27a6'
+readonly ARCHIVE_SHA256_DARWIN_ARM64='73e8967b0fc08e17bce4263ca56ebc394822401a16497a1c4e02316c888202ab'
+readonly BINARY_SHA256_DARWIN_ARM64='813d8effd02a19572a8d75aef29fc073101404ca535b2496be86f21827c7684d'
 readonly RELEASE_BASE_URL='https://github.com/SagerNet/sing-box/releases/download/v1.13.14'
 readonly LOG_TAG='[multi-chain-client]'
 readonly AUTO_GROUP_NAME='Exit-Relay-auto'
@@ -69,7 +76,7 @@ usage() {
 
 作用:
   verify        从本机对每条链的入口各做一次真实 Reality 握手 + 出口 IP 三端点仲裁（至少 2 个端点成功且都等于
-                EXPECTED_EXIT_IPV4）；到该入口的路由经 utun（本机 Clash TUN 开着）时该链标 skipped。
+                EXPECTED_EXIT_IPV4）；到该入口的路由经 TUN（本机代理的 TUN 模式开着）时该链标 skipped。
   render        聚合各链 node.txt：nodes.txt（每链一行 vless URI，原文）、clash-snippet.yaml（proxies + 自动组，
                 供 Clash Verge 手工 merge）、每链一张二维码（iPhone Shadowrocket，放临时私有目录）。
 
@@ -330,9 +337,13 @@ parse_args() {
 # ---------- 本地依赖与配置 ----------
 
 require_local_dependencies() {
-  local command_name
-  [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]] || die 1 '控制端只支持 macOS arm64'
-  for command_name in route nc curl openssl tar git awk sed grep sort tr head tail mktemp stat cut cat date sleep uname kill dirname basename id chmod mkdir rm cp mv wc; do
+  local command_name platform_commands
+  case "$(uname -s)" in
+    Darwin) platform_commands='route nc' ;;
+    Linux) platform_commands='ip timeout' ;;
+    *) die 1 "控制端只支持 macOS 与 Linux（当前：$(uname -s)）" ;;
+  esac
+  for command_name in ${platform_commands} curl openssl tar git awk sed grep sort tr head tail mktemp stat cut cat date sleep uname kill dirname basename id chmod mkdir rm cp mv wc; do
     command -v "${command_name}" >/dev/null 2>&1 || die 1 "本机缺少依赖：${command_name}"
   done
   command -v shasum >/dev/null 2>&1 || command -v openssl >/dev/null 2>&1 || die 1 '本机缺少 SHA-256 工具'
@@ -533,35 +544,74 @@ EOF
   chmod 600 "${output}"
 }
 
-# 与 setup_chain.sh verified_archive_path readonly 语义（:1472 起）同步：按链顺序找第一个 600 且哈希相等的 chain cache，
-# 都没有才下载到本脚本临时目录，绝不写 cache。
-prepare_darwin_binary() {
-  local index cache_path archive_path extract_root version_output
+# 以下 4 个平台函数与 setup_chain.sh 的 local_platform / route_interface / interface_is_tunnel / tcp_probe 同步。
+local_platform() {
+  local os arch
+  case "$(uname -s)" in Darwin) os=darwin ;; Linux) os=linux ;; *) return 0 ;; esac
+  case "$(uname -m)" in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=amd64 ;; *) return 0 ;; esac
+  printf '%s-%s\n' "${os}" "${arch}"
+}
+
+route_interface() {
+  if [[ "$(uname -s)" == Darwin ]]; then
+    route -n get "$1" 2>/dev/null | awk '/interface:/{print $2; exit}'
+  else
+    ip route get "$1" 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}'
+  fi
+}
+
+interface_is_tunnel() {
+  case "$1" in utun*|tun*|wg*) return 0 ;; esac
+  [[ "$(uname -s)" == Linux && -e "/sys/class/net/$1/tun_flags" ]]
+}
+
+tcp_probe() {
+  if [[ "$(uname -s)" == Darwin ]]; then
+    nc -4 -n -z -G "$3" "$1" "$2" >/dev/null 2>&1
+  else
+    timeout "$3" bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$1" "$2" >/dev/null 2>&1
+  fi
+}
+
+# 准备本机平台的官方 sing-box：按链顺序找第一个 600 且哈希相等的 chain cache，都没有才下载到本脚本临时目录，绝不写 cache。
+# verify 必须在本机做真实握手，本机平台没有官方包时直接失败（与 setup_chain.sh 部署时可跳过本机 smoke 不同）。
+prepare_local_binary() {
+  local platform archive archive_sha binary_sha index cache_path archive_path extract_root version_output
+  platform="$(local_platform)"
+  case "${platform}" in
+    darwin-arm64) archive_sha="${ARCHIVE_SHA256_DARWIN_ARM64}"; binary_sha="${BINARY_SHA256_DARWIN_ARM64}" ;;
+    darwin-amd64) archive_sha="${ARCHIVE_SHA256_DARWIN_AMD64}"; binary_sha="${BINARY_SHA256_DARWIN_AMD64}" ;;
+    linux-amd64) archive_sha="${ARCHIVE_SHA256_LINUX_AMD64}"; binary_sha="${BINARY_SHA256_LINUX_AMD64}" ;;
+    linux-arm64) archive_sha="${ARCHIVE_SHA256_LINUX_ARM64}"; binary_sha="${BINARY_SHA256_LINUX_ARM64}" ;;
+    *) die 1 "本机平台（$(uname -s) $(uname -m)）没有 sing-box 官方包，无法做本机握手验证" ;;
+  esac
+  archive="sing-box-${SING_BOX_VERSION}-${platform}.tar.gz"
   archive_path=''
   index=1
   while (( index <= CHAIN_COUNT )); do
-    cache_path="${CACHE_HOME}/ownexit/chains/$(chain_field "${index}" 1)/downloads/${DARWIN_ARCHIVE}"
+    cache_path="${CACHE_HOME}/ownexit/chains/$(chain_field "${index}" 1)/downloads/${archive}"
     if [[ -f "${cache_path}" && ! -L "${cache_path}" ]] && require_secure_user_file "${cache_path}" 600 \
-      && [[ "$(sha256_file "${cache_path}")" == "${DARWIN_ARCHIVE_SHA256}" ]]; then
+      && [[ "$(sha256_file "${cache_path}")" == "${archive_sha}" ]]; then
       archive_path="${cache_path}"
       break
     fi
     index="$((index + 1))"
   done
   if [[ -z "${archive_path}" ]]; then
-    archive_path="${OP_TMP}/${DARWIN_ARCHIVE}"
-    log_warn '各链缓存里都没有可用的 Darwin sing-box 资产，从官方地址下载到临时目录（国内直连 GitHub 可能很慢）'
-    curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 --max-time 600 "${RELEASE_BASE_URL}/${DARWIN_ARCHIVE}" -o "${archive_path}" || die 1 '下载 Darwin sing-box 资产失败'
-    [[ "$(sha256_file "${archive_path}")" == "${DARWIN_ARCHIVE_SHA256}" ]] || die 1 'Darwin sing-box 资产摘要不符'
+    archive_path="${OP_TMP}/${archive}"
+    log_warn "各链缓存里都没有本机平台（${platform}）的 sing-box 官方包，从官方地址下载到临时目录（国内直连 GitHub 可能很慢）"
+    curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 --max-time 600 "${RELEASE_BASE_URL}/${archive}" -o "${archive_path}" || die 1 "下载 sing-box 官方包失败：${archive}"
+    [[ "$(sha256_file "${archive_path}")" == "${archive_sha}" ]] || die 1 "sing-box 官方包摘要不符：${archive}"
   fi
   extract_root="${OP_TMP}/assets"
   mkdir "${extract_root}"
   tar -xzf "${archive_path}" -C "${extract_root}"
-  DARWIN_BINARY_PATH="${extract_root}/sing-box-${SING_BOX_VERSION}-darwin-arm64/sing-box"
-  [[ -f "${DARWIN_BINARY_PATH}" && ! -L "${DARWIN_BINARY_PATH}" ]] || die 1 'Darwin 官方包布局异常'
+  DARWIN_BINARY_PATH="${extract_root}/sing-box-${SING_BOX_VERSION}-${platform}/sing-box"
+  [[ -f "${DARWIN_BINARY_PATH}" && ! -L "${DARWIN_BINARY_PATH}" ]] || die 1 "官方包布局异常：${platform}"
+  [[ "$(sha256_file "${DARWIN_BINARY_PATH}")" == "${binary_sha}" ]] || die 1 "binary 摘要不符：${platform}"
   chmod 700 "${DARWIN_BINARY_PATH}"
   version_output="$("${DARWIN_BINARY_PATH}" version | awk '/^sing-box version / {print $3; exit}')"
-  [[ "${version_output}" == "${SING_BOX_VERSION}" ]] || die 1 'Darwin binary 版本不符'
+  [[ "${version_output}" == "${SING_BOX_VERSION}" ]] || die 1 '本机 binary 版本不符'
 }
 
 # 与 setup_chain.sh choose_local_port同步。
@@ -571,7 +621,7 @@ choose_local_port() {
   while (( attempt < 200 )); do
     hex="$(openssl rand -hex 2)"
     candidate="$((20000 + (16#${hex} % 40000)))"
-    if ! nc -4 -n -z -G 1 127.0.0.1 "${candidate}" >/dev/null 2>&1; then
+    if ! tcp_probe 127.0.0.1 "${candidate}" 1; then
       printf '%s\n' "${candidate}"
       return 0
     fi
@@ -580,15 +630,15 @@ choose_local_port() {
   return 1
 }
 
-# 与 setup_chain.sh smoke_from_mac（:3681 起）同步的 Mac 侧 smoke，差异：逐链分类返回而不是 die；
+# 与 setup_chain.sh smoke_from_mac 同步的本机侧 smoke，差异：逐链分类返回而不是 die；
 # 临时进程 pid 写进 TEMP_PID_FILE 供 EXIT trap 收尾（本函数在子 shell 里跑，改变量传不回父进程），不接入 chain 的 fifo gate / local-process 登记。
 verify_one() {
   local index host interface local_port config log pid started success timeouts mismatch endpoint result rc
   index="$1"
   host="$(chain_field "${index}" 2)"
-  interface="$(route -n get "${host}" 2>/dev/null | awk '/interface:/{print $2; exit}')"
+  interface="$(route_interface "${host}")"
   [[ -n "${interface}" ]] || { printf 'error|0\n'; return 0; }
-  if [[ "${interface}" == utun* ]]; then
+  if interface_is_tunnel "${interface}"; then
     printf 'skipped|0\n'
     return 0
   fi
@@ -603,7 +653,7 @@ verify_one() {
   printf '%s\n' "${pid}" >> "${TEMP_PID_FILE}"
   started=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50; do
-    if nc -4 -n -z -G 1 127.0.0.1 "${local_port}" >/dev/null 2>&1; then
+    if tcp_probe 127.0.0.1 "${local_port}" 1; then
       started=1
       break
     fi
@@ -651,7 +701,7 @@ cmd_verify() {
   local index outcome result endpoints started_at elapsed unhealthy skipped
   unhealthy=0
   skipped=0
-  prepare_darwin_binary
+  prepare_local_binary
   index=1
   while (( index <= CHAIN_COUNT )); do
     started_at="$(date '+%s')"
@@ -669,9 +719,9 @@ cmd_verify() {
     index="$((index + 1))"
   done
   if (( skipped == CHAIN_COUNT )); then
-    die 5 'Mac 到全部链入口的路由都经过 utun（Clash TUN 开着），本次未验证任何链；关闭 TUN 后重跑 verify'
+    die 5 '本机到全部链入口的路由都经过 TUN（代理软件的 TUN 模式开着），本次未验证任何链；关闭 TUN 后重跑 verify'
   fi
-  (( skipped == 0 )) || log_warn "${skipped} 条链因路由经 utun 未验证（skipped 不计入失败，但也不算通过）"
+  (( skipped == 0 )) || log_warn "${skipped} 条链因路由经 TUN 未验证（skipped 不计入失败，但也不算通过）"
   (( unhealthy == 0 )) || die 5 "${unhealthy} 条链不健康（见上方逐行结果）"
   log_info "verify 通过；链 ${CHAIN_COUNT} 条（skipped ${skipped}）"
 }

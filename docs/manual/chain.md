@@ -8,12 +8,12 @@
 
 | 需要 | 要求 |
 | ---- | ---- |
-| 控制端 | Apple 芯片的 Mac；本仓库用 `git clone` 下载 |
-| 中转机 | Linux amd64，root 能用密码 SSH 登录，已安装 `systemd-socket-proxyd`；选离客户端近、到出口机线路好的机器 |
-| 出口机 | Linux amd64，root 能用密码 SSH 登录，独享公网 IPv4 |
+| 控制端 | macOS 或 Linux（含 WSL）；本仓库用 `git clone` 下载 |
+| 中转机 | Linux amd64 或 arm64（与出口机相同），root 能用密码 SSH 登录，已安装 `systemd-socket-proxyd`；选离客户端近、到出口机线路好的机器 |
+| 出口机 | Linux amd64 或 arm64（与中转机相同），root 能用密码 SSH 登录，独享公网 IPv4 |
 | 网络 | 出口机的安全组 / 防火墙允许中转机访问；两台机器的 nft 规则集为空、UFW 为 inactive |
 
-出口机本机不能有防火墙规则，所以“只允许中转机连出口机”只能靠服务商在机器外提供的安全组。没有这种安全组的普通 VPS 也能用（默认 `EXIT_SOURCE_FILTER=none`），只是出口机的 Reality 端口别人也能连上，没有凭据无法使用；有安全组并已限定只放行中转机时，`init` 加 `--exit-source-filter provider`，部署会严格检查这一点。
+“只允许中转机连出口机”默认由本项目负责：部署时在出口机加一张只放行中转机的 nft 表（`EXIT_SOURCE_FILTER=managed`），rollback 时删除。服务商已有安全组并限定只放行中转机时，可以用 `--exit-source-filter provider`；完全不想限制用 `none`（没有凭据仍无法使用）。
 
 可选：中转机上已经在跑 sing-box 也没关系，脚本会识别并保护它。
 
@@ -29,7 +29,7 @@ chain/setup_chain.sh init --relay 203.0.113.10 --exit 203.0.113.20
 2. 给出口机配免密：问一次出口机的 root 密码。
 3. 在出口机上探测公网 IP，打印出来请你确认（`y`）。
 4. 检查中转机上有没有 sing-box，自动填好对应的配置项。
-5. 生成 `~/.config/ownexit/chains/main.env`（权限 600），并打印下一步命令。出口机白名单设置默认填 `none`（见第 1 节）。
+5. 生成 `~/.config/ownexit/chains/main.env`（权限 600），并打印下一步命令。出口机白名单默认填 `managed`（见第 1 节）。
 
 SSH 端口不是 22 时加 `--relay-port` / `--exit-port`。想部署多条链，用 `--id` 给每条链起不同的名字。
 
@@ -42,7 +42,7 @@ chain/setup_chain.sh --id main preflight   # 可选：先只读检查一遍
 chain/setup_chain.sh --id main deploy
 ```
 
-`deploy` 会下载固定版本的 sing-box（校验 SHA256）、先部署出口机再部署中转机，最后从三个层面验证出口 IP。任何一步失败都会按事务清理，不留半套配置。
+`deploy` 让两台服务器自己下载固定版本的 sing-box（校验 SHA256，失败才由本机上传），先部署出口机再部署中转机，最后从三个层面验证出口 IP。任何一步失败都会按事务清理，不留半套配置；网络中途断开时，再跑一次 `deploy` 或 `rollback` 都会按事务记录收敛。
 
 成功后客户端节点链接在 `~/.local/state/ownexit/chains/main/client/node.txt`（含凭据，权限 600）。
 
@@ -90,4 +90,6 @@ chain/multi_chain_client.sh --chains main,backup render
 | `init` 报“中转机上的 sing-box 状态不完整” | 让既有 sing-box 完整运行（服务、配置、进程都在），或彻底移除，再重跑 |
 | `init` 报“配置已存在” | 已经有同名的链；换一个 `--id`，或确认旧链不再需要（先 rollback）后删除旧配置文件 |
 | `preflight` 报防火墙或 `sockets.target.wants` 问题 | 按报错里给出的命令处理；脚本不会替你改防火墙或创建 systemd 标准目录 |
-| 操作中途 SSH 断开、`verify` 报 drift | 本机 TUN 可能接管了到中转机的 SSH；关闭 TUN 后重跑 `verify` |
+| 操作中途 SSH 断开、`verify` 报 drift | 本机 TUN 可能接管了到中转机的 SSH；关闭 TUN（或让中转机、出口机的 IP 走直连）后重跑 |
+| 报“配置目录身份或权限不安全” | 配置 / 状态目录的某一级上级目录可被同组或其他用户写入（如权限 775）；换到权限为 755 / 700 的目录下 |
+| 报“中转机与出口机的 CPU 架构必须相同” | 两台机器一台 amd64、一台 arm64，暂不支持 |
