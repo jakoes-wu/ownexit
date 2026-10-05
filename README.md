@@ -43,6 +43,33 @@ phone / laptop ──VLESS-Reality──▶ relay (systemd-socket-proxyd) ──
 
 Everything runs on your laptop and talks to the servers over SSH. Configuration, keys and state stay on your laptop, outside this repository.
 
+## Prerequisites
+
+**Servers.** One VPS for direct, two for relay, running Debian 12 or Ubuntu 22.04 and reachable as root over SSH with a password (used once). Never bought a VPS? Follow the step-by-step guide: [docs/manual/vps.en.md](docs/manual/vps.en.md) — choosing, ordering, installing the OS, firewalls.
+
+**Your computer.**
+
+| | Direct | Relay |
+| ---- | ---- | ---- |
+| Operating system | macOS (Linux untested) | macOS or Linux (WSL counts as Linux) |
+| Needed | Python 3.8+ with `pipx`, `ssh`, `curl`, `openssl`, `expect` | same |
+| Optional | — | `qrencode`, for QR codes in `ownexit multi render` |
+
+Install what is missing:
+
+```sh
+# macOS (with Homebrew, https://brew.sh); ssh, curl and openssl come with macOS
+brew install pipx expect
+pipx ensurepath            # then open a new terminal
+
+# Debian / Ubuntu / WSL
+sudo apt update
+sudo apt install -y pipx expect openssh-client curl openssl
+pipx ensurepath            # then open a new terminal
+```
+
+Windows itself is not supported; use WSL. If your computer runs a proxy in TUN mode (Clash and similar), turn it off while deploying — see [Supported platforms](#supported-platforms).
+
 ## Install
 
 ```sh
@@ -61,22 +88,12 @@ ownexit --help
 | `ownexit multi` | `chain/multi_chain_client.sh` |
 
 ```sh
+# needs git
 git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 ./direct/setup_direct.sh --host 203.0.113.7
 ```
 
 When run from a clone, the chain scripts additionally refuse configuration files that live inside the clone, so real IPs and keys cannot be committed by accident.
-
-## What you need
-
-| | Direct | Relay |
-| ---- | ---- | ---- |
-| Your computer | macOS (Linux untested) | macOS or Linux (WSL counts as Linux) |
-| Servers | 1 × Debian / Ubuntu VPS | 2 × Linux, both amd64 or both arm64 (relay + exit) |
-| Login | root password over SSH, used once | same, for each server |
-| Tools | `pipx` (or `git` for a clone), `ssh`, `curl`, `openssl`, `expect` (`brew install expect`) | same |
-
-The first run asks for each server's root password (not echoed); after that everything uses a dedicated SSH key in `~/.ssh/ownexit/`.
 
 ## Quick start: direct
 

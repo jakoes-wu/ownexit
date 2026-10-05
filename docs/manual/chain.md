@@ -8,12 +8,14 @@
 
 | 需要 | 要求 |
 | ---- | ---- |
-| 控制端 | macOS 或 Linux（含 WSL）；本仓库用 `git clone` 下载 |
+| 控制端 | macOS 或 Linux（含 WSL）；`pipx install ownexit` 安装，或 `git clone` 本仓库 |
 | 中转机 | Linux amd64 或 arm64（与出口机相同），root 能用密码 SSH 登录，已安装 `systemd-socket-proxyd`；选离客户端近、到出口机线路好的机器 |
 | 出口机 | Linux amd64 或 arm64（与中转机相同），root 能用密码 SSH 登录，独享公网 IPv4 |
 | 网络 | 出口机的安全组 / 防火墙允许中转机访问；两台机器的 nft 规则集为空、UFW 为 inactive |
 
 “只允许中转机连出口机”默认由本项目负责：部署时在出口机加一张只放行中转机的 nft 表（`EXIT_SOURCE_FILTER=managed`），rollback 时删除。服务商已有安全组并限定只放行中转机时，可以用 `--exit-source-filter provider`；完全不想限制用 `none`（没有凭据仍无法使用）。
+
+还没有服务器时，选购、下单、装系统和防火墙设置见 [VPS 选购与系统安装手册](vps.md)。
 
 可选：中转机上已经在跑 sing-box 也没关系，脚本会识别并保护它。
 

@@ -36,7 +36,7 @@ cat ~/.local/state/ownexit/chains/main/client/node.txt
 
 ## 前置条件
 
-1. 控制端是 macOS（Apple 芯片 / Intel，系统自带 `/bin/bash` 3.2 即可）或 Linux（amd64 / arm64，含 WSL）；必须在本仓库的 git 工作区里运行（`git` 用来确认真实配置不在仓库内）。配置与状态目录的每一级上级目录都不能被同组或其他用户写入，否则会被安全检查拒绝。
+1. 控制端是 macOS（Apple 芯片 / Intel，系统自带 `/bin/bash` 3.2 即可）或 Linux（amd64 / arm64，含 WSL）；从 git clone 运行时需要 `git`（用来确认真实配置不在仓库内），pipx 安装的副本不需要。配置与状态目录的每一级上级目录都不能被同组或其他用户写入，否则会被安全检查拒绝。
 2. 两台 Linux 服务器，同为 amd64 或同为 arm64（不支持两端架构不同），root 能用密码 SSH 登录（只在 `init` 时用一次）。
 3. 出口机的云厂商安全组 / 防火墙允许中转机访问；脚本不调用任何云厂商 API。“只允许中转机连出口机的 Reality 端口”有三种做法，由 `EXIT_SOURCE_FILTER` 决定：默认 `managed`，部署时由本项目在出口机加一张只放行中转机出站地址的 nft 表；`provider`，由服务商在机器外的安全组负责；`none`，不限制（没有凭据仍无法使用）。`managed` 与 `provider` 部署时都会严格检查本机直连连不上。
 4. 两台机器除本项目的 `table inet ownexit_*` 白名单表外没有任何 nft 表；装了 UFW 的话须为 inactive；legacy iptables 不得有活动规则。
