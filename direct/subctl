@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# subctl —— 直连出口 VPS 的免密登录与订阅服务开关（薄封装，复用 connect_to.sh 生成的专用密钥）。
+#
+# 前置:
+#   - 已用 setup_direct.sh 部署过（它会配好免密并记住这台 VPS）；本脚本只用密钥、不碰密码。
+#   - 目标来源：--host 参数 > ${XDG_CONFIG_HOME:-~/.config}/ownexit/direct/ 下唯一的目标配置（见 target_lib.sh）。
+#   - 不应被 source。
+
+set -euo pipefail
+
+HOST=""
+SSH_USER="root"
+SSH_PORT="22"
+SUB_SERVICE="ownexit-subscription"
+
+usage() {
+  cat <<'EOF'
+subctl —— 直连出口 VPS 的免密登录与订阅服务开关
+
+用法:
+  subctl [--host <ip>] [--port <port>] [--user <user>] [子命令]
+
+子命令:
+  login        免密登录 VPS（交互式 SSH，默认）
+  start        启动订阅服务（给新设备导入订阅时临时打开；用完记得 stop）
+  stop         停止订阅服务（平时应保持关闭，缩小公网暴露）
+  status       查看 sing-box 与订阅服务状态
+  help         显示本帮助（同 -h / --help）
+
+示例:
+  subctl status                         # 使用上次 setup_direct.sh 记住的 VPS
+  subctl start
+  subctl --host 203.0.113.7 stop        # 记住了多台 VPS 时指定其中一台
+
+退出码: 0 成功；1 远端操作失败或缺少密钥；2 参数错误或无法确定目标。
+EOF
+}
+
+die() { echo "[!] $*" >&2; exit 1; }
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=target_lib.sh
+. "${SCRIPT_DIR}/target_lib.sh"
+
+CMD=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --host)    HOST="${2:?--host 需要一个参数}"; shift 2 ;;
+    --host=*)  HOST="${1#*=}"; shift ;;
+    --port)    SSH_PORT="${2:?--port 需要一个参数}"; shift 2 ;;
+    --port=*)  SSH_PORT="${1#*=}"; shift ;;
+    --user)    SSH_USER="${2:?--user 需要一个参数}"; shift 2 ;;
+    --user=*)  SSH_USER="${1#*=}"; shift ;;
+    help|-h|--help) usage; exit 0 ;;
+    login|start|stop|status)
+      [[ -z "${CMD}" ]] || die_usage "只能给一个子命令（已有 ${CMD}）"
+      CMD="$1"; shift ;;
+    *) die_usage "未知参数或子命令: $1（可用: login / start / stop / status / help）" ;;
+  esac
+done
+CMD="${CMD:-login}"
+
+# subctl 不负责首次部署：没有记住的目标时不交互提问，直接提示先跑 setup_direct.sh。
+# shellcheck disable=SC2034  # 由 target_lib.sh 的 resolve_target 读取
+TARGET_NO_PROMPT_HINT="还没有记住任何 VPS，请先运行 setup_direct.sh --host <ip> 完成部署，或给 subctl 加 --host"
+resolve_target
+
+# 密钥路径推导必须与 connect_to.sh / setup_direct.sh 完全一致
+SAFE_NAME="$(target_safe_name "${SSH_USER}" "${HOST}" "${SSH_PORT}")"
+KEY="${HOME}/.ssh/ownexit/id_ed25519_${SAFE_NAME}"
+[[ -f "${KEY}" ]] || die "未找到密钥 ${KEY}，请先运行 setup_direct.sh --host ${HOST} 完成部署"
+
+# SetEnv 强制给远端发 VPS 上存在的 locale，覆盖本机转发来的 zh_CN.UTF-8，
+# 避免远端 bash setlocale 失败刷 "cannot change locale" 警告（VPS 未生成 zh_CN）
+SSH_BASE=(-i "${KEY}" -p "${SSH_PORT}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=12 -o SetEnv=LC_ALL=C.UTF-8)
+TGT="${SSH_USER}@${HOST}"
+
+# 非交互远程命令额外加 BatchMode，避免密钥失效时挂在密码提示上
+rcmd() { ssh "${SSH_BASE[@]}" -o BatchMode=yes "${TGT}" "$@"; }
+
+case "${CMD}" in
+  login)
+    exec ssh "${SSH_BASE[@]}" "${TGT}"
+    ;;
+  start)
+    rcmd "systemctl start '${SUB_SERVICE}'"
+    echo "[+] 已启动 ${SUB_SERVICE}（临时开；客户端更新完订阅后执行 subctl stop 关回）"
+    ;;
+  stop)
+    rcmd "systemctl stop '${SUB_SERVICE}'"
+    echo "[+] 已停止 ${SUB_SERVICE}"
+    ;;
+  status)
+    rcmd "bash -s" <<REMOTE
+echo -n 'sing-box 代理      : '; systemctl is-active sing-box 2>/dev/null || true
+echo -n '订阅服务（运行）    : '; systemctl is-active ${SUB_SERVICE} 2>/dev/null || true
+echo -n '订阅服务（开机自启）: '; systemctl is-enabled ${SUB_SERVICE} 2>/dev/null || true
+REMOTE
+    ;;
+esac

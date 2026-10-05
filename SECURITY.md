@@ -1,0 +1,18 @@
+# 安全策略
+
+## 支持的版本
+
+只有最新版本会收到安全修复。
+
+## 报告漏洞
+
+请通过 [GitHub Security Advisories](https://github.com/jakoes-wu/ownexit/security/advisories/new) 私下报告，不要开公开 issue。请附上版本、控制端与服务器的系统，以及复现步骤（记得先遮盖 IP、UUID、节点链接等信息）。一周内会回复。
+
+## 设计上的安全边界
+
+- 真实配置、密钥和状态只存放在本机仓库外（`~/.config/ownexit/`、`~/.local/state/ownexit/`、`~/.ssh/ownexit/`），权限 600 / 700；链式脚本会拒绝读取位于仓库内的配置。
+- 密码只在第一次配免密时交互输入（或经环境变量传入），不写盘、不打印，也没有 `--password` 命令行选项。
+- 直连的订阅服务是明文 HTTP、靠随机路径保护，建议所有设备导入后用 `direct/subctl stop` 关闭。
+- 链式的中转机只运行 `systemd-socket-proxyd` 做 TCP 透传，不保存任何密钥；Reality 私钥只在出口机的 600 配置里。
+- 链式的中转端口没有鉴权，任何人都能连到出口机的 Reality 入站（但没有凭据无法使用）；发现陌生来源可用 `ban` 拉黑。
+- sing-box 由固定版本的官方发布包安装并校验 SHA256（链式），或由第三方脚本 233boy/sing-box 安装（直连）。

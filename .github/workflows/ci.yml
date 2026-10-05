@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax
+        run: |
+          for f in direct/*.sh direct/subctl chain/*.sh scripts/*.sh; do bash -n "$f"; done
+      - name: ShellCheck
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          shellcheck -S warning direct/*.sh direct/subctl chain/*.sh scripts/*.sh
+      - name: Privacy scan
+        run: scripts/check_public.sh
+      - name: Help output
+        # 每个入口的 --help 都要退出 0，未知参数都要非 0 退出。
+        run: |
+          for f in direct/setup_direct.sh direct/connect_to.sh direct/sync_to_vps.sh direct/subctl \
+                   chain/setup_chain.sh chain/multi_chain_client.sh scripts/check_public.sh; do
+            "$f" --help > /dev/null
+            if "$f" --no-such-option < /dev/null > /dev/null 2>&1; then echo "$f accepted an unknown option"; exit 1; fi
+          done
+
+  bash32:
+    # 链式脚本承诺能在 macOS 自带的 bash 3.2 上运行。
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse with /bin/bash
+        run: |
+          /bin/bash --version | head -1
+          for f in chain/*.sh direct/*.sh direct/subctl; do /bin/bash -n "$f"; done
