@@ -36,10 +36,10 @@ cat ~/.local/state/ownexit/chains/main/client/node.txt
 
 ## 前置条件
 
-1. 控制端是 Apple 芯片的 Mac，系统自带 `/bin/bash` 3.2 即可；必须在本仓库的 git 工作区里运行（`git` 用来确认真实配置不在仓库内）。
-2. 两台 Linux amd64 服务器，root 能用密码 SSH 登录（只在 `init` 时用一次）。
-3. 出口机的云厂商安全组 / 防火墙允许中转机访问；脚本不调用任何云厂商 API。出口机本机防火墙必须为空（见下一条），所以“只允许中转来源”只能靠服务商在机器外提供的安全组或白名单：有就用 `init --exit-source-filter provider`，部署时会严格检查本机直连连不上；没有就用默认的 `none`，出口机的 Reality 端口别人也能连上，但没有凭据无法使用。
-4. 两台机器的 nft 规则集为空；装了 UFW 的话须为 inactive；legacy iptables 不得有活动规则。
+1. 控制端是 macOS（Apple 芯片 / Intel，系统自带 `/bin/bash` 3.2 即可）或 Linux（amd64 / arm64，含 WSL）；必须在本仓库的 git 工作区里运行（`git` 用来确认真实配置不在仓库内）。配置与状态目录的每一级上级目录都不能被同组或其他用户写入，否则会被安全检查拒绝。
+2. 两台 Linux 服务器，同为 amd64 或同为 arm64（不支持两端架构不同），root 能用密码 SSH 登录（只在 `init` 时用一次）。
+3. 出口机的云厂商安全组 / 防火墙允许中转机访问；脚本不调用任何云厂商 API。“只允许中转机连出口机的 Reality 端口”有三种做法，由 `EXIT_SOURCE_FILTER` 决定：默认 `managed`，部署时由本项目在出口机加一张只放行中转机出站地址的 nft 表；`provider`，由服务商在机器外的安全组负责；`none`，不限制（没有凭据仍无法使用）。`managed` 与 `provider` 部署时都会严格检查本机直连连不上。
+4. 两台机器除本项目的 `table inet ownexit_*` 白名单表外没有任何 nft 表；装了 UFW 的话须为 inactive；legacy iptables 不得有活动规则。
 5. 中转机已安装 `systemd-socket-proxyd`；两端具备 `preflight` 列出的系统工具。全新机器还要确认 `/etc/systemd/system/sockets.target.wants` 存在（root:root 755），缺失时 `preflight` 会给出创建命令，脚本不代建 systemd 标准目录。
 6. 中转机上已经在跑 sing-box 也可以：`init` 会自动识别并填 `RELAY_COHOSTS_SINGBOX=yes`，部署时保护既有 sing-box 不受影响；状态不完整（只有配置没有进程之类）时 `init` 会拒绝。
 
@@ -68,14 +68,14 @@ cat ~/.local/state/ownexit/chains/main/client/node.txt
 | `EXPECTED_EXIT_IPV4` | 出口验证时唯一允许返回的 IPv4 | 在出口机上探测，终端里请你确认 |
 | `REALITY_SERVER_NAME` | Reality 伪装域名（ASCII FQDN），没有自动 fallback | `--sni`，默认 `www.amazon.com` |
 | `RELAY_COHOSTS_SINGBOX` | `yes` 保护中转机上既有的 sing-box；`no` 要求中转机上没有 sing-box | 登录中转机自动识别 |
-| `EXIT_SOURCE_FILTER` | `provider`：服务商安全组只放行中转来源，部署 / verify 时本机能直连出口机 Reality 端口即失败；`none`：没有外部白名单，能直连只记 WARN | `--exit-source-filter`，默认 `none` |
+| `EXIT_SOURCE_FILTER` | `managed`：本项目在出口机加 nft 白名单；`provider`：服务商安全组只放行中转来源；两者部署 / verify 时本机能直连出口机 Reality 端口即失败。`none`：不限制，能直连只记 WARN | `--exit-source-filter`，默认 `managed` |
 
 配置文件必须由当前用户拥有、权限 600、不是符号链接，并且位于 git 工作区之外；私钥要求 group / other 没有任何权限。
 
 ## 命令
 
 ```bash
-chain/setup_chain.sh init --relay <ip> --exit <ip> [--id <名字>] [--relay-port N] [--exit-port N] [--sni <域名>] [--exit-source-filter provider|none]
+chain/setup_chain.sh init --relay <ip> --exit <ip> [--id <名字>] [--relay-port N] [--exit-port N] [--sni <域名>] [--exit-source-filter managed|provider|none]
 chain/setup_chain.sh --id main preflight
 chain/setup_chain.sh --id main deploy
 chain/setup_chain.sh --id main verify
@@ -150,6 +150,12 @@ chain/setup_chain.sh --id main rehost-exit
 | `${XDG_STATE_HOME:-$HOME/.local/state}/ownexit/multi-chain-client/<name>/` | `multi_chain_client.sh render` 的多链聚合产物，与 `chains/<id>/` 互不重叠 |
 | `~/.ssh/ownexit/` | `init`（经 `direct/connect_to.sh`）为每台机器生成的专用密钥 |
 
+## 远端下载与本机验证
+
+- 远端的固定版本 sing-box 由服务器自己从 GitHub 下载并核对 SHA256（4 个平台包的归档与 binary 哈希写死在脚本顶部）；远端下载失败才在本机下载后上传。日志里 `binary 来源=remote-download|local-upload` 说明走了哪条路。
+- 本机只准备本机平台的官方包，用来做“本机层出口 smoke”。本机平台没有官方包、或缓存缺失且下载失败时，跳过这一层并 WARN，不影响部署；`multi_chain_client.sh verify` 则必须有本机包。
+- 状态文件沿用 v0.1.0 的字段，v0.1.0 部署的链可以直接用新版本管理。
+
 ## 远端资源
 
 中转机专属资源：
@@ -164,7 +170,7 @@ chain/setup_chain.sh --id main rehost-exit
 /etc/systemd/system/ownexit-chain-relay-<id>.service.d/50-ownexit-chain-blacklist.conf
 ```
 
-出口机专属资源：
+出口机专属资源（`managed` 时还有一张随 `ownexit-chain-exit-<id>.service` 起停的 nft 表 `table inet ownexit_<id，- 换成 _>`，规则写在该 unit 的 `ExecStartPre` / `ExecStopPost` 里）：
 
 ```text
 /etc/ownexit-chain/<id>.owner.env
@@ -209,7 +215,7 @@ chain/setup_chain.sh --id main rehost-exit
 
 这个命令不走事务：每个远端步骤都用“整文件哈希守门 + 单行替换”，同时接受旧形态和已迁移形态，中途失败直接重跑同一条命令即可收敛；状态已经绑定新配置时输出 `rehost=noop` 并返回 0。退出码：0 成功或 noop；2 参数错误或其它配置键不一致；3 新 IP 不可达、缺 known_hosts 条目或不是同一台机器；5 锁、状态损坏、有未完成事务或收尾 verify 失败；1 远端迁移或本地提交失败（信息里带远端码 171–177 及含义）。
 
-注意：本机开着 Clash 一类的 TUN 模式时，发往中转机的 SSH 也可能被代理接管。relay 重启或客户端在链之间切换的瞬间，控制端 SSH 会被切断，收尾 verify 可能报 drift 或残留。此时状态已经提交，直接再跑一次 `verify` 即可；想避免的话，执行前关闭 TUN，或让中转机 IP 走直连。
+注意：本机开着 Clash 一类的 TUN 模式时，发往中转机的 SSH 也可能被代理接管，部署过程中任何一次 SSH 断开都会让命令以退出码 3 停下（只读阶段）或留下待恢复的事务（之后由下一条 deploy / rollback 按事务记录收敛）。relay 重启或客户端在链之间切换的瞬间，控制端 SSH 会被切断，收尾 verify 可能报 drift 或残留。此时状态已经提交，直接再跑一次 `verify` 即可；想避免的话，执行前关闭 TUN，或让中转机 IP 走直连。
 
 ## 多链客户端聚合（`multi_chain_client.sh`）
 

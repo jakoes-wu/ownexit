@@ -41,8 +41,8 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 
 | | 直连 | 链式 |
 | ---- | ---- | ---- |
-| 你的电脑 | macOS（Linux 未测试） | Apple 芯片的 Mac |
-| 服务器 | 1 台 Debian / Ubuntu VPS | 2 台 Linux amd64（中转机 + 出口机） |
+| 你的电脑 | macOS（Linux 未测试） | macOS 或 Linux（WSL 按 Linux 算） |
+| 服务器 | 1 台 Debian / Ubuntu VPS | 2 台 Linux，同为 amd64 或同为 arm64（中转机 + 出口机） |
 | 登录方式 | root 密码 SSH，只用一次 | 同左，每台各一次 |
 | 本机工具 | `git`、`ssh`、`curl`、`openssl`、`expect`（`brew install expect`） | 同左 |
 
@@ -82,7 +82,7 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
    chain/setup_chain.sh init --relay 203.0.113.10 --exit 203.0.113.20
    ```
 
-   给两台机器配免密（各问一次密码），探测出口 IP 并请你确认，检查中转机上是否已有 sing-box，生成 `~/.config/ownexit/chains/main.env`。这一步不改动服务器。如果服务商有安全组、已限定只允许中转机访问出口机，加 `--exit-source-filter provider`，部署会严格检查；普通 VPS 用默认值即可。
+   给两台机器配免密（各问一次密码），探测出口 IP 并请你确认，检查中转机上是否已有 sing-box，生成 `~/.config/ownexit/chains/main.env`。这一步不改动服务器。默认部署时还会在出口机加一条 nftables 规则，让它的 Reality 端口只接受中转机的连接（`--exit-source-filter managed`）；服务商安全组已经这样限制时用 `provider`，不想限制用 `none`。
 
 2. **部署**
 
@@ -90,7 +90,7 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
    chain/setup_chain.sh --id main deploy
    ```
 
-   先部署出口机、再部署中转机，整个过程是一个事务，最后从三个层面验证出口 IP；任何一步失败都会自动清理。
+   两台服务器自己从 GitHub 下载固定版本的 sing-box（失败才由你的电脑上传），先部署出口机、再部署中转机，整个过程是一个事务，最后从三个层面验证出口 IP；任何一步失败都会自动清理，网络中途断开时再跑一次 `deploy` 或 `rollback` 就会收敛。
 
 3. **导入**：节点链接在 `~/.local/state/ownexit/chains/main/client/node.txt`；也可以运行 `chain/multi_chain_client.sh --chains main render` 生成二维码和 Clash 配置片段。
 
@@ -100,20 +100,20 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 
 | | 直连 | 链式 |
 | ---- | ---- | ---- |
-| 控制端 | macOS（已测试）；Linux（未测试）；不支持 Windows，可自行尝试 WSL | 只支持 Apple 芯片的 Mac |
-| 服务器系统 | Debian、Ubuntu | 带 systemd 的 Linux；中转机需要 `systemd-socket-proxyd`；nftables 规则为空、UFW 未启用 |
-| 服务器 CPU | 取决于 233boy/sing-box（amd64、arm64） | 只支持 amd64 |
+| 控制端 | macOS（已测试）；Linux（未测试）；不支持 Windows，可自行尝试 WSL | Apple 芯片的 Mac（已测试）、Intel Mac（未测试）、Linux amd64（已在 Ubuntu 20.04 测试）、Linux arm64 与 WSL（未测试） |
+| 服务器系统 | Debian、Ubuntu | 带 systemd 的 Linux；中转机需要 `systemd-socket-proxyd`；除本项目自己的表外没有 nftables 表，UFW 未启用 |
+| 服务器 CPU | 取决于 233boy/sing-box（amd64、arm64） | amd64（已测试）或 arm64（未测试），两台须相同 |
 | 客户端 | 已测试 Clash Verge、mihomo、Shadowrocket；其它支持 VLESS-Reality 的客户端可用 `vless://` 导入 | 同左 |
 
-链式放宽平台（控制端支持 Intel Mac、Linux、WSL，服务器支持 arm64）计划在 0.2.0 实现。
+如果你的电脑开着代理的 TUN 模式（Clash 一类），部署途中到服务器的 SSH 可能被切断。运行链式命令时请关掉 TUN，或让中转机、出口机的 IP 走直连。
 
 ## 安全须知
 
 - 真实 IP、密码和密钥都不会进入本仓库。没有“编辑脚本顶部填 IP”的用法，也没有 `--password` 选项。密码交互输入（非交互场景用环境变量 `OWNEXIT_SSH_PASSWORD`），不写盘。
 - 密码输错最多可重试 3 次，每次只向服务器提交一次，不容易触发 fail2ban 一类的封禁。失败时最后一行是 `reason=bad-password`、`reason=password-disabled` 或 `reason=unreachable`。
 - 直连的订阅服务是明文 HTTP、靠随机路径保护。平时用 `subctl stop` 关闭，只在导入时打开；链接泄露时用 `setup_direct.sh --rotate-token` 换一个。
-- 中转机只运行 `systemd-socket-proxyd`；Reality 私钥只存在于出口机权限 600 的文件里。
-- 直连通过第三方脚本 233boy/sing-box 安装 sing-box；链式下载固定版本的官方 sing-box 发布包并校验 SHA-256。
+- 中转机只运行 `systemd-socket-proxyd`；Reality 私钥只存在于出口机权限 600 的文件里。默认情况下，出口机的 Reality 端口只接受中转机的连接（一张随出口服务起停的 nftables 表）。
+- 直连通过第三方脚本 233boy/sing-box 安装 sing-box；链式由每台服务器下载固定版本的官方 sing-box 发布包，并校验归档和 binary 的 SHA-256。
 
 漏洞报告方式见 [SECURITY.md](SECURITY.md)。
 

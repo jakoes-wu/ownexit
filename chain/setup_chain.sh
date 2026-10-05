@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # 出口机 + 中转主机独立链路的部署、验证、状态查询与回滚入口。
 # 前置：
-#   - 仅在 macOS arm64 上运行，系统 /bin/bash 3.2 及以上。
-#   - 两台 Linux amd64 主机均已配置 root 免密 SSH，ed25519 host key 已进入 known_hosts。
+#   - 控制端：macOS（Apple 芯片 / Intel，系统 /bin/bash 3.2 即可）或 Linux（amd64 / arm64，含 WSL）。
+#   - 两台 Linux 主机（同为 amd64 或同为 arm64）均已配置 root 免密 SSH，ed25519 host key 已进入 known_hosts（init 会配好）。
 #   - 出口机控制台已允许中转主机访问，配置文件位于 Git worktree 外且权限为 600。
 #   - 两台远端的依赖、防火墙与既有 sing-box 状态须通过 preflight；脚本不会自动安装软件包或改防火墙。
 #   - 连接治理命令（conns/kick/ban/unban/banlist）要求链已 deploy；kick 依赖中转内核支持 ss -K，
@@ -19,11 +19,29 @@ export LC_ALL=C
 # shellcheck disable=SC2034  # 只写不读的历史变量；迁移不改动事务代码，保留原样
 readonly SCRIPT_VERSION='1'
 readonly SING_BOX_VERSION='1.13.14'
-readonly LINUX_ARCHIVE='sing-box-1.13.14-linux-amd64.tar.gz'
-readonly DARWIN_ARCHIVE='sing-box-1.13.14-darwin-arm64.tar.gz'
-readonly LINUX_ARCHIVE_SHA256='f48703461a15476951ac4967cdad339d986f4b8096b4eb3ff0829a500502d697'
-readonly DARWIN_ARCHIVE_SHA256='73e8967b0fc08e17bce4263ca56ebc394822401a16497a1c4e02316c888202ab'
-readonly RELEASE_BASE_URL='https://github.com/SagerNet/sing-box/releases/download/v1.13.14'
+# 4 个官方包的归档与解压后 binary 的 SHA256，均已与 GitHub 发布页公布的摘要核对。
+# 远端 binary 的期望哈希直接取这里的常量，所以远端可以自己下载，本机不必再准备 Linux 包。
+readonly ARCHIVE_SHA256_LINUX_AMD64='f48703461a15476951ac4967cdad339d986f4b8096b4eb3ff0829a500502d697'
+readonly BINARY_SHA256_LINUX_AMD64='68aeab83cc4ab2659a5b92232261a20746ccdafc3b3d1e19b2d63247eec3bbf7'
+readonly ARCHIVE_SHA256_LINUX_ARM64='4742df6a4314e8ecc41736849fca6d73b8f9e91b6e8b06ee794ff17ba180579e'
+readonly BINARY_SHA256_LINUX_ARM64='85f570b96754cd7c354d28e50f66e9340b374e06b5d77ec9e15e8d04f0c87a25'
+readonly ARCHIVE_SHA256_DARWIN_AMD64='5245d645e847f90bb708da74bc020ae078c28489690756419685c04f56b4e3bb'
+readonly BINARY_SHA256_DARWIN_AMD64='9e550c4cc3bdb8a6f3525bbaaf97624f517d1e37e0d5c76a439988483a5b27a6'
+readonly ARCHIVE_SHA256_DARWIN_ARM64='73e8967b0fc08e17bce4263ca56ebc394822401a16497a1c4e02316c888202ab'
+readonly BINARY_SHA256_DARWIN_ARM64='813d8effd02a19572a8d75aef29fc073101404ca535b2496be86f21827c7684d'
+# 状态 / 事务记录的字段名沿用 v0.1.0（不升级格式，已部署的链可直接读取），但语义按平台而定：
+#   LINUX_*  = 两台远端共用架构（amd64 或 arm64，两端必须一致）的官方包；
+#   DARWIN_* = 本机做出口 smoke 用的官方包（任意本机平台）；本机拿不到包时两个哈希记为 NONE。
+# 默认值对应 v0.1.0 唯一支持的组合，真正的取值由 select_remote_arch / select_local_platform 决定。
+REMOTE_ARCH='amd64'
+LINUX_ARCHIVE='sing-box-1.13.14-linux-amd64.tar.gz'
+LINUX_ARCHIVE_SHA256="${ARCHIVE_SHA256_LINUX_AMD64}"
+LOCAL_PLATFORM=''
+DARWIN_ARCHIVE='sing-box-1.13.14-darwin-arm64.tar.gz'
+DARWIN_ARCHIVE_SHA256="${ARCHIVE_SHA256_DARWIN_ARM64}"
+# 仅供测试回退上传路径（设计文档 V4）：把下载地址指向不存在的位置，正常使用不要设置。
+RELEASE_BASE_URL="${OWNEXIT_TEST_RELEASE_BASE_URL:-https://github.com/SagerNet/sing-box/releases/download/v1.13.14}"
+readonly RELEASE_BASE_URL
 readonly REMOTE_BASE='/opt/ownexit-chain'
 readonly REMOTE_BIN='/opt/ownexit-chain/bin/sing-box-1.13.14'
 readonly REMOTE_CONFIG_DIR='/etc/ownexit-chain'
@@ -35,6 +53,10 @@ REPO_ROOT=''
 
 COMMAND='bootstrap'
 CONFIG_PATH=''
+# 远端架构是否已由状态文件锁定；锁定后现场架构必须一致（probe_remote_platform_preflight）。
+REMOTE_ARCH_LOCKED=0
+# 出口机 nft 的绝对路径，由远端预检取得；EXIT_SOURCE_FILTER=managed 时写进出口机 unit。
+EXIT_NFT_PATH=''
 # init 子命令的输入；只在 COMMAND=init 时使用。
 INIT_RELAY=''
 INIT_EXIT=''
@@ -42,7 +64,7 @@ INIT_ID='main'
 INIT_RELAY_PORT='22'
 INIT_EXIT_PORT='22'
 INIT_SNI='www.amazon.com'
-INIT_EXIT_SOURCE_FILTER='none'
+INIT_EXIT_SOURCE_FILTER='managed'
 WITH_FAIL_CLOSED=0
 # kick/ban/unban 的目标；ban/unban 经 normalize_ip_entry 规范化为 a.b.c.d/N 后才落黑名单。
 TARGET_IP=''
@@ -62,10 +84,11 @@ EXIT_SSH_KEY=''
 EXPECTED_EXIT_IPV4=''
 REALITY_SERVER_NAME=''
 RELAY_COHOSTS_SINGBOX=''
-# 出口机 Reality 端口是否由机器外的白名单（服务商安全组 / 控制台）限定只允许中转来源：
-#   provider：必须拒绝非中转来源，部署 / verify 时本机直连能连上即判失败（硬门槛）；
-#   none：普通 VPS 没有外部白名单，本机能连上只记 WARN。preflight 仍要求出口机本机防火墙为空，
-#         所以“none + 拒绝侧失败”是预期状态，不能为通过检查去给出口机加本机防火墙规则。
+# 出口机 Reality 端口如何限定只允许中转来源：
+#   managed：本项目在出口机加一张只放行中转源地址的 nft 表（随 exit service 起停，见 write_prepare_exit_script），硬门槛；
+#   provider：服务商在机器外的安全组 / 控制台白名单负责，硬门槛；
+#   none：不限制，本机能连上只记 WARN（没有凭据仍无法使用）。
+# preflight 要求出口机除 ownexit_* 白名单表外没有任何防火墙规则，所以不要为通过检查去手工加别的规则。
 EXIT_SOURCE_FILTER=''
 
 CONFIG_HOME=''
@@ -97,7 +120,6 @@ STARTED_AT=0
 
 LINUX_ARCHIVE_PATH=''
 DARWIN_ARCHIVE_PATH=''
-LINUX_BINARY_PATH=''
 DARWIN_BINARY_PATH=''
 LINUX_BINARY_SHA256=''
 DARWIN_BINARY_SHA256=''
@@ -122,7 +144,7 @@ usage() {
   cat <<EOF
 用法:
   $(basename "${SCRIPT_PATH}") init [--relay <ipv4>] [--exit <ipv4>] [--id <名字>] [--relay-port <n>] [--exit-port <n>] [--sni <域名>]
-                    [--exit-source-filter provider|none]
+                    [--exit-source-filter managed|provider|none]
   $(basename "${SCRIPT_PATH}") --id <名字> <子命令>          # 等价于 --config ~/.config/ownexit/chains/<名字>.env
   $(basename "${SCRIPT_PATH}") --config <绝对路径> preflight
   $(basename "${SCRIPT_PATH}") --config <绝对路径> deploy
@@ -161,14 +183,15 @@ usage() {
   --id <名字>           --config 的简写，与 --config 二选一。
   init 的参数：--relay / --exit 两台机器的 IPv4（不给则交互提问）；--id 配置名，默认 main；
                 --relay-port / --exit-port SSH 端口，默认 22；--sni Reality 伪装域名，默认 www.amazon.com；
-                --exit-source-filter 出口机是否有服务商白名单只放行中转（provider 时部署严格检查），默认 none。
+                --exit-source-filter 出口机 Reality 端口如何只放行中转：managed（默认，本项目加 nft 白名单）、
+                provider（服务商安全组负责）、none（不限制）；managed / provider 时部署严格检查。
   --with-fail-closed    仅可跟在 verify 后；会短暂停止本 chain 并验证新连接失败。
   <ipv4>                kick 只接受点分 IPv4；ban/unban 另接受 CIDR，且主机位必须为 0（如 198.51.100.0/24）。
   -h, --help            显示本帮助并返回 0，不读取配置、不连接远端。
 
 前置:
-  macOS arm64；Bash 3.2+；两端 root 免密 SSH；known_hosts 中已有 ed25519 host key（init 会配好这两项）；
-  出口机的安全组 / 防火墙已允许中转来源（EXIT_SOURCE_FILTER=provider 时还必须拒绝其它来源）；远端防火墙为空且所需命令已安装。
+  控制端 macOS 或 Linux（含 WSL），Bash 3.2+；两端 Linux 同为 amd64 或 arm64；root 免密 SSH；known_hosts 中已有 ed25519 host key（init 会配好这两项）；
+  出口机的安全组允许中转来源（provider 时还必须拒绝其它来源）；出口机除 ownexit_* 白名单表外没有防火墙规则；远端防火墙为空且所需命令已安装。
   连接治理命令要求链已 deploy 且无 incomplete transaction；kick 依赖中转内核 ss -K，
   ban 依赖中转 cgroup v2 + systemd IPAddressDeny=（cgroup BPF，非防火墙）。
 
@@ -238,6 +261,88 @@ elapsed_seconds() {
 
 random_hex_128() {
   openssl rand -hex 16
+}
+
+# 远端架构 → LINUX_* 三个值。amd64 / arm64 以外的取值直接失败，调用方据此拒绝部署。
+select_remote_arch() {
+  case "$1" in
+    amd64) LINUX_ARCHIVE_SHA256="${ARCHIVE_SHA256_LINUX_AMD64}"; LINUX_BINARY_SHA256="${BINARY_SHA256_LINUX_AMD64}" ;;
+    arm64) LINUX_ARCHIVE_SHA256="${ARCHIVE_SHA256_LINUX_ARM64}"; LINUX_BINARY_SHA256="${BINARY_SHA256_LINUX_ARM64}" ;;
+    *) return 1 ;;
+  esac
+  REMOTE_ARCH="$1"
+  LINUX_ARCHIVE="sing-box-${SING_BOX_VERSION}-linux-$1.tar.gz"
+}
+
+# 本机平台（darwin-arm64 / darwin-amd64 / linux-amd64 / linux-arm64），其它平台输出空串：没有对应官方包，本机 smoke 跳过。
+local_platform() {
+  local os arch
+  case "$(uname -s)" in Darwin) os=darwin ;; Linux) os=linux ;; *) return 0 ;; esac
+  case "$(uname -m)" in arm64|aarch64) arch=arm64 ;; x86_64|amd64) arch=amd64 ;; *) return 0 ;; esac
+  printf '%s-%s\n' "${os}" "${arch}"
+}
+
+# 本机平台 → DARWIN_ARCHIVE / DARWIN_ARCHIVE_SHA256（变量名沿用 v0.1.0，见文件头说明）。
+select_local_platform() {
+  LOCAL_PLATFORM="$(local_platform)"
+  case "${LOCAL_PLATFORM}" in
+    darwin-arm64) DARWIN_ARCHIVE_SHA256="${ARCHIVE_SHA256_DARWIN_ARM64}" ;;
+    darwin-amd64) DARWIN_ARCHIVE_SHA256="${ARCHIVE_SHA256_DARWIN_AMD64}" ;;
+    linux-amd64) DARWIN_ARCHIVE_SHA256="${ARCHIVE_SHA256_LINUX_AMD64}" ;;
+    linux-arm64) DARWIN_ARCHIVE_SHA256="${ARCHIVE_SHA256_LINUX_ARM64}" ;;
+    *) DARWIN_ARCHIVE_SHA256='NONE'; return 0 ;;
+  esac
+  DARWIN_ARCHIVE="sing-box-${SING_BOX_VERSION}-${LOCAL_PLATFORM}.tar.gz"
+}
+
+# 归档哈希 → 本机平台名；用于从状态文件反推部署时的本机平台。未知哈希返回 1。
+platform_of_archive_sha256() {
+  case "$1" in
+    "${ARCHIVE_SHA256_DARWIN_ARM64}") printf 'darwin-arm64\n' ;;
+    "${ARCHIVE_SHA256_DARWIN_AMD64}") printf 'darwin-amd64\n' ;;
+    "${ARCHIVE_SHA256_LINUX_AMD64}") printf 'linux-amd64\n' ;;
+    "${ARCHIVE_SHA256_LINUX_ARM64}") printf 'linux-arm64\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+# 平台名 → 解压后 binary 的期望哈希。
+binary_sha256_of_platform() {
+  case "$1" in
+    darwin-arm64) printf '%s\n' "${BINARY_SHA256_DARWIN_ARM64}" ;;
+    darwin-amd64) printf '%s\n' "${BINARY_SHA256_DARWIN_AMD64}" ;;
+    linux-amd64) printf '%s\n' "${BINARY_SHA256_LINUX_AMD64}" ;;
+    linux-arm64) printf '%s\n' "${BINARY_SHA256_LINUX_ARM64}" ;;
+    *) return 1 ;;
+  esac
+}
+
+# 本机到某个 IP 的出接口名。macOS 用 route，Linux 用 ip route；取不到输出空串。
+route_interface() {
+  if [[ "$(uname -s)" == Darwin ]]; then
+    route -n get "$1" 2>/dev/null | awk '/interface:/{print $2; exit}'
+  else
+    ip route get "$1" 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}'
+  fi
+}
+
+# 出接口是否是代理软件的 TUN 设备。走 TUN 时本机发出的连接会被代理接管，本机侧的验证不再代表真实网络。
+interface_is_tunnel() {
+  case "$1" in utun*|tun*|wg*) return 0 ;; esac
+  [[ "$(uname -s)" == Linux && -e "/sys/class/net/$1/tun_flags" ]]
+}
+
+# 限时 TCP 连通性探测：能建立连接返回 0。macOS 的 nc 用 -G 控制连接超时，Linux 各发行版 nc 行为不一，改用 bash 的 /dev/tcp。
+tcp_probe() {
+  local host port seconds
+  host="$1"
+  port="$2"
+  seconds="$3"
+  if [[ "$(uname -s)" == Darwin ]]; then
+    nc -4 -n -z -G "${seconds}" "${host}" "${port}" >/dev/null 2>&1
+  else
+    timeout "${seconds}" bash -c 'exec 3<>"/dev/tcp/$0/$1"' "${host}" "${port}" >/dev/null 2>&1
+  fi
 }
 
 sha256_file() {
@@ -408,7 +513,7 @@ parse_init_args() {
         [[ "$#" -ge 2 && "$2" =~ ^[1-9][0-9]{0,4}$ ]] && (( $2 <= 65535 )) || die 2 '--exit-port 必须是 1-65535'
         INIT_EXIT_PORT="$2"; shift 2 ;;
       --exit-source-filter)
-        [[ "$#" -ge 2 && ( "$2" == provider || "$2" == none ) ]] || die 2 '--exit-source-filter 只能是 provider 或 none'
+        [[ "$#" -ge 2 && ( "$2" == managed || "$2" == provider || "$2" == none ) ]] || die 2 '--exit-source-filter 只能是 managed、provider 或 none'
         INIT_EXIT_SOURCE_FILTER="$2"; shift 2 ;;
       --sni)
         [[ "$#" -ge 2 && "$2" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]] || die 2 '--sni 必须是 ASCII 域名'
@@ -529,7 +634,7 @@ validate_config_values() {
   [[ "${RELAY_SSH_KEY_FINGERPRINT}" != "${EXIT_SSH_KEY_FINGERPRINT}" ]] || die 2 '中转与出口机必须使用两把不同公钥指纹的私钥'
   [[ "${REALITY_SERVER_NAME}" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]] || die 2 'REALITY_SERVER_NAME 必须是 ASCII FQDN'
   [[ "${RELAY_COHOSTS_SINGBOX}" == 'yes' || "${RELAY_COHOSTS_SINGBOX}" == 'no' ]] || die 2 'RELAY_COHOSTS_SINGBOX 只能是 yes 或 no'
-  [[ "${EXIT_SOURCE_FILTER}" == 'provider' || "${EXIT_SOURCE_FILTER}" == 'none' ]] || die 2 'EXIT_SOURCE_FILTER 只能是 provider 或 none'
+  [[ "${EXIT_SOURCE_FILTER}" == 'managed' || "${EXIT_SOURCE_FILTER}" == 'provider' || "${EXIT_SOURCE_FILTER}" == 'none' ]] || die 2 'EXIT_SOURCE_FILTER 只能是 managed、provider 或 none'
 }
 
 normalized_config() {
@@ -1516,19 +1621,24 @@ probe_ssh_and_fingerprints() {
   [[ "$(fingerprint_private_key "${RELAY_SSH_KEY}")" == "${RELAY_SSH_KEY_FINGERPRINT}" ]] || die 3 '中转 SSH key 指纹在 preflight 前发生变化'
   [[ "$(fingerprint_private_key "${EXIT_SSH_KEY}")" == "${EXIT_SSH_KEY_FINGERPRINT}" ]] || die 3 '出口机 SSH key 指纹在 preflight 前发生变化'
   if run_managed_external ssh ssh -n -F "${SSH_DIRECT_CONFIG}" chain-direct-exit true >/dev/null 2>&1; then
-    log_info 'Mac 到出口机管理端口的隔离直连探针成功（仅作管理通道证据）'
+    log_info '本机到出口机管理端口的隔离直连探针成功（仅作管理通道证据）'
   else
-    log_warn 'Mac 到出口机管理端口的隔离直连探针失败；经中转管理通道已通过'
+    log_warn '本机到出口机管理端口的隔离直连探针失败；经中转管理通道已通过'
   fi
 }
 
 require_local_dependencies() {
-  local command_name
+  local command_name platform_commands
   [[ "${BASH_VERSINFO[0]}" -gt 3 || ( "${BASH_VERSINFO[0]}" -eq 3 && "${BASH_VERSINFO[1]}" -ge 2 ) ]] || die 3 '需要 Bash 3.2 或以上'
-  [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]] || die 3 '控制端只支持 macOS arm64'
+  # 控制端支持 macOS 与 Linux（含 WSL）；路由与端口探测在两边用不同命令（见 route_interface / tcp_probe）。
+  case "$(uname -s)" in
+    Darwin) platform_commands='route nc' ;;
+    Linux) platform_commands='ip timeout' ;;
+    *) die 3 "控制端只支持 macOS 与 Linux（当前：$(uname -s)）" ;;
+  esac
   bash -n "${SCRIPT_PATH}" || die 3 '当前 PATH 中的 bash 无法解析脚本'
-  /bin/bash -n "${SCRIPT_PATH}" || die 3 'macOS /bin/bash 无法解析脚本'
-  for command_name in ssh scp ssh-keygen curl openssl tar route ps mktemp mkfifo stat readlink link ln nc sync awk sed grep sort tr head tail cmp find chmod mkdir rmdir rm cp mv cut cat date sleep uname kill dirname basename id git; do
+  /bin/bash -n "${SCRIPT_PATH}" || die 3 '/bin/bash 无法解析脚本'
+  for command_name in ssh scp ssh-keygen curl openssl tar ps mktemp mkfifo stat readlink link ln sync awk sed grep sort tr head tail cmp find chmod mkdir rmdir rm cp mv cut cat date sleep uname kill dirname basename id git ${platform_commands}; do
     command -v "${command_name}" >/dev/null 2>&1 || die 3 "本机缺少依赖：${command_name}"
   done
   ssh -E /dev/null -G -F /dev/null localhost >/dev/null 2>&1 || die 3 '本机 OpenSSH 不支持独立 LogFile（-E）能力'
@@ -1547,11 +1657,32 @@ archive_url() {
   printf '%s/%s\n' "${RELEASE_BASE_URL}" "$1"
 }
 
+# 下载一个官方包到 temp_path 并核对摘要。optional=optional 时失败只返回 1（本机验证用的包拿不到就跳过 smoke），
+# 否则按 v0.1.0 的行为以退出码 3 终止。限时 600 秒，避免国内直连 GitHub 时无限挂住。
+download_official_archive() {
+  local archive expected temp_path optional
+  archive="$1"
+  expected="$2"
+  temp_path="$3"
+  optional="$4"
+  if ! curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 --max-time 600 "$(archive_url "${archive}")" -o "${temp_path}"; then
+    rm -f "${temp_path}"
+    [[ "${optional}" == optional ]] && return 1
+    die 3 "下载官方资产失败：${archive}"
+  fi
+  if [[ "$(sha256_file "${temp_path}")" != "${expected}" ]]; then
+    rm -f "${temp_path}"
+    [[ "${optional}" == optional ]] && return 1
+    die 3 "官方资产摘要不符：${archive}"
+  fi
+}
+
 verified_archive_path() {
-  local mode archive expected cache_path temp_path actual cache_safe
+  local mode archive expected cache_path temp_path actual cache_safe optional
   mode="$1"
   archive="$2"
   expected="$3"
+  optional="${4:-required}"
   cache_path="${CHAIN_CACHE_DIR}/${archive}"
   cache_safe=1
   if [[ -e "${CHAIN_CACHE_DIR}" || -L "${CHAIN_CACHE_DIR}" ]]; then
@@ -1560,8 +1691,7 @@ verified_archive_path() {
   if [[ "${cache_safe}" == 0 ]]; then
     [[ "${mode}" != deploy ]] || die 1 "cache 目录身份或权限不安全：${CHAIN_CACHE_DIR}"
     temp_path="${OP_TMP}/${archive}"
-    curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 "$(archive_url "${archive}")" -o "${temp_path}" || die 3 "下载官方资产失败：${archive}"
-    [[ "$(sha256_file "${temp_path}")" == "${expected}" ]] || die 3 "官方资产摘要不符：${archive}"
+    download_official_archive "${archive}" "${expected}" "${temp_path}" "${optional}" || return 1
     printf '%s\n' "${temp_path}"
     return 0
   fi
@@ -1580,16 +1710,14 @@ verified_archive_path() {
   elif [[ -e "${cache_path}" ]]; then
     [[ "${mode}" == deploy ]] || {
       temp_path="${OP_TMP}/${archive}"
-      curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 "$(archive_url "${archive}")" -o "${temp_path}" || die 3 "下载官方资产失败：${archive}"
-      [[ "$(sha256_file "${temp_path}")" == "${expected}" ]] || die 3 "官方资产摘要不符：${archive}"
+      download_official_archive "${archive}" "${expected}" "${temp_path}" "${optional}" || return 1
       printf '%s\n' "${temp_path}"
       return 0
     }
     die 1 "cache 路径不是当前用户拥有的 600 regular file：${cache_path}"
   fi
   temp_path="${OP_TMP}/${archive}"
-  curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 "$(archive_url "${archive}")" -o "${temp_path}" || die 3 "下载官方资产失败：${archive}"
-  [[ "$(sha256_file "${temp_path}")" == "${expected}" ]] || die 3 "官方资产摘要不符：${archive}"
+  download_official_archive "${archive}" "${expected}" "${temp_path}" "${optional}" || return 1
   if [[ "${mode}" == deploy ]]; then
     local cache_temp
     ensure_private_dir "${CHAIN_CACHE_DIR}" || die 1 'cache 目录身份或权限不安全'
@@ -1609,25 +1737,37 @@ verified_archive_path() {
   fi
 }
 
+# 只准备本机做出口 smoke 用的官方包（远端包的期望哈希取常量，远端自行下载，见 install_remote_binary）。
+# 本机平台没有官方包、或缓存缺失且下载失败时，DARWIN_* 记为 NONE，smoke_from_mac 跳过；这不是部署门槛。
 prepare_verified_assets() {
-  local mode extract_root version_output
+  local mode extract_root version_output expected_binary
   mode="$1"
-  LINUX_ARCHIVE_PATH="$(verified_archive_path "${mode}" "${LINUX_ARCHIVE}" "${LINUX_ARCHIVE_SHA256}")"
-  DARWIN_ARCHIVE_PATH="$(verified_archive_path "${mode}" "${DARWIN_ARCHIVE}" "${DARWIN_ARCHIVE_SHA256}")"
+  DARWIN_ARCHIVE_PATH=''
+  DARWIN_BINARY_PATH=''
+  select_local_platform
+  if [[ "${DARWIN_ARCHIVE_SHA256}" == NONE ]]; then
+    DARWIN_BINARY_SHA256='NONE'
+    log_warn "没有本机平台（$(uname -s) $(uname -m)）的官方包，跳过本机侧出口验证"
+    return 0
+  fi
+  if ! DARWIN_ARCHIVE_PATH="$(verified_archive_path "${mode}" "${DARWIN_ARCHIVE}" "${DARWIN_ARCHIVE_SHA256}" optional)"; then
+    DARWIN_ARCHIVE_PATH=''
+    DARWIN_ARCHIVE_SHA256='NONE'
+    DARWIN_BINARY_SHA256='NONE'
+    log_warn "没有本机平台（${LOCAL_PLATFORM}）的官方包（缓存缺失且下载失败），跳过本机侧出口验证"
+    return 0
+  fi
   extract_root="${OP_TMP}/assets"
   mkdir "${extract_root}"
   tar -xzf "${DARWIN_ARCHIVE_PATH}" -C "${extract_root}"
-  tar -xzf "${LINUX_ARCHIVE_PATH}" -C "${extract_root}"
-  DARWIN_BINARY_PATH="${extract_root}/sing-box-1.13.14-darwin-arm64/sing-box"
-  LINUX_BINARY_PATH="${extract_root}/sing-box-1.13.14-linux-amd64/sing-box"
-  [[ -f "${DARWIN_BINARY_PATH}" && ! -L "${DARWIN_BINARY_PATH}" ]] || die 3 'Darwin 官方包布局异常'
-  [[ -f "${LINUX_BINARY_PATH}" && ! -L "${LINUX_BINARY_PATH}" ]] || die 3 'Linux 官方包布局异常'
-  [[ -f "${extract_root}/sing-box-1.13.14-linux-amd64/libcronet.so" && ! -L "${extract_root}/sing-box-1.13.14-linux-amd64/libcronet.so" ]] || die 3 'Linux 官方包缺少已核证的 libcronet.so 成员'
-  chmod 700 "${DARWIN_BINARY_PATH}" "${LINUX_BINARY_PATH}"
+  DARWIN_BINARY_PATH="${extract_root}/sing-box-${SING_BOX_VERSION}-${LOCAL_PLATFORM}/sing-box"
+  [[ -f "${DARWIN_BINARY_PATH}" && ! -L "${DARWIN_BINARY_PATH}" ]] || die 3 "本机平台官方包布局异常：${LOCAL_PLATFORM}"
+  chmod 700 "${DARWIN_BINARY_PATH}"
   DARWIN_BINARY_SHA256="$(sha256_file "${DARWIN_BINARY_PATH}")"
-  LINUX_BINARY_SHA256="$(sha256_file "${LINUX_BINARY_PATH}")"
+  expected_binary="$(binary_sha256_of_platform "${LOCAL_PLATFORM}")"
+  [[ "${DARWIN_BINARY_SHA256}" == "${expected_binary}" ]] || die 3 "本机平台 binary 摘要不符：${LOCAL_PLATFORM}"
   version_output="$("${DARWIN_BINARY_PATH}" version | awk '/^sing-box version / {print $3; exit}')"
-  [[ "${version_output}" == "${SING_BOX_VERSION}" ]] || die 3 'Darwin binary 版本不符'
+  [[ "${version_output}" == "${SING_BOX_VERSION}" ]] || die 3 '本机 binary 版本不符'
 }
 
 write_remote_preflight_script() {
@@ -1665,7 +1805,12 @@ supports_option() {
 }
 
 [[ "$(id -u)" == 0 ]] || fail '必须以 root 执行'
-[[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] || fail '只支持 Linux amd64'
+[[ "$(uname -s)" == Linux ]] || fail '只支持 Linux'
+case "$(uname -m)" in
+  x86_64) remote_arch=amd64 ;;
+  aarch64|arm64) remote_arch=arm64 ;;
+  *) fail "只支持 amd64 / arm64（当前：$(uname -m)）" ;;
+esac
 for parent in / /opt /etc /etc/systemd /etc/systemd/system; do
   [[ -d "$parent" && ! -L "$parent" && "$(stat -c %u "$parent")" == 0 ]] || fail "系统父目录不安全:$parent"
   parent_mode="$(stat -c %a "$parent")"
@@ -1719,9 +1864,11 @@ if link "$tmp/source" "$tmp/target" 2>/dev/null; then
 fi
 [[ ! -e "$tmp/container/source" ]] || fail 'link 把 target directory 当作容器'
 
-timeout --signal=TERM --kill-after=2s 10s nft list ruleset > "$tmp/nft" || fail 'nft 规则无法核证'
-if grep -q '[^[:space:]]' "$tmp/nft"; then
-  fail 'nft 规则集非空'
+# 除本项目自己管理的出口机白名单表（table inet ownexit_*，见 EXIT_SOURCE_FILTER=managed）外不得有任何 nft 表；
+# 同一台出口机上可以有多条链各自的白名单表。
+timeout --signal=TERM --kill-after=2s 10s nft list tables > "$tmp/nft" || fail 'nft 规则无法核证'
+if grep -v '^table inet ownexit_[a-z0-9_]*$' "$tmp/nft" | grep -q '[^[:space:]]'; then
+  fail 'nft 规则集非空（除 ownexit_* 白名单表外）'
 fi
 if command -v ufw >/dev/null 2>&1; then
   timeout --signal=TERM --kill-after=2s 10s ufw status > "$tmp/ufw" || fail 'ufw 状态无法核证'
@@ -1779,13 +1926,17 @@ if [[ "$role" == relay ]]; then
   printf 'SOCKET_PROXYD_PATH=%s\n' "$proxyd"
   printf 'SYSTEMCTL_PATH=%s\n' "$systemctl_path"
 fi
+printf 'REMOTE_ARCH=%s\n' "$remote_arch"
+printf 'NFT_PATH=%s\n' "$(trusted_executable "$(command -v nft)")"
 printf 'REMOTE_PREFLIGHT=ok\n'
 REMOTE_PREFLIGHT
   chmod 600 "${output}"
 }
 
+# 两端平台预检。除 v0.1.0 的检查外，还取回两端架构（必须一致）与出口机 nft 的绝对路径。
+# 架构已由状态文件锁定（REMOTE_ARCH_LOCKED=1，见状态读取）时，现场架构必须与之相同，否则返回 34。
 probe_remote_platform_preflight() {
-  local script output rc
+  local script output rc relay_arch exit_arch
   script="${OP_TMP}/remote-preflight.sh"
   write_remote_preflight_script "${script}" || return 30
   if output="$(ssh_relay_stdin bash -s -- relay "${RELAY_COHOSTS_SINGBOX}" < "${script}")"; then
@@ -1797,12 +1948,22 @@ probe_remote_platform_preflight() {
   SOCKET_PROXYD_PATH="$(printf '%s\n' "${output}" | awk -F= '$1 == "SOCKET_PROXYD_PATH" {print $2}')"
   SYSTEMCTL_PATH="$(printf '%s\n' "${output}" | awk -F= '$1 == "SYSTEMCTL_PATH" {print $2}')"
   [[ "${SOCKET_PROXYD_PATH}" == /* && "${SYSTEMCTL_PATH}" == /* ]] || return 32
-  if ssh_exit_stdin bash -s -- exit no < "${script}" >/dev/null; then
+  relay_arch="$(printf '%s\n' "${output}" | awk -F= '$1 == "REMOTE_ARCH" {print $2}')"
+  if output="$(ssh_exit_stdin bash -s -- exit no < "${script}")"; then
     rc=0
   else
     rc="$?"
   fi
   [[ "${rc}" -eq 0 ]] || { [[ "${rc}" -eq 255 ]] && return 22; return 33; }
+  exit_arch="$(printf '%s\n' "${output}" | awk -F= '$1 == "REMOTE_ARCH" {print $2}')"
+  EXIT_NFT_PATH="$(printf '%s\n' "${output}" | awk -F= '$1 == "NFT_PATH" {print $2}')"
+  [[ "${EXIT_NFT_PATH}" == /* ]] || return 33
+  [[ -n "${relay_arch}" && "${relay_arch}" == "${exit_arch}" ]] || return 34
+  if [[ "${REMOTE_ARCH_LOCKED}" == 1 ]]; then
+    [[ "${relay_arch}" == "${REMOTE_ARCH}" ]] || return 34
+  else
+    select_remote_arch "${relay_arch}" || return 34
+  fi
 }
 
 remote_platform_preflight() {
@@ -1819,6 +1980,7 @@ remote_platform_preflight() {
     31) die 3 '中转依赖、防火墙或角色声明预检失败' ;;
     32) die 3 '中转能力探针没有返回安全绝对路径' ;;
     33) die 3 '出口机依赖或防火墙预检失败' ;;
+    34) die 3 '中转机与出口机的 CPU 架构必须相同（都为 amd64 或都为 arm64），且与已部署状态一致' ;;
     *) die 3 '远端平台预检脚本生成或执行异常' ;;
   esac
 }
@@ -1864,22 +2026,35 @@ probe_exit_exit() {
 
 # 返回 0=远端确无该路径；1=远端存在（碰撞）；2=SSH 不可达（rc 255），没核成。
 # 调用方必须区分 1 与 2：把不可达当碰撞会让 SSH 抖动误报成退出码 4 的"路径碰撞"（fix-collision-unreachable.md）。
+# remote_test_path <role> <-e|-L> <path>：远端 `test ! <flag> <path>`。
+# 远端路径是否不存在（既不是文件也不是符号链接）。SSH 返回 255 表示连接层失败而不是“路径存在”：
+# 本机开着 TUN 等情况下 SSH 偶尔被断开，重试一次；仍失败才返回 2（不可达），由调用方报退出码 3。
+remote_test_path() {
+  local role flag path rc attempt
+  role="$1"
+  flag="$2"
+  path="$3"
+  for attempt in 1 2; do
+    if [[ "${role}" == relay ]]; then
+      if ssh_relay test ! "${flag}" "${path}"; then rc=0; else rc="$?"; fi
+    else
+      if ssh_exit test ! "${flag}" "${path}"; then rc=0; else rc="$?"; fi
+    fi
+    [[ "${rc}" -eq 255 && "${attempt}" -eq 1 ]] || break
+    log_warn "${role} SSH 连接被断开，2 秒后重试一次（检查 ${path}）"
+    sleep 2
+  done
+  return "${rc}"
+}
+
 remote_path_absent() {
   local role path rc
   role="$1"
   path="$2"
-  if [[ "${role}" == relay ]]; then
-    if ssh_relay test ! -e "${path}"; then rc=0; else rc="$?"; fi
-  else
-    if ssh_exit test ! -e "${path}"; then rc=0; else rc="$?"; fi
-  fi
+  if remote_test_path "${role}" -e "${path}"; then rc=0; else rc="$?"; fi
   [[ "${rc}" -ne 255 ]] || return 2
   [[ "${rc}" -eq 0 ]] || return 1
-  if [[ "${role}" == relay ]]; then
-    if ssh_relay test ! -L "${path}"; then rc=0; else rc="$?"; fi
-  else
-    if ssh_exit test ! -L "${path}"; then rc=0; else rc="$?"; fi
-  fi
+  if remote_test_path "${role}" -L "${path}"; then rc=0; else rc="$?"; fi
   [[ "${rc}" -ne 255 ]] || return 2
   [[ "${rc}" -eq 0 ]]
 }
@@ -2538,6 +2713,32 @@ write_active_state() {
   validate_checksum_env "${STATE_FILE}" state || die 1 'active state 写入后校验失败'
 }
 
+# 采纳状态 / 事务记录里的资产哈希：远端归档哈希决定远端架构（并锁定，现场预检必须一致），
+# 本机归档哈希只要是 4 个本机包之一或 NONE 即可。binary 哈希必须与归档配套。v0.1.0 写下的
+# linux-amd64 + darwin-arm64 组合天然满足，所以旧状态无需迁移。不合法返回 1。
+adopt_recorded_assets() {
+  local linux_archive linux_binary darwin_archive darwin_binary platform
+  linux_archive="$1"
+  linux_binary="$2"
+  darwin_archive="$3"
+  darwin_binary="$4"
+  case "${linux_archive}" in
+    "${ARCHIVE_SHA256_LINUX_AMD64}") select_remote_arch amd64 ;;
+    "${ARCHIVE_SHA256_LINUX_ARM64}") select_remote_arch arm64 ;;
+    *) return 1 ;;
+  esac
+  [[ "${linux_binary}" == "${LINUX_BINARY_SHA256}" ]] || return 1
+  REMOTE_ARCH_LOCKED=1
+  if [[ "${darwin_archive}" == NONE ]]; then
+    [[ "${darwin_binary}" == NONE ]] || return 1
+  else
+    platform="$(platform_of_archive_sha256 "${darwin_archive}")" || return 1
+    [[ "${darwin_binary}" == "$(binary_sha256_of_platform "${platform}")" ]] || return 1
+  fi
+  DARWIN_ARCHIVE_SHA256="${darwin_archive}"
+  DARWIN_BINARY_SHA256="${darwin_binary}"
+}
+
 probe_state_file() {
   local file value
   file="$1"
@@ -2559,8 +2760,7 @@ probe_state_file() {
   [[ "$(kv_get "${file}" REALITY_SERVER_NAME)" == "${REALITY_SERVER_NAME}" ]] || return 12
   [[ "$(kv_get "${file}" RELAY_COHOSTS_SINGBOX)" == "${RELAY_COHOSTS_SINGBOX}" ]] || return 12
   [[ "$(kv_get "${file}" SING_BOX_VERSION)" == "${SING_BOX_VERSION}" ]] || return 12
-  [[ "$(kv_get "${file}" LINUX_ARCHIVE_SHA256)" == "${LINUX_ARCHIVE_SHA256}" ]] || return 12
-  [[ "$(kv_get "${file}" DARWIN_ARCHIVE_SHA256)" == "${DARWIN_ARCHIVE_SHA256}" ]] || return 12
+  adopt_recorded_assets "$(kv_get "${file}" LINUX_ARCHIVE_SHA256)" "$(kv_get "${file}" LINUX_BINARY_SHA256)" "$(kv_get "${file}" DARWIN_ARCHIVE_SHA256)" "$(kv_get "${file}" DARWIN_BINARY_SHA256)" || return 12
 
   DEPLOYMENT_ID="$(kv_get "${file}" DEPLOYMENT_ID)"
   RELAY_HOSTKEY_FINGERPRINT="$(kv_get "${file}" RELAY_HOSTKEY_FINGERPRINT)"
@@ -2599,7 +2799,7 @@ probe_state_file() {
   (( RELAY_PORT >= 1 && RELAY_PORT <= 65535 && EXIT_REALITY_PORT >= 1 && EXIT_REALITY_PORT <= 65535 )) || return 13
   [[ "${VLESS_UUID}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 13
   [[ "${REALITY_PUBLIC_KEY}" =~ ^[A-Za-z0-9_-]+$ && "${REALITY_SHORT_ID}" =~ ^[0-9a-f]{16}$ ]] || return 13
-  for value in "${LINUX_BINARY_SHA256}" "${DARWIN_BINARY_SHA256}" "${RELAY_OWNER_SHA256}" "${RELAY_SOCKET_SHA256}" "${RELAY_SERVICE_SHA256}" "${RELAY_ENABLE_LINK_SHA256}" "${EXIT_OWNER_SHA256}" "${EXIT_EXIT_SHA256}" "${EXIT_SERVICE_SHA256}" "${EXIT_ENABLE_LINK_SHA256}" "${RELAY_BASELINE_CONFIG_MANIFEST_SHA256}" "${RELAY_BASELINE_LISTEN_SHA256}" "${RELAY_BASELINE_BINARY_MANIFEST_SHA256}" "${RELAY_BASELINE_UNIT_MANIFEST_SHA256}" "${NODE_SHA256}"; do
+  for value in "${LINUX_BINARY_SHA256}" "${RELAY_OWNER_SHA256}" "${RELAY_SOCKET_SHA256}" "${RELAY_SERVICE_SHA256}" "${RELAY_ENABLE_LINK_SHA256}" "${EXIT_OWNER_SHA256}" "${EXIT_EXIT_SHA256}" "${EXIT_SERVICE_SHA256}" "${EXIT_ENABLE_LINK_SHA256}" "${RELAY_BASELINE_CONFIG_MANIFEST_SHA256}" "${RELAY_BASELINE_LISTEN_SHA256}" "${RELAY_BASELINE_BINARY_MANIFEST_SHA256}" "${RELAY_BASELINE_UNIT_MANIFEST_SHA256}" "${NODE_SHA256}"; do
     [[ "${value}" =~ ^[0-9a-f]{64}$ ]] || return 13
   done
   STATE_PROBE_REASON=''
@@ -2691,8 +2891,9 @@ load_journal_file() {
     deploy:deployed|rollback:not_deployed) ;;
     *) die 5 'transaction operation/target 组合错误' ;;
   esac
-  [[ "$(kv_get "${file}" SING_BOX_VERSION)" == "${SING_BOX_VERSION}" && "$(kv_get "${file}" LINUX_ARCHIVE_SHA256)" == "${LINUX_ARCHIVE_SHA256}" && "$(kv_get "${file}" DARWIN_ARCHIVE_SHA256)" == "${DARWIN_ARCHIVE_SHA256}" ]] || die 5 'transaction 固定资产版本/摘要错误'
-  for value in "${LINUX_BINARY_SHA256}" "${DARWIN_BINARY_SHA256}" "${RELAY_ENABLE_LINK_SHA256}" "${EXIT_ENABLE_LINK_SHA256}" "${RELAY_BASELINE_CONFIG_MANIFEST_SHA256}" "${RELAY_BASELINE_LISTEN_SHA256}" "${RELAY_BASELINE_BINARY_MANIFEST_SHA256}" "${RELAY_BASELINE_UNIT_MANIFEST_SHA256}"; do
+  [[ "$(kv_get "${file}" SING_BOX_VERSION)" == "${SING_BOX_VERSION}" ]] || die 5 'transaction 固定资产版本错误'
+  adopt_recorded_assets "$(kv_get "${file}" LINUX_ARCHIVE_SHA256)" "$(kv_get "${file}" LINUX_BINARY_SHA256)" "$(kv_get "${file}" DARWIN_ARCHIVE_SHA256)" "$(kv_get "${file}" DARWIN_BINARY_SHA256)" || die 5 'transaction 固定资产摘要错误'
+  for value in "${LINUX_BINARY_SHA256}" "${RELAY_ENABLE_LINK_SHA256}" "${EXIT_ENABLE_LINK_SHA256}" "${RELAY_BASELINE_CONFIG_MANIFEST_SHA256}" "${RELAY_BASELINE_LISTEN_SHA256}" "${RELAY_BASELINE_BINARY_MANIFEST_SHA256}" "${RELAY_BASELINE_UNIT_MANIFEST_SHA256}"; do
     [[ "${value}" =~ ^[0-9a-f]{64}$ ]] || die 5 'transaction 固定资源 hash 格式错误'
   done
   for value in "${RELAY_OWNER_SHA256}" "${RELAY_SOCKET_SHA256}" "${RELAY_SERVICE_SHA256}" "${EXIT_OWNER_SHA256}" "${EXIT_EXIT_SHA256}" "${EXIT_SERVICE_SHA256}" "${NODE_SHA256}"; do
@@ -2978,6 +3179,8 @@ archive_hash="$3"
 binary_hash="$4"
 version="$5"
 final="$6"
+arch="$7"
+[[ "$arch" == amd64 || "$arch" == arm64 ]] || exit 62
 [[ -d "$stage" && ! -L "$stage" && "$(stat -c %u:%g:%a "$stage")" == 0:0:700 ]] || exit 51
 [[ -f "$stage/stage-owner.env" && ! -L "$stage/stage-owner.env" ]] || exit 52
 [[ "$(sha256sum "$stage/stage-owner.env" | awk '{print $1}')" == "$owner_hash" ]] || exit 53
@@ -2986,8 +3189,8 @@ final="$6"
 mkdir "$stage/extracted"
 chmod 700 "$stage/extracted"
 tar --no-same-owner --no-same-permissions -xzf "$stage/archive.tar.gz" -C "$stage/extracted"
-candidate="$stage/extracted/sing-box-$version-linux-amd64/sing-box"
-cronet="$stage/extracted/sing-box-$version-linux-amd64/libcronet.so"
+candidate="$stage/extracted/sing-box-$version-linux-$arch/sing-box"
+cronet="$stage/extracted/sing-box-$version-linux-$arch/libcronet.so"
 [[ -f "$candidate" && ! -L "$candidate" && -f "$cronet" && ! -L "$cronet" ]] || exit 56
 chown root:root "$candidate"
 chmod 755 "$candidate"
@@ -3009,29 +3212,76 @@ INSTALL_BINARY
   chmod 600 "${output}"
 }
 
+# 远端在自己的暂存目录里下载官方包并核对归档 SHA256；成功输出 nothing、返回 0。
+# 返回 1 = 下载失败（网络、GitHub 不可达），2 = 摘要不符；两种情况都已删除半成品，调用方改为本机上传。
+write_remote_download_script() {
+  local output
+  output="$1"
+  cat > "${output}" <<'REMOTE_DOWNLOAD'
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+export LC_ALL=C
+stage="$1"
+url="$2"
+expected="$3"
+[[ -d "$stage" && ! -L "$stage" && "$(stat -c %u:%g:%a "$stage")" == 0:0:700 ]] || exit 3
+dst="$stage/archive.tar.gz"
+[[ ! -e "$dst" && ! -L "$dst" ]] || exit 3
+if command -v curl >/dev/null 2>&1; then
+  curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 --max-time 300 -o "$dst" "$url" || { rm -f "$dst"; exit 1; }
+elif command -v wget >/dev/null 2>&1; then
+  wget --quiet --https-only --timeout=60 --tries=2 -O "$dst" "$url" || { rm -f "$dst"; exit 1; }
+else
+  exit 1
+fi
+[[ -f "$dst" && ! -L "$dst" && "$(sha256sum "$dst" | awk '{print $1}')" == "$expected" ]] || { rm -f "$dst"; exit 2; }
+chown root:root "$dst"
+chmod 600 "$dst"
+REMOTE_DOWNLOAD
+  chmod 600 "${output}"
+}
+
+# 把固定版本 binary 装到远端（或复用已有的同哈希 binary）。归档优先由远端自己下载（控制端在国内时本机访问 GitHub
+# 常卡住）；远端下载失败才在本机准备同架构的归档并 scp 上传。两条路径之后的校验完全相同（归档哈希、binary 哈希、版本）。
 install_remote_binary() {
-  local role stage owner_hash owner_file owner_base script output
+  local role stage owner_hash owner_file owner_base script output download_script rc source
   role="$1"
   stage="$2"
   owner_hash="$3"
   owner_file="$4"
   owner_base="$5"
   create_remote_stage "${role}" "${stage}" "${owner_base}" "${owner_file}" "${owner_hash}" || die 1 "${role} binary staging 创建失败"
+  download_script="${OP_TMP}/remote-download.sh"
+  write_remote_download_script "${download_script}"
   if [[ "${role}" == relay ]]; then
-    scp_relay "${LINUX_ARCHIVE_PATH}" "chain-relay:${stage}/archive.tar.gz" || die 1 'Linux archive 上传中转失败'
-    ssh_relay chown root:root "${stage}/archive.tar.gz"
-    ssh_relay chmod 600 "${stage}/archive.tar.gz"
+    if ssh_relay_stdin bash -s -- "${stage}" "$(archive_url "${LINUX_ARCHIVE}")" "${LINUX_ARCHIVE_SHA256}" < "${download_script}"; then rc=0; else rc="$?"; fi
   else
-    scp_exit "${LINUX_ARCHIVE_PATH}" "chain-exit:${stage}/archive.tar.gz" || die 1 'Linux archive 上传出口机失败'
-    ssh_exit chown root:root "${stage}/archive.tar.gz"
-    ssh_exit chmod 600 "${stage}/archive.tar.gz"
+    if ssh_exit_stdin bash -s -- "${stage}" "$(archive_url "${LINUX_ARCHIVE}")" "${LINUX_ARCHIVE_SHA256}" < "${download_script}"; then rc=0; else rc="$?"; fi
   fi
+  if [[ "${rc}" -eq 0 ]]; then
+    source=remote-download
+  else
+    log_warn "${role} 远端下载官方包失败（rc=${rc}），改为本机下载后上传"
+    [[ -n "${LINUX_ARCHIVE_PATH}" ]] || LINUX_ARCHIVE_PATH="$(verified_archive_path deploy "${LINUX_ARCHIVE}" "${LINUX_ARCHIVE_SHA256}")"
+    if [[ "${role}" == relay ]]; then
+      scp_relay "${LINUX_ARCHIVE_PATH}" "chain-relay:${stage}/archive.tar.gz" || die 1 'Linux archive 上传中转失败'
+      ssh_relay chown root:root "${stage}/archive.tar.gz"
+      ssh_relay chmod 600 "${stage}/archive.tar.gz"
+    else
+      scp_exit "${LINUX_ARCHIVE_PATH}" "chain-exit:${stage}/archive.tar.gz" || die 1 'Linux archive 上传出口机失败'
+      ssh_exit chown root:root "${stage}/archive.tar.gz"
+      ssh_exit chmod 600 "${stage}/archive.tar.gz"
+    fi
+    source=local-upload
+  fi
+  log_info "${role} binary 来源=${source} arch=${REMOTE_ARCH}"
   script="${OP_TMP}/install-binary.sh"
   write_install_binary_script "${script}"
   if [[ "${role}" == relay ]]; then
-    output="$(ssh_relay_stdin bash -s -- "${stage}" "${owner_hash}" "${LINUX_ARCHIVE_SHA256}" "${LINUX_BINARY_SHA256}" "${SING_BOX_VERSION}" "${REMOTE_BIN}" < "${script}")" || die 1 '中转固定 binary 安装/复用验证失败'
+    output="$(ssh_relay_stdin bash -s -- "${stage}" "${owner_hash}" "${LINUX_ARCHIVE_SHA256}" "${LINUX_BINARY_SHA256}" "${SING_BOX_VERSION}" "${REMOTE_BIN}" "${REMOTE_ARCH}" < "${script}")" || die 1 '中转固定 binary 安装/复用验证失败'
   else
-    output="$(ssh_exit_stdin bash -s -- "${stage}" "${owner_hash}" "${LINUX_ARCHIVE_SHA256}" "${LINUX_BINARY_SHA256}" "${SING_BOX_VERSION}" "${REMOTE_BIN}" < "${script}")" || die 1 '出口机固定 binary 安装/复用验证失败'
+    output="$(ssh_exit_stdin bash -s -- "${stage}" "${owner_hash}" "${LINUX_ARCHIVE_SHA256}" "${LINUX_BINARY_SHA256}" "${SING_BOX_VERSION}" "${REMOTE_BIN}" "${REMOTE_ARCH}" < "${script}")" || die 1 '出口机固定 binary 安装/复用验证失败'
   fi
   printf '%s\n' "${output}" | grep -Eq '^BINARY_RESULT=(created|reused)$' || die 1 '远端 binary 安装结果不完整'
 }
@@ -3065,7 +3315,11 @@ while IFS= read -r item; do
     /opt/ownexit-chain/.stage-binary-*:extracted/sing-box-1.13.14-linux-amd64|\
     /opt/ownexit-chain/.stage-binary-*:extracted/sing-box-1.13.14-linux-amd64/LICENSE|\
     /opt/ownexit-chain/.stage-binary-*:extracted/sing-box-1.13.14-linux-amd64/libcronet.so|\
-    /opt/ownexit-chain/.stage-binary-*:extracted/sing-box-1.13.14-linux-amd64/sing-box) ;;
+    /opt/ownexit-chain/.stage-binary-*:extracted/sing-box-1.13.14-linux-amd64/sing-box|\
+    /opt/ownexit-chain/.stage-binary-*:extracted/sing-box-1.13.14-linux-arm64|\
+    /opt/ownexit-chain/.stage-binary-*:extracted/sing-box-1.13.14-linux-arm64/LICENSE|\
+    /opt/ownexit-chain/.stage-binary-*:extracted/sing-box-1.13.14-linux-arm64/libcronet.so|\
+    /opt/ownexit-chain/.stage-binary-*:extracted/sing-box-1.13.14-linux-arm64/sing-box) ;;
     /etc/ownexit-chain/.stage-relay-*:"$chain_id.owner.env"|\
     /etc/ownexit-chain/.stage-relay-*:"ownexit-chain-relay-$chain_id.socket"|\
     /etc/ownexit-chain/.stage-relay-*:"ownexit-chain-relay-$chain_id.service"|\
@@ -3105,6 +3359,9 @@ chain_id="$4"
 port="$5"
 server_name="$6"
 owner_b64="$7"
+source_filter="$8"
+nft_path="$9"
+relay_source="${10}"
 [[ -d "$stage" && ! -L "$stage" && "$(stat -c %u:%g:%a "$stage")" == 0:0:700 ]] || exit 81
 [[ "$(sha256sum "$stage/stage-owner.env" | awk '{print $1}')" == "$stage_owner_hash" ]] || exit 82
 [[ -f "$binary" && ! -L "$binary" && "$(stat -c %u:%g:%a "$binary")" == 0:0:755 ]] || exit 83
@@ -3155,6 +3412,18 @@ printf '%s' "$owner_b64" | base64 -d > "$owner"
 chown root:root "$owner"
 chmod 600 "$owner"
 
+# EXIT_SOURCE_FILTER=managed：Reality 端口只放行中转机的出站源地址。规则随 service 起停（+ 前缀以完整权限运行，
+# 不受下方 CapabilityBoundingSet / ProtectSystem 限制）：启动前先删再建，停止后删除，重启机器后随服务自动恢复。
+filter_lines=''
+if [[ "$source_filter" == managed ]]; then
+  [[ "$nft_path" == /* && -x "$nft_path" ]] || exit 86
+  [[ "$relay_source" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 87
+  table="ownexit_${chain_id//-/_}"
+  filter_lines="ExecStartPre=-+$nft_path delete table inet $table
+ExecStartPre=+$nft_path \"add table inet $table; add chain inet $table input { type filter hook input priority -10; policy accept; }; add rule inet $table input tcp dport $port ip saddr != $relay_source drop\"
+ExecStopPost=-+$nft_path delete table inet $table
+"
+fi
 unit="$stage/ownexit-chain-exit-$chain_id.service"
 cat > "$unit" <<EOF
 [Unit]
@@ -3165,7 +3434,7 @@ Wants=network-online.target
 [Service]
 Type=exec
 UMask=0077
-ExecStartPre=$binary check -c /etc/ownexit-chain/$chain_id.exit.json
+${filter_lines}ExecStartPre=$binary check -c /etc/ownexit-chain/$chain_id.exit.json
 ExecStart=$binary run -c /etc/ownexit-chain/$chain_id.exit.json
 Restart=on-failure
 RestartSec=3s
@@ -3194,15 +3463,30 @@ PREPARE_EXIT
   chmod 600 "${output}"
 }
 
+# 中转机连向出口机时实际使用的源地址（中转有多个 IP 或在 NAT 后时与 RELAY_HOST 不同），managed 白名单按它放行。
+detect_relay_source_ip() {
+  local route source
+  route="$(ssh_relay ip -4 route get "${EXIT_HOST}")" || die 1 '无法在中转机上查询到出口机的路由'
+  source="$(printf '%s\n' "${route}" | awk '{for (i = 1; i < NF; i++) if ($i == "src") {print $(i + 1); exit}}')"
+  is_ipv4 "${source}" || die 1 '中转机到出口机的出站源地址不是 IPv4'
+  printf '%s\n' "${source}"
+}
+
 prepare_exit_exit() {
-  local owner_file owner_b64 script output
+  local owner_file owner_b64 script output relay_source
   owner_file="${OP_TMP}/exit-owner.env"
   render_owner_file "${owner_file}" exit "${EXIT_HOSTKEY_FINGERPRINT}"
   owner_b64="$(openssl base64 -A -in "${owner_file}")"
   create_remote_stage exit "${EXIT_STAGE_PATH}" "${EXIT_STAGE_OWNER_TEMP_PATH}" "${OP_TMP}/owners/exit-stage.env" "${EXIT_STAGE_OWNER_SHA256}" || die 1 '出口机 config staging 创建失败'
+  relay_source='-'
+  if [[ "${EXIT_SOURCE_FILTER}" == managed ]]; then
+    relay_source="$(detect_relay_source_ip)"
+    [[ "${EXIT_NFT_PATH}" == /* ]] || die 1 '没有取得出口机 nft 路径，无法配置 managed 白名单'
+    log_info "出口机白名单放行来源=${relay_source}（EXIT_SOURCE_FILTER=managed）"
+  fi
   script="${OP_TMP}/prepare-exit.sh"
   write_prepare_exit_script "${script}"
-  output="$(ssh_exit_stdin bash -s -- "${EXIT_STAGE_PATH}" "${EXIT_STAGE_OWNER_SHA256}" "${REMOTE_BIN}" "${CHAIN_ID}" "${EXIT_REALITY_PORT}" "${REALITY_SERVER_NAME}" "${owner_b64}" < "${script}")" || die 1 '出口机 Reality config/unit staging 失败'
+  output="$(ssh_exit_stdin bash -s -- "${EXIT_STAGE_PATH}" "${EXIT_STAGE_OWNER_SHA256}" "${REMOTE_BIN}" "${CHAIN_ID}" "${EXIT_REALITY_PORT}" "${REALITY_SERVER_NAME}" "${owner_b64}" "${EXIT_SOURCE_FILTER}" "${EXIT_NFT_PATH:--}" "${relay_source}" < "${script}")" || die 1 '出口机 Reality config/unit staging 失败'
   VLESS_UUID="$(printf '%s\n' "${output}" | awk -F= '$1 == "VLESS_UUID" {print $2}')"
   REALITY_PUBLIC_KEY="$(printf '%s\n' "${output}" | awk -F= '$1 == "REALITY_PUBLIC_KEY" {print $2}')"
   REALITY_SHORT_ID="$(printf '%s\n' "${output}" | awk -F= '$1 == "REALITY_SHORT_ID" {print $2}')"
@@ -3444,7 +3728,7 @@ choose_local_port() {
   while (( attempt < 200 )); do
     hex="$(openssl rand -hex 2)"
     candidate="$((20000 + (16#${hex} % 40000)))"
-    if ! nc -4 -n -z -G 1 127.0.0.1 "${candidate}" >/dev/null 2>&1; then
+    if ! tcp_probe 127.0.0.1 "${candidate}" 1; then
       printf '%s\n' "${candidate}"
       return 0
     fi
@@ -3758,59 +4042,65 @@ start_local_smoke_process() {
 
 smoke_from_mac() {
   local local_port config log pid started success endpoint result interface
-  interface="$(route -n get "${RELAY_HOST}" 2>/dev/null | awk '/interface:/{print $2; exit}')"
-  [[ -n "${interface}" ]] || die 1 '无法判定 Mac 到中转的实际路由接口'
-  if [[ "${interface}" == utun* ]]; then
-    log_warn 'Mac 到中转的路由经过 utun；跳过 Mac 层出口 smoke（非硬门槛，中转侧第 2/3 层已是部署硬门槛，与拒绝侧 utun 处理对齐）'
+  if [[ "${DARWIN_BINARY_SHA256}" == NONE || -z "${DARWIN_BINARY_PATH}" ]]; then
+    log_warn '没有本机平台的官方包，跳过本机层出口 smoke（非硬门槛，中转侧第 2/3 层已是部署硬门槛）'
     return 0
   fi
-  local_port="$(choose_local_port)" || die 1 '无法为 Mac smoke 选择本地端口'
+  interface="$(route_interface "${RELAY_HOST}")"
+  [[ -n "${interface}" ]] || die 1 '无法判定本机到中转的实际路由接口'
+  if interface_is_tunnel "${interface}"; then
+    log_warn "本机到中转的路由经过 TUN（${interface}）；跳过本机层出口 smoke（非硬门槛，中转侧第 2/3 层已是部署硬门槛）"
+    return 0
+  fi
+  local_port="$(choose_local_port)" || die 1 '无法为本机 smoke 选择本地端口'
   config="${OP_TMP}/smoke-mac.json"
   log="${OP_TMP}/smoke-mac.log"
   render_client_config "${config}" "${local_port}" "${RELAY_HOST}" "${RELAY_PORT}"
-  "${DARWIN_BINARY_PATH}" check -c "${config}" >/dev/null || die 1 'Mac smoke config check 失败'
+  "${DARWIN_BINARY_PATH}" check -c "${config}" >/dev/null || die 1 '本机 smoke config check 失败'
   start_local_smoke_process "${config}" "${log}"
   pid="${TEMP_PID}"
   started=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50; do
-    if nc -4 -n -z -G 1 127.0.0.1 "${local_port}" >/dev/null 2>&1; then
+    if tcp_probe 127.0.0.1 "${local_port}" 1; then
       started=1
       break
     fi
     kill -0 "${pid}" 2>/dev/null || break
     sleep 0.1
   done
-  [[ "${started}" == 1 ]] || die 1 'Mac 临时 sing-box 未监听'
+  [[ "${started}" == 1 ]] || die 1 '本机临时 sing-box 未监听'
   success=0
   for endpoint in https://api.ipify.org https://icanhazip.com https://ifconfig.me/ip; do
     result="$(
       env -i HOME="${OP_TMP}" PATH="/usr/bin:/bin:/usr/sbin:/sbin" curl --disable --fail --silent --show-error --proxy "socks5h://127.0.0.1:${local_port}" --noproxy '' --max-time 15 "${endpoint}" 2>/dev/null | tr -d '[:space:]' || true
     )"
     if is_ipv4 "${result}"; then
-      [[ "${result}" == "${EXPECTED_EXIT_IPV4}" ]] || die 1 'Mac smoke 得到非预期出口'
+      [[ "${result}" == "${EXPECTED_EXIT_IPV4}" ]] || die 1 '本机 smoke 得到非预期出口'
       success="$((success + 1))"
     fi
   done
   cleanup_one_local_pid "${pid}" "${config}"
   remove_recorded_local_pid "${pid}"
-  (( success >= 2 )) || die 1 'Mac smoke 未通过 2-of-3 出口仲裁'
+  (( success >= 2 )) || die 1 '本机 smoke 未通过 2-of-3 出口仲裁'
 }
 
+# 拒绝侧：本机（非中转来源）直连出口机 Reality 端口应当失败。provider（服务商白名单）与 managed（本项目 nft 白名单）
+# 时是硬门槛；none 时能连上只记 WARN。本机经 TUN 出去时代理会接管连接，结果不可信，跳过并 WARN，不能当作通过。
 probe_mac_reality_rejection() {
   local interface
-  interface="$(route -n get "${EXIT_HOST}" 2>/dev/null | awk '/interface:/{print $2; exit}')"
-  [[ -n "${interface}" ]] || die 1 '无法判定 Mac 到出口机的实际路由接口'
-  if [[ "${interface}" == utun* ]]; then
-    log_warn 'Mac 到出口机的路由经过 utun；非中转来源拒绝侧属于外部门槛未自动验证'
+  interface="$(route_interface "${EXIT_HOST}")"
+  [[ -n "${interface}" ]] || die 1 '无法判定本机到出口机的实际路由接口'
+  if interface_is_tunnel "${interface}"; then
+    log_warn "本机到出口机的路由经过 TUN（${interface}）；非中转来源拒绝侧未验证（EXIT_SOURCE_FILTER=${EXIT_SOURCE_FILTER}），需在不经 TUN 的环境再跑 verify"
     return 0
   fi
-  if nc -4 -n -z -G 5 "${EXIT_HOST}" "${EXIT_REALITY_PORT}" >/dev/null 2>&1; then
-    # 只有声明了外部白名单（provider）时才是硬门槛；none 时这是普通 VPS 的预期状态，没有凭据仍无法使用该端口。
-    [[ "${EXIT_SOURCE_FILTER}" == none ]] || die 1 '非中转来源可直连出口机 Reality 端口，白名单拒绝侧失败（EXIT_SOURCE_FILTER=provider）'
-    log_warn '出口机 Reality 端口对非中转来源开放（EXIT_SOURCE_FILTER=none，未配置外部白名单；没有凭据仍无法使用）'
+  if tcp_probe "${EXIT_HOST}" "${EXIT_REALITY_PORT}" 5; then
+    # none 时这是普通 VPS 的预期状态，没有凭据仍无法使用该端口。
+    [[ "${EXIT_SOURCE_FILTER}" == none ]] || die 1 "非中转来源可直连出口机 Reality 端口，白名单拒绝侧失败（EXIT_SOURCE_FILTER=${EXIT_SOURCE_FILTER}）"
+    log_warn '出口机 Reality 端口对非中转来源开放（EXIT_SOURCE_FILTER=none，未配置白名单；没有凭据仍无法使用）'
     return 0
   fi
-  log_info '出口机 Reality 端口的 Mac 直连拒绝侧通过'
+  log_info '出口机 Reality 端口的本机直连拒绝侧通过'
 }
 
 render_node_artifact() {
@@ -4175,6 +4465,12 @@ probe_remote_resources() {
   fi
   [[ "${rc}" -eq 0 ]] || { [[ "${rc}" -eq 255 ]] && return 22; return 32; }
   [[ "${output}" == VERIFY_EXIT=ok ]] || return 32
+  if [[ "${EXIT_SOURCE_FILTER}" == managed ]]; then
+    # 规则本身写在 unit 里（已由 EXIT_SERVICE_SHA256 核对）；这里确认它确实被加载，没被人手工删掉。
+    if ssh_exit nft list table inet "ownexit_${CHAIN_ID//-/_}" >/dev/null 2>&1; then rc=0; else rc="$?"; fi
+    [[ "${rc}" -ne 255 ]] || return 22
+    [[ "${rc}" -eq 0 ]] || return 32
+  fi
   if output="$(ssh_relay_stdin bash -s -- "${CHAIN_ID}" "${RELAY_PORT}" "${LINUX_BINARY_SHA256}" "${RELAY_OWNER_SHA256}" "${RELAY_SOCKET_SHA256}" "${RELAY_SERVICE_SHA256}" "${RELAY_ENABLE_LINK_TARGET}" "${RELAY_ENABLE_LINK_SHA256}" "${SOCKET_PROXYD_PATH}" "${allow_relay_start}" "${expected_deny}" "${RELAY_BLACKLIST_DROPIN}" < "${relay_script}")"; then
     rc=0
   else
@@ -4190,13 +4486,15 @@ verify_remote_resources() {
   [[ "${rc}" -eq 0 ]]
 }
 
+# 远端 binary 哈希来自状态（已由 adopt_recorded_assets 对照常量），这里只重新准备本机 smoke 用的包。
+# 本机平台与部署时不同（换了控制端，或部署时没拿到本机包）不算 drift：本机 smoke 只是验证手段，按现在的平台进行。
 ensure_local_assets_match_state() {
-  local expected_linux expected_darwin
-  expected_linux="${LINUX_BINARY_SHA256}"
-  expected_darwin="${DARWIN_BINARY_SHA256}"
+  local recorded_archive
+  recorded_archive="${DARWIN_ARCHIVE_SHA256}"
   prepare_verified_assets readonly
-  [[ "${LINUX_BINARY_SHA256}" == "${expected_linux}" ]] || die 5 '当前官方 Linux binary hash 与 state 不一致'
-  [[ "${DARWIN_BINARY_SHA256}" == "${expected_darwin}" ]] || die 5 '当前官方 Darwin binary hash 与 state 不一致'
+  if [[ "${recorded_archive}" != "${DARWIN_ARCHIVE_SHA256}" ]]; then
+    log_warn "本机平台的官方包与部署时不同（部署时=$(platform_of_archive_sha256 "${recorded_archive}" || printf 'NONE')，现在=${LOCAL_PLATFORM:-无}），本机侧出口验证按现在的平台进行"
+  fi
 }
 
 verify_chain_smokes() {
@@ -4259,11 +4557,12 @@ preflight_chain() {
   printf '%s\n' "${before}" | grep -qv '|absent$' && die 3 'preflight 起点存在 operation lock 或 transaction'
   require_local_dependencies
   prepare_verified_assets readonly
-  actual_linux="${LINUX_BINARY_SHA256}"
   actual_darwin="${DARWIN_BINARY_SHA256}"
   render_ssh_config
   probe_ssh_and_fingerprints
   remote_platform_preflight
+  # 远端架构由预检确定后，LINUX_BINARY_SHA256 才是本次现场对应的常量。
+  actual_linux="${LINUX_BINARY_SHA256}"
   probe_exit_tls
   probe_exit_exit
   check_remote_shared_binary_or_absent relay || die 3 '中转共享 binary/目录发生 drift'
@@ -4274,7 +4573,8 @@ preflight_chain() {
     state_relay_fp="${RELAY_HOSTKEY_FINGERPRINT}"
     state_exit_fp="${EXIT_HOSTKEY_FINGERPRINT}"
     load_state_file "${STATE_FILE}"
-    [[ "${LINUX_BINARY_SHA256}" == "${actual_linux}" && "${DARWIN_BINARY_SHA256}" == "${actual_darwin}" ]] || die 3 'active state 的官方 binary hash 与固定资产不一致'
+    [[ "${LINUX_BINARY_SHA256}" == "${actual_linux}" ]] || die 3 'active state 的远端官方 binary hash 与现场架构的固定资产不一致'
+    [[ "${DARWIN_BINARY_SHA256}" == "${actual_darwin}" ]] || log_warn '本机平台的官方包与部署时不同，本机侧出口验证按现在的平台进行'
     [[ "${RELAY_HOSTKEY_FINGERPRINT}" == "${state_relay_fp}" && "${EXIT_HOSTKEY_FINGERPRINT}" == "${state_exit_fp}" ]] || die 3 'active state 的 host-key 指纹与当前连接不一致'
     remote_platform_preflight
     verify_remote_resources no || die 3 'active chain 远端资源不健康'
@@ -5134,7 +5434,11 @@ case "$stage" in
           /opt/ownexit-chain/.stage-binary-*:extracted/sing-box-1.13.14-linux-amd64|\
           /opt/ownexit-chain/.stage-binary-*:extracted/sing-box-1.13.14-linux-amd64/LICENSE|\
           /opt/ownexit-chain/.stage-binary-*:extracted/sing-box-1.13.14-linux-amd64/libcronet.so|\
-          /opt/ownexit-chain/.stage-binary-*:extracted/sing-box-1.13.14-linux-amd64/sing-box) ;;
+          /opt/ownexit-chain/.stage-binary-*:extracted/sing-box-1.13.14-linux-amd64/sing-box|\
+          /opt/ownexit-chain/.stage-binary-*:extracted/sing-box-1.13.14-linux-arm64|\
+          /opt/ownexit-chain/.stage-binary-*:extracted/sing-box-1.13.14-linux-arm64/LICENSE|\
+          /opt/ownexit-chain/.stage-binary-*:extracted/sing-box-1.13.14-linux-arm64/libcronet.so|\
+          /opt/ownexit-chain/.stage-binary-*:extracted/sing-box-1.13.14-linux-arm64/sing-box) ;;
           /etc/ownexit-chain/.stage-relay-*:"$chain_id.owner.env"|\
           /etc/ownexit-chain/.stage-relay-*:"ownexit-chain-relay-$chain_id.socket"|\
           /etc/ownexit-chain/.stage-relay-*:"ownexit-chain-relay-$chain_id.service"|\
@@ -6340,9 +6644,35 @@ init_setup_host() {
   rc=0
   "${SCRIPT_DIR}/../direct/connect_to.sh" --setup-only --host "${host}" --port "${port}" --user root || rc="$?"
   [[ "${rc}" -eq 0 ]] || die 3 "${label} ${host}:${port} 配置免密失败（原因见上方 reason=...），未生成配置文件；修正后重跑 init"
-  ssh -n -i "${key}" -p "${port}" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=12 \
-    -o HostKeyAlgorithms=ssh-ed25519 -o StrictHostKeyChecking=accept-new root@"${host}" true >/dev/null 2>&1 \
-    || die 3 "${label} ${host}:${port} 没有可用的 ed25519 host key（chain 只接受 ed25519），请检查 sshd 的 HostKey 配置"
+  if init_probe_ed25519 "${key}" "${host}" "${port}"; then
+    return 0
+  fi
+  # 较旧的 OpenSSH（如 Ubuntu 20.04 的 8.2）首次连接优先用 ECDSA，known_hosts 里只记了 ECDSA；之后强制 ed25519 时
+  # 它把“换了密钥类型”当成主机身份变化而拒绝，不会自动补记。这里经刚刚已用已知主机密钥验证过的会话读取对方的
+  # ed25519 公钥并补记，信任来源与第一次连接相同，不使用未经认证的 ssh-keyscan。
+  init_record_ed25519_hostkey "${key}" "${host}" "${port}" \
+    || die 3 "${label} ${host}:${port} 无法取得 ed25519 host key（chain 只接受 ed25519），请检查 sshd 的 HostKey 配置"
+  init_probe_ed25519 "${key}" "${host}" "${port}" \
+    || die 3 "${label} ${host}:${port} 补记 ed25519 host key 后仍无法用 ed25519 登录"
+}
+
+init_probe_ed25519() {
+  ssh -n -i "$1" -p "$3" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=12 \
+    -o HostKeyAlgorithms=ssh-ed25519 -o StrictHostKeyChecking=accept-new root@"$2" true >/dev/null 2>&1
+}
+
+init_record_ed25519_hostkey() {
+  local key host port pub entry
+  key="$1"
+  host="$2"
+  port="$3"
+  pub="$(ssh -n -i "${key}" -p "${port}" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=12 \
+    -o StrictHostKeyChecking=yes root@"${host}" 'cat /etc/ssh/ssh_host_ed25519_key.pub' 2>/dev/null)" || return 1
+  pub="$(printf '%s\n' "${pub}" | awk '$1 == "ssh-ed25519" && $2 ~ /^[A-Za-z0-9+\/]+=*$/ {print $1, $2; exit}')"
+  [[ -n "${pub}" ]] || return 1
+  if [[ "${port}" == 22 ]]; then entry="${host}"; else entry="[${host}]:${port}"; fi
+  printf '%s %s\n' "${entry}" "${pub}" >> "${HOME}/.ssh/known_hosts" || return 1
+  log_info "已经由已验证的会话补记 ${entry} 的 ed25519 host key"
 }
 
 init_chain() {
@@ -6400,9 +6730,11 @@ EOF
     die 3 "中转机上的 sing-box 状态不完整（unit=${load_state:-未知} 配置目录=${config_seen:-未知} 进程=${process_seen:-未知}）；请先让它完整运行或彻底移除，再重跑 init"
   fi
   log_info "中转机已有 sing-box：${cohost}（RELAY_COHOSTS_SINGBOX=${cohost}，deploy 会保护它不受影响）"
-  if [[ "${INIT_EXIT_SOURCE_FILTER}" == none ]]; then
-    log_info 'EXIT_SOURCE_FILTER=none：出口机没有外部白名单时，它的 Reality 端口别人也能连（没有凭据用不了）；服务商安全组已限定只允许中转来源时用 --exit-source-filter provider'
-  fi
+  case "${INIT_EXIT_SOURCE_FILTER}" in
+    managed) log_info 'EXIT_SOURCE_FILTER=managed：部署时会在出口机加 nft 白名单，Reality 端口只放行中转机' ;;
+    provider) log_info 'EXIT_SOURCE_FILTER=provider：由服务商安全组只放行中转机，部署时严格检查' ;;
+    none) log_info 'EXIT_SOURCE_FILTER=none：出口机 Reality 端口不限制来源（没有凭据用不了）' ;;
+  esac
 
   ensure_private_dir "${CHAIN_CONFIG_DIR}" || die 2 "配置目录身份或权限不安全：${CHAIN_CONFIG_DIR}"
   tmp_file="$(mktemp "${CHAIN_CONFIG_DIR}/.${chain_id}.env.XXXXXX")"
