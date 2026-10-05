@@ -149,7 +149,7 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 | ---- | ---- | ---- |
 | 控制端 | macOS（已测试）；Linux（未测试）；不支持 Windows，可自行尝试 WSL | Apple 芯片的 Mac（已测试）、Intel Mac（未测试）、Linux amd64（已在 Ubuntu 20.04 测试）、Linux arm64 与 WSL（未测试） |
 | 服务器系统 | Debian、Ubuntu | 带 systemd 的 Linux；中转机需要 `systemd-socket-proxyd`；除本项目自己的表外没有 nftables 表，UFW 未启用 |
-| 服务器 CPU | 取决于 233boy/sing-box（amd64、arm64） | amd64（已测试）或 arm64（未测试），两台须相同 |
+| 服务器 CPU | 取决于 233boy/sing-box（amd64、arm64） | amd64（已在云服务器上测试）或 arm64（已在 Ubuntu 22.04 arm64 虚拟机上测试），两台须相同 |
 | 客户端 | 已测试 Clash Verge、mihomo、Shadowrocket；其它支持 VLESS-Reality 的客户端可用 `vless://` 导入 | 同左 |
 
 如果你的电脑开着代理的 TUN 模式（Clash 一类），部署途中到服务器的 SSH 可能被切断。运行链式命令时请关掉 TUN，或让中转机、出口机的 IP 走直连。
