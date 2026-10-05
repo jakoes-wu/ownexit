@@ -1,11 +1,11 @@
 # ownexit
 
-**English** | [简体中文](README.zh-CN.md)
+**English** | [简体中文](https://github.com/jakoes-wu/ownexit/blob/main/README.zh-CN.md)
 
 [![Release](https://img.shields.io/github/v/release/jakoes-wu/ownexit)](https://github.com/jakoes-wu/ownexit/releases)
 [![CI](https://github.com/jakoes-wu/ownexit/actions/workflows/ci.yml/badge.svg)](https://github.com/jakoes-wu/ownexit/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/ownexit)](https://pypi.org/project/ownexit/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](https://github.com/jakoes-wu/ownexit/blob/main/LICENSE)
 ![bash](https://img.shields.io/badge/bash-3.2%2B-blue)
 ![platform](https://img.shields.io/badge/control-macOS%20%7C%20Linux-lightgrey)
 
@@ -45,7 +45,7 @@ Everything runs on your laptop and talks to the servers over SSH. Configuration,
 
 ## Prerequisites
 
-**Servers.** One VPS for direct, two for relay, running Debian 12 or Ubuntu 22.04 and reachable as root over SSH with a password (used once). Never bought a VPS? Follow the step-by-step guide: [docs/manual/vps.en.md](docs/manual/vps.en.md) — choosing, ordering, installing the OS, firewalls.
+**Servers.** One VPS for direct, two for relay, running Debian 12 or Ubuntu 22.04 and reachable as root over SSH with a password (used once). Never bought a VPS? Follow the step-by-step guide: [docs/manual/vps.en.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/manual/vps.en.md) — choosing, ordering, installing the OS, firewalls.
 
 **Your computer.**
 
@@ -119,7 +119,7 @@ When run from a clone, the chain scripts additionally refuse configuration files
    ownexit subctl stop
    ```
 
-The VPS is remembered, so later runs need no arguments: `ownexit direct` to redeploy, `ownexit subctl status|start|stop`. Step-by-step guide: [docs/manual/direct.md](docs/manual/direct.md) (Chinese).
+The VPS is remembered, so later runs need no arguments: `ownexit direct` to redeploy, `ownexit subctl status|start|stop`. Step-by-step guide: [docs/manual/direct.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/manual/direct.md) (Chinese).
 
 ## Quick start: relay
 
@@ -141,7 +141,7 @@ The VPS is remembered, so later runs need no arguments: `ownexit direct` to rede
 
 3. **Import** the node from `~/.local/state/ownexit/chains/main/client/node.txt`, or run `ownexit multi --chains main render` for QR codes and a Clash snippet.
 
-Day to day: `ownexit chain --id main status | verify | conns | rollback`. Relay blocked? Deploy a second relay with `init --id backup …` and combine both with `multi_chain_client.sh` — clients switch automatically. Full reference: [chain/README.md](chain/README.md); guide: [docs/manual/chain.md](docs/manual/chain.md) (both in Chinese).
+Day to day: `ownexit chain --id main status | verify | conns | rollback`. Relay blocked? Deploy a second relay with `init --id backup …` and combine both with `multi_chain_client.sh` — clients switch automatically. Full reference: [chain/README.md](https://github.com/jakoes-wu/ownexit/blob/main/chain/README.md); guide: [docs/manual/chain.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/manual/chain.md) (both in Chinese).
 
 ## Supported platforms
 
@@ -162,7 +162,7 @@ If your computer runs a proxy in TUN mode (Clash and similar), SSH to the server
 - The relay only runs `systemd-socket-proxyd`; the Reality private key lives only on the exit server, in a mode-600 file. By default the exit's Reality port only accepts connections from the relay (an nftables table that starts and stops with the exit service).
 - The direct setup installs sing-box through the third-party script 233boy/sing-box. The relay setup downloads a pinned official sing-box release on each server and checks the SHA-256 of both the archive and the binary.
 
-See [SECURITY.md](SECURITY.md) for how to report a vulnerability.
+See [SECURITY.md](https://github.com/jakoes-wu/ownexit/blob/main/SECURITY.md) for how to report a vulnerability.
 
 ## FAQ
 
@@ -176,8 +176,8 @@ See [SECURITY.md](SECURITY.md) for how to report a vulnerability.
 
 ## Contributing
 
-Issues and pull requests are welcome; please read [CONTRIBUTING.md](CONTRIBUTING.md) first. The project follows the [Contributor Covenant](CODE_OF_CONDUCT.md).
+Issues and pull requests are welcome; please read [CONTRIBUTING.md](https://github.com/jakoes-wu/ownexit/blob/main/CONTRIBUTING.md) first. The project follows the [Contributor Covenant](https://github.com/jakoes-wu/ownexit/blob/main/CODE_OF_CONDUCT.md).
 
 ## License
 
-[MIT](LICENSE). Use this software in accordance with the laws where you live and the terms of your server provider.
+[MIT](https://github.com/jakoes-wu/ownexit/blob/main/LICENSE). Use this software in accordance with the laws where you live and the terms of your server provider.
