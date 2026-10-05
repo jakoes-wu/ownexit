@@ -6,7 +6,7 @@
 # 本脚本完全不连中转机与出口机，只读本机 chain 产物（env + node.txt），写自己的产物目录。
 #
 # 前置:
-#   - 控制端 macOS（Apple 芯片 / Intel）或 Linux（amd64 / arm64，含 WSL），/bin/bash 3.2 及以上；必须从本仓库 Git worktree 内执行（git 是读取真实配置前的防泄漏闸门依赖）。
+#   - 控制端 macOS（Apple 芯片 / Intel）或 Linux（amd64 / arm64，含 WSL），/bin/bash 3.2 及以上；git clone 使用时 git 是读取真实配置前的防泄漏闸门依赖（pip 安装的副本不在仓库里，跳过该闸门）。
 #   - --chains 里每个 CHAIN_ID 都已由 setup_chain.sh deploy 且 status=deployed/healthy：
 #     本脚本按固定路径读 ${XDG_CONFIG_HOME:-~/.config}/ownexit/chains/<id>.env（只取 CHAIN_ID / RELAY_HOST / EXPECTED_EXIT_IPV4）
 #     与 ${XDG_STATE_HOME:-~/.local/state}/ownexit/chains/<id>/client/node.txt（只读）。各链的 EXPECTED_EXIT_IPV4 必须相同。
@@ -354,11 +354,19 @@ require_local_dependencies() {
 
 # 与 setup_chain.sh init_repo_root() 同步：真实配置不得位于仓库 worktree 内，git 不可用时先失败而不是跳过闸门。
 init_repo_root() {
+  # 与 setup_chain.sh init_repo_root 同步：脚本上一级没有 .git（pip 安装的副本）时没有可泄漏的仓库，跳过闸门。
+  if [[ ! -e "${SCRIPT_DIR}/../.git" && ! -L "${SCRIPT_DIR}/../.git" ]]; then
+    REPO_ROOT=''
+    return 0
+  fi
+  command -v git >/dev/null 2>&1 || die 1 '本机缺少 bootstrap 依赖：git'
   REPO_ROOT="$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel 2>/dev/null)" || die 1 '无法确定脚本所属 Git worktree'
   [[ -n "${REPO_ROOT}" && -d "${REPO_ROOT}" && ! -L "${REPO_ROOT}" ]] || die 1 '脚本所属 Git worktree 身份异常'
 }
 
 reject_path_inside_repo() {
+  # REPO_ROOT 为空（pip 安装形态）时不判断，否则 "${REPO_ROOT}"/* 会变成 /* 而拒绝一切路径。
+  [[ -n "${REPO_ROOT}" ]] || return 0
   case "$1" in
     "${REPO_ROOT}"|"${REPO_ROOT}"/*) die 2 "$2 必须位于 Git worktree 外：$1" ;;
   esac

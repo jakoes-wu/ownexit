@@ -39,11 +39,11 @@
 ## 3. 部署
 
 ```sh
-git clone https://github.com/<owner>/ownexit && cd ownexit
-./direct/setup_direct.sh --host 203.0.113.7
+pipx install ownexit
+ownexit direct --host 203.0.113.7
 ```
 
-SSH 端口不是 22 时加 `--port 2222`。
+SSH 端口不是 22 时加 `--port 2222`。本手册下文的命令按 git clone 的写法给出；用 pipx 安装时把 `./direct/setup_direct.sh` 换成 `ownexit direct`、`./direct/subctl` 换成 `ownexit subctl`，参数完全相同。
 
 运行过程：
 

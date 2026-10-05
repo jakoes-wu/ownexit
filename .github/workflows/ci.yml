@@ -31,6 +31,29 @@ jobs:
             if "$f" --no-such-option < /dev/null > /dev/null 2>&1; then echo "$f accepted an unknown option"; exit 1; fi
           done
 
+  package:
+    # 构建 sdist / wheel，在全新虚拟环境里安装 wheel，确认 ownexit 入口和每个子命令都能转发到包内脚本。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.8"
+      - name: Build
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+          twine check --strict dist/*
+      - name: Install and run
+        run: |
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install dist/*.whl
+          cd /tmp
+          /tmp/venv/bin/ownexit --version
+          /tmp/venv/bin/ownexit --help
+          for c in direct subctl connect chain multi; do /tmp/venv/bin/ownexit "$c" --help > /dev/null; done
+          if /tmp/venv/bin/ownexit no-such-command > /dev/null 2>&1; then echo "unknown command accepted"; exit 1; fi
+
   bash32:
     # 链式脚本承诺能在 macOS 自带的 bash 3.2 上运行。
     runs-on: macos-latest

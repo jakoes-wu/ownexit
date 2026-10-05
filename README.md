@@ -2,19 +2,25 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
+[![Release](https://img.shields.io/github/v/release/jakoes-wu/ownexit)](https://github.com/jakoes-wu/ownexit/releases)
 [![CI](https://github.com/jakoes-wu/ownexit/actions/workflows/ci.yml/badge.svg)](https://github.com/jakoes-wu/ownexit/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/ownexit)](https://pypi.org/project/ownexit/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![bash](https://img.shields.io/badge/bash-3.2%2B-blue)
-![macOS](https://img.shields.io/badge/control-macOS-lightgrey)
+![platform](https://img.shields.io/badge/control-macOS%20%7C%20Linux-lightgrey)
 
 Turn a VPS you rent into your own fixed exit IP — connect directly, or through a relay — set up from your laptop with one command.
 
 ```sh
-git clone https://github.com/jakoes-wu/ownexit && cd ownexit
-./direct/setup_direct.sh --host 203.0.113.7   # asks for the VPS root password once
+pipx install ownexit
+ownexit direct --host 203.0.113.7   # asks for the VPS root password once
 ```
 
 When it finishes, paste the printed subscription URL into Clash Verge or Shadowrocket. That's it.
+
+![ownexit demo: set up a relay + exit chain with two IPs](https://raw.githubusercontent.com/jakoes-wu/ownexit/main/docs/assets/demo.gif)
+
+<sub>The IPs in the demo are examples.</sub>
 
 - **One command, from your laptop.** No logging into the server to type commands.
 - **A fixed exit that is yours.** Your traffic leaves from your own VPS; the IP is not shared with strangers.
@@ -37,6 +43,30 @@ phone / laptop ──VLESS-Reality──▶ relay (systemd-socket-proxyd) ──
 
 Everything runs on your laptop and talks to the servers over SSH. Configuration, keys and state stay on your laptop, outside this repository.
 
+## Install
+
+```sh
+pipx install ownexit        # or: pip install --user ownexit
+ownexit --help
+```
+
+`ownexit` is a thin wrapper around the bundled bash scripts, so you can also run them straight from a clone — the commands map one to one:
+
+| `ownexit …` | script in a clone |
+| ---- | ---- |
+| `ownexit direct` | `direct/setup_direct.sh` |
+| `ownexit subctl` | `direct/subctl` |
+| `ownexit connect` | `direct/connect_to.sh` |
+| `ownexit chain` | `chain/setup_chain.sh` |
+| `ownexit multi` | `chain/multi_chain_client.sh` |
+
+```sh
+git clone https://github.com/jakoes-wu/ownexit && cd ownexit
+./direct/setup_direct.sh --host 203.0.113.7
+```
+
+When run from a clone, the chain scripts additionally refuse configuration files that live inside the clone, so real IPs and keys cannot be committed by accident.
+
 ## What you need
 
 | | Direct | Relay |
@@ -44,7 +74,7 @@ Everything runs on your laptop and talks to the servers over SSH. Configuration,
 | Your computer | macOS (Linux untested) | macOS or Linux (WSL counts as Linux) |
 | Servers | 1 × Debian / Ubuntu VPS | 2 × Linux, both amd64 or both arm64 (relay + exit) |
 | Login | root password over SSH, used once | same, for each server |
-| Tools | `git`, `ssh`, `curl`, `openssl`, `expect` (`brew install expect`) | same |
+| Tools | `pipx` (or `git` for a clone), `ssh`, `curl`, `openssl`, `expect` (`brew install expect`) | same |
 
 The first run asks for each server's root password (not echoed); after that everything uses a dedicated SSH key in `~/.ssh/ownexit/`.
 
@@ -53,7 +83,7 @@ The first run asks for each server's root password (not echoed); after that ever
 1. **Deploy**
 
    ```sh
-   ./direct/setup_direct.sh --host 203.0.113.7          # add --port 2222 if SSH is not on 22
+   ownexit direct --host 203.0.113.7          # add --port 2222 if SSH is not on 22
    ```
 
    It sets up key login, checks the system, enables BBR, installs sing-box (by running the third-party installer [233boy/sing-box](https://github.com/233boy/sing-box) interactively — choose **VLESS-REALITY** and press Enter for the rest), renders subscriptions, uploads them and verifies every layer.
@@ -69,17 +99,17 @@ The first run asks for each server's root password (not echoed); after that ever
 3. **Check and close up** — open `https://ipinfo.io` on a device: it should show your VPS's IP. Then turn the subscription endpoint off until you need it again:
 
    ```sh
-   ./direct/subctl stop
+   ownexit subctl stop
    ```
 
-The VPS is remembered, so later runs need no arguments: `./direct/setup_direct.sh` to redeploy, `./direct/subctl status|start|stop`. Step-by-step guide: [docs/manual/direct.md](docs/manual/direct.md) (Chinese).
+The VPS is remembered, so later runs need no arguments: `ownexit direct` to redeploy, `ownexit subctl status|start|stop`. Step-by-step guide: [docs/manual/direct.md](docs/manual/direct.md) (Chinese).
 
 ## Quick start: relay
 
 1. **Give it two IPs**
 
    ```sh
-   chain/setup_chain.sh init --relay 203.0.113.10 --exit 203.0.113.20
+   ownexit chain init --relay 203.0.113.10 --exit 203.0.113.20
    ```
 
    It sets up key login on both servers (one password prompt each), detects the exit IP and asks you to confirm it, checks whether the relay already runs sing-box, and writes `~/.config/ownexit/chains/main.env`. Nothing on the servers is changed yet. By default deploy will also add an nftables rule on the exit so that only the relay can reach its Reality port (`--exit-source-filter managed`); use `provider` if your provider's security group already does that, or `none` to skip it.
@@ -87,14 +117,14 @@ The VPS is remembered, so later runs need no arguments: `./direct/setup_direct.s
 2. **Deploy**
 
    ```sh
-   chain/setup_chain.sh --id main deploy
+   ownexit chain --id main deploy
    ```
 
    Both servers download the pinned sing-box release from GitHub themselves (falling back to an upload from your computer). It deploys the exit first, then the relay, as one transaction, and verifies the exit IP three different ways. If anything fails, it cleans up; if your network drops halfway, run `deploy` or `rollback` again and it converges.
 
-3. **Import** the node from `~/.local/state/ownexit/chains/main/client/node.txt`, or run `chain/multi_chain_client.sh --chains main render` for QR codes and a Clash snippet.
+3. **Import** the node from `~/.local/state/ownexit/chains/main/client/node.txt`, or run `ownexit multi --chains main render` for QR codes and a Clash snippet.
 
-Day to day: `chain/setup_chain.sh --id main status | verify | conns | rollback`. Relay blocked? Deploy a second relay with `init --id backup …` and combine both with `multi_chain_client.sh` — clients switch automatically. Full reference: [chain/README.md](chain/README.md); guide: [docs/manual/chain.md](docs/manual/chain.md) (both in Chinese).
+Day to day: `ownexit chain --id main status | verify | conns | rollback`. Relay blocked? Deploy a second relay with `init --id backup …` and combine both with `multi_chain_client.sh` — clients switch automatically. Full reference: [chain/README.md](chain/README.md); guide: [docs/manual/chain.md](docs/manual/chain.md) (both in Chinese).
 
 ## Supported platforms
 
@@ -111,7 +141,7 @@ If your computer runs a proxy in TUN mode (Clash and similar), SSH to the server
 
 - No real IP, password or key ever goes into this repository. There is no "edit the IP at the top of the script" step and no `--password` option. Passwords are typed interactively (or passed via `OWNEXIT_SSH_PASSWORD` for non-interactive use), submitted once per try, and never written to disk.
 - A wrong password is retried at most 3 times, and each try is submitted to the server only once, so you are unlikely to trip fail2ban. Failures end with `reason=bad-password`, `reason=password-disabled` or `reason=unreachable`.
-- The direct subscription endpoint is plain HTTP protected by a random path. Keep it stopped (`subctl stop`) except while importing, and use `setup_direct.sh --rotate-token` if a URL leaks.
+- The direct subscription endpoint is plain HTTP protected by a random path. Keep it stopped (`ownexit subctl stop`) except while importing, and use `ownexit direct --rotate-token` if a URL leaks.
 - The relay only runs `systemd-socket-proxyd`; the Reality private key lives only on the exit server, in a mode-600 file. By default the exit's Reality port only accepts connections from the relay (an nftables table that starts and stops with the exit service).
 - The direct setup installs sing-box through the third-party script 233boy/sing-box. The relay setup downloads a pinned official sing-box release on each server and checks the SHA-256 of both the archive and the binary.
 
@@ -121,9 +151,9 @@ See [SECURITY.md](SECURITY.md) for how to report a vulnerability.
 
 **Can I change the SSH port or user?** Direct: `--port`, `--user`. Relay: `--relay-port`, `--exit-port`; the relay setup requires root.
 
-**I manage several VPSes.** Pass `--host` to pick one. Without it, `setup_direct.sh` and `subctl` list the remembered servers and exit.
+**I manage several VPSes.** Pass `--host` to pick one. Without it, `ownexit direct` and `ownexit subctl` list the remembered servers and exit.
 
-**How do I undo it?** Relay: `chain/setup_chain.sh --id main rollback`. Direct (0.1.0 has no uninstall command yet): on the VPS, `systemctl disable --now ownexit-subscription`, remove `/opt/ownexit-subscription` and `/etc/systemd/system/ownexit-subscription.service`, and remove sing-box with the installer's own `sb` tool.
+**How do I undo it?** Relay: `ownexit chain --id main rollback`. Direct (0.1.0 has no uninstall command yet): on the VPS, `systemctl disable --now ownexit-subscription`, remove `/opt/ownexit-subscription` and `/etc/systemd/system/ownexit-subscription.service`, and remove sing-box with the installer's own `sb` tool.
 
 **Where are my files?** Keys: `~/.ssh/ownexit/`. Configuration: `~/.config/ownexit/`. State and subscriptions: `~/.local/state/ownexit/`.
 

@@ -155,7 +155,8 @@ if [[ ! -f "${KEY}" ]] || ! vssh "exit" >/dev/null 2>&1; then
   # 这里只透传它的退出码，不重复解释失败原因。
   echo "[*] 免密不可用，调用 connect_to.sh 配置免密（会问一次 VPS 密码）"
   connect_rc=0
-  "${SCRIPT_DIR}/connect_to.sh" --setup-only --host "${HOST}" --port "${SSH_PORT}" --user "${SSH_USER}" \
+  # 用 bash 显式执行兄弟脚本：pip 安装的副本不保证保留可执行位。
+  bash "${SCRIPT_DIR}/connect_to.sh" --setup-only --host "${HOST}" --port "${SSH_PORT}" --user "${SSH_USER}" \
     || connect_rc=$?
   [[ "${connect_rc}" -eq 0 ]] || exit "${connect_rc}"
   vssh "exit" >/dev/null 2>&1 || die "connect_to.sh 报告成功，但免密登录仍不可用，请人工检查 ${KEY}"
@@ -400,7 +401,7 @@ pass "本地订阅产物渲染并校验完成"
 # ---------- 7. 同步到 VPS 并启用订阅服务 ----------
 
 echo "[*] 调用 sync_to_vps.sh 一次性同步到 VPS"
-"${SCRIPT_DIR}/sync_to_vps.sh" --host "${HOST}" --user "${SSH_USER}" --port "${SSH_PORT}" \
+bash "${SCRIPT_DIR}/sync_to_vps.sh" --host "${HOST}" --user "${SSH_USER}" --port "${SSH_PORT}" \
   "${STAGING}" "$(dirname "${SUB_BASE_DIR}")"
 
 # 轮换 TOKEN 后清理 VPS 上的旧 TOKEN 目录（格式校验防误删）
