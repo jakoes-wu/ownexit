@@ -3,3 +3,7 @@
 !chain/chain.example.env
 local/
 .DS_Store
+dist/
+build/
+*.egg-info/
+__pycache__/

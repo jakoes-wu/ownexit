@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ownexit"
+dynamic = ["version"]
+description = "Turn a VPS you rent into your own fixed exit IP: direct or via a relay, set up from your laptop over SSH."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+keywords = ["vps", "proxy", "sing-box", "vless", "reality", "relay", "ssh", "bash"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Unix Shell",
+    "Topic :: Internet :: Proxy Servers",
+    "Topic :: System :: Networking",
+]
+
+[project.scripts]
+ownexit = "ownexit.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/jakoes-wu/ownexit"
+Changelog = "https://github.com/jakoes-wu/ownexit/blob/main/CHANGELOG.md"
+Issues = "https://github.com/jakoes-wu/ownexit/issues"
+
+[tool.setuptools]
+# 脚本不复制进 src/：ownexit.direct / ownexit.chain 直接映射仓库根的 direct/、chain/，
+# 这样 git clone 用法与 pip 安装用的是同一份文件，目录相对关系（chain/../direct）也保持不变。
+packages = ["ownexit", "ownexit.direct", "ownexit.chain"]
+
+[tool.setuptools.package-dir]
+"ownexit" = "src/ownexit"
+"ownexit.direct" = "direct"
+"ownexit.chain" = "chain"
+
+[tool.setuptools.package-data]
+"ownexit.direct" = ["*.sh", "subctl", "README.md"]
+"ownexit.chain" = ["*.sh", "*.env", "README.md"]
+
+[tool.setuptools.dynamic]
+version = {attr = "ownexit.__version__"}

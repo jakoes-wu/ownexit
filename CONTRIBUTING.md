@@ -29,3 +29,11 @@ shellcheck 的告警要修掉；确实是误报的，在出现告警的那一行
 1. 较大的改动先开 issue 讨论。
 2. 说明你在什么环境下实测过（控制端系统、VPS 发行版和版本）。
 3. 用户可见的行为变化要同时更新 `README.md`、`README.zh-CN.md`、`docs/manual/` 下的手册和 `CHANGELOG.md`。
+
+## 发布
+
+1. 在功能分支上把 `src/ownexit/__init__.py` 的 `__version__` 改成新版本，并把 `CHANGELOG.md` 的 `[Unreleased]` 内容移到新版本下。
+2. 合并到 `main`、CI 通过后，用自己的凭据发布：`gh release create vX.Y.Z --target <合并提交> --notes-file <说明>`。
+3. `Publish to PyPI` 工作流随之构建 sdist / wheel 并经 Trusted Publishing 上传；它会核对 wheel 版本等于 tag，没改 `__version__` 就会失败。给已有 tag 补传：`gh workflow run pypi.yml -f tag=vX.Y.Z`。
+4. 演示动画与社交预览图：`python3 scripts/make-assets.py`（macOS，需要 Pillow），生成到 `docs/assets/`；社交预览图需要在仓库 Settings → Social preview 手动上传。
+

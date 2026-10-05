@@ -2,19 +2,25 @@
 
 [English](README.md) | **简体中文**
 
+[![Release](https://img.shields.io/github/v/release/jakoes-wu/ownexit)](https://github.com/jakoes-wu/ownexit/releases)
 [![CI](https://github.com/jakoes-wu/ownexit/actions/workflows/ci.yml/badge.svg)](https://github.com/jakoes-wu/ownexit/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/ownexit)](https://pypi.org/project/ownexit/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![bash](https://img.shields.io/badge/bash-3.2%2B-blue)
-![macOS](https://img.shields.io/badge/control-macOS-lightgrey)
+![platform](https://img.shields.io/badge/control-macOS%20%7C%20Linux-lightgrey)
 
 把你租的 VPS 变成自己专属的固定出口 IP：直连或经中转，在自己电脑上一条命令装好。
 
 ```sh
-git clone https://github.com/jakoes-wu/ownexit && cd ownexit
-./direct/setup_direct.sh --host 203.0.113.7   # 第一次会问一次 VPS 的 root 密码
+pipx install ownexit
+ownexit direct --host 203.0.113.7   # 第一次会问一次 VPS 的 root 密码
 ```
 
 跑完后，把终端打印的订阅链接粘贴到 Clash Verge 或 Shadowrocket，就能用了。
+
+![ownexit 演示：给两个 IP 部署一条中转 + 出口链](https://raw.githubusercontent.com/jakoes-wu/ownexit/main/docs/assets/demo.gif)
+
+<sub>演示中的 IP 是示例。</sub>
 
 - **一条命令**：在自己电脑上运行，不用登录服务器敲命令。
 - **固定出口**：流量从你自己的 VPS 出去，IP 不和陌生人共用。
@@ -37,6 +43,30 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 
 所有操作都在你的电脑上运行，经 SSH 操作服务器。配置、密钥和状态都留在你电脑上、本仓库之外。
 
+## 安装
+
+```sh
+pipx install ownexit        # 或者：pip install --user ownexit
+ownexit --help
+```
+
+`ownexit` 只是包内 bash 脚本的一层薄封装，所以也可以 git clone 后直接运行脚本，两者一一对应：
+
+| `ownexit …` | 仓库里的脚本 |
+| ---- | ---- |
+| `ownexit direct` | `direct/setup_direct.sh` |
+| `ownexit subctl` | `direct/subctl` |
+| `ownexit connect` | `direct/connect_to.sh` |
+| `ownexit chain` | `chain/setup_chain.sh` |
+| `ownexit multi` | `chain/multi_chain_client.sh` |
+
+```sh
+git clone https://github.com/jakoes-wu/ownexit && cd ownexit
+./direct/setup_direct.sh --host 203.0.113.7
+```
+
+从 git clone 运行时，链式脚本还会拒绝放在仓库目录里的配置文件，防止真实 IP 和密钥被误提交。
+
 ## 准备
 
 | | 直连 | 链式 |
@@ -44,7 +74,7 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 | 你的电脑 | macOS（Linux 未测试） | macOS 或 Linux（WSL 按 Linux 算） |
 | 服务器 | 1 台 Debian / Ubuntu VPS | 2 台 Linux，同为 amd64 或同为 arm64（中转机 + 出口机） |
 | 登录方式 | root 密码 SSH，只用一次 | 同左，每台各一次 |
-| 本机工具 | `git`、`ssh`、`curl`、`openssl`、`expect`（`brew install expect`） | 同左 |
+| 本机工具 | `pipx`（git clone 方式用 `git`）、`ssh`、`curl`、`openssl`、`expect`（`brew install expect`） | 同左 |
 
 第一次运行会问每台服务器的 root 密码（不回显），之后全程使用 `~/.ssh/ownexit/` 下的专用密钥。
 
@@ -53,7 +83,7 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 1. **部署**
 
    ```sh
-   ./direct/setup_direct.sh --host 203.0.113.7          # SSH 端口不是 22 时加 --port 2222
+   ownexit direct --host 203.0.113.7          # SSH 端口不是 22 时加 --port 2222
    ```
 
    依次完成：配免密、检查系统、开启 BBR、安装 sing-box（经 SSH 交互运行第三方安装脚本 [233boy/sing-box](https://github.com/233boy/sing-box)，协议选 **VLESS-REALITY**，其余直接回车）、生成订阅、上传并逐层验证。
@@ -69,17 +99,17 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 3. **检查并收尾**：在设备上打开 `https://ipinfo.io`，应当显示你 VPS 的 IP。然后关掉订阅服务，需要时再开：
 
    ```sh
-   ./direct/subctl stop
+   ownexit subctl stop
    ```
 
-脚本会记住这台 VPS，之后不带参数也能用：`./direct/setup_direct.sh` 重新部署，`./direct/subctl status|start|stop` 管理订阅服务。逐步说明见 [docs/manual/direct.md](docs/manual/direct.md)。
+脚本会记住这台 VPS，之后不带参数也能用：`ownexit direct` 重新部署，`ownexit subctl status|start|stop` 管理订阅服务。逐步说明见 [docs/manual/direct.md](docs/manual/direct.md)。
 
 ## 快速上手：链式
 
 1. **给两个 IP**
 
    ```sh
-   chain/setup_chain.sh init --relay 203.0.113.10 --exit 203.0.113.20
+   ownexit chain init --relay 203.0.113.10 --exit 203.0.113.20
    ```
 
    给两台机器配免密（各问一次密码），探测出口 IP 并请你确认，检查中转机上是否已有 sing-box，生成 `~/.config/ownexit/chains/main.env`。这一步不改动服务器。默认部署时还会在出口机加一条 nftables 规则，让它的 Reality 端口只接受中转机的连接（`--exit-source-filter managed`）；服务商安全组已经这样限制时用 `provider`，不想限制用 `none`。
@@ -87,14 +117,14 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 2. **部署**
 
    ```sh
-   chain/setup_chain.sh --id main deploy
+   ownexit chain --id main deploy
    ```
 
    两台服务器自己从 GitHub 下载固定版本的 sing-box（失败才由你的电脑上传），先部署出口机、再部署中转机，整个过程是一个事务，最后从三个层面验证出口 IP；任何一步失败都会自动清理，网络中途断开时再跑一次 `deploy` 或 `rollback` 就会收敛。
 
-3. **导入**：节点链接在 `~/.local/state/ownexit/chains/main/client/node.txt`；也可以运行 `chain/multi_chain_client.sh --chains main render` 生成二维码和 Clash 配置片段。
+3. **导入**：节点链接在 `~/.local/state/ownexit/chains/main/client/node.txt`；也可以运行 `ownexit multi --chains main render` 生成二维码和 Clash 配置片段。
 
-日常操作：`chain/setup_chain.sh --id main status | verify | conns | rollback`。中转机被墙了？用 `init --id backup …` 再部署一台中转，再用 `multi_chain_client.sh` 把两条链合在一起，客户端会自动切换。完整参考见 [chain/README.md](chain/README.md)，逐步说明见 [docs/manual/chain.md](docs/manual/chain.md)。
+日常操作：`ownexit chain --id main status | verify | conns | rollback`。中转机被墙了？用 `init --id backup …` 再部署一台中转，再用 `multi_chain_client.sh` 把两条链合在一起，客户端会自动切换。完整参考见 [chain/README.md](chain/README.md)，逐步说明见 [docs/manual/chain.md](docs/manual/chain.md)。
 
 ## 支持的平台
 
@@ -111,7 +141,7 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 
 - 真实 IP、密码和密钥都不会进入本仓库。没有“编辑脚本顶部填 IP”的用法，也没有 `--password` 选项。密码交互输入（非交互场景用环境变量 `OWNEXIT_SSH_PASSWORD`），不写盘。
 - 密码输错最多可重试 3 次，每次只向服务器提交一次，不容易触发 fail2ban 一类的封禁。失败时最后一行是 `reason=bad-password`、`reason=password-disabled` 或 `reason=unreachable`。
-- 直连的订阅服务是明文 HTTP、靠随机路径保护。平时用 `subctl stop` 关闭，只在导入时打开；链接泄露时用 `setup_direct.sh --rotate-token` 换一个。
+- 直连的订阅服务是明文 HTTP、靠随机路径保护。平时用 `ownexit subctl stop` 关闭，只在导入时打开；链接泄露时用 `ownexit direct --rotate-token` 换一个。
 - 中转机只运行 `systemd-socket-proxyd`；Reality 私钥只存在于出口机权限 600 的文件里。默认情况下，出口机的 Reality 端口只接受中转机的连接（一张随出口服务起停的 nftables 表）。
 - 直连通过第三方脚本 233boy/sing-box 安装 sing-box；链式由每台服务器下载固定版本的官方 sing-box 发布包，并校验归档和 binary 的 SHA-256。
 
@@ -121,9 +151,9 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 
 **能改 SSH 端口或用户吗？** 直连用 `--port`、`--user`；链式用 `--relay-port`、`--exit-port`，链式要求 root。
 
-**我有好几台 VPS。** 用 `--host` 指定。不带 `--host` 时，`setup_direct.sh` 和 `subctl` 会列出记住的几台并退出。
+**我有好几台 VPS。** 用 `--host` 指定。不带 `--host` 时，`ownexit direct` 和 `ownexit subctl` 会列出记住的几台并退出。
 
-**怎么撤销？** 链式：`chain/setup_chain.sh --id main rollback`。直连（0.1.0 还没有卸载命令）：在 VPS 上执行 `systemctl disable --now ownexit-subscription`，删除 `/opt/ownexit-subscription` 和 `/etc/systemd/system/ownexit-subscription.service`，再用安装脚本自带的 `sb` 工具卸载 sing-box。
+**怎么撤销？** 链式：`ownexit chain --id main rollback`。直连（0.1.0 还没有卸载命令）：在 VPS 上执行 `systemctl disable --now ownexit-subscription`，删除 `/opt/ownexit-subscription` 和 `/etc/systemd/system/ownexit-subscription.service`，再用安装脚本自带的 `sb` 工具卸载 sing-box。
 
 **文件都在哪？** 密钥：`~/.ssh/ownexit/`；配置：`~/.config/ownexit/`；状态和订阅：`~/.local/state/ownexit/`。
 

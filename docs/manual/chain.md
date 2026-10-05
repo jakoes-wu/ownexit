@@ -2,7 +2,7 @@
 
 出口机的 IP 被墙、或者你想让客户端的入口和出口分开时，用链式：客户端先连一台中转机，中转机只做 TCP 透传，流量最终从出口机出去。网站看到的仍是出口机的 IP；中转机上不放任何密钥。
 
-命令和机制的完整说明见 [`chain/README.md`](../../chain/README.md)，本手册只讲一遍从零到能用的步骤。
+命令和机制的完整说明见 [`chain/README.md`](../../chain/README.md)，本手册只讲一遍从零到能用的步骤。命令按 git clone 的写法给出；用 `pipx install ownexit` 安装时，把 `chain/setup_chain.sh` 换成 `ownexit chain`、`chain/multi_chain_client.sh` 换成 `ownexit multi`，参数完全相同。
 
 ## 1. 准备
 

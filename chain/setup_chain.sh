@@ -3,7 +3,7 @@
 # 前置：
 #   - 控制端：macOS（Apple 芯片 / Intel，系统 /bin/bash 3.2 即可）或 Linux（amd64 / arm64，含 WSL）。
 #   - 两台 Linux 主机（同为 amd64 或同为 arm64）均已配置 root 免密 SSH，ed25519 host key 已进入 known_hosts（init 会配好）。
-#   - 出口机控制台已允许中转主机访问，配置文件位于 Git worktree 外且权限为 600。
+#   - 出口机安全组已允许中转主机访问；配置文件权限为 600，git clone 使用时还须位于仓库工作区外（pip 安装时没有工作区，不检查）。
 #   - 两台远端的依赖、防火墙与既有 sing-box 状态须通过 preflight；脚本不会自动安装软件包或改防火墙。
 #   - 连接治理命令（conns/kick/ban/unban/banlist）要求链已 deploy；kick 依赖中转内核支持 ss -K，
 #     ban 依赖中转 cgroup v2 + systemd IPAddressDeny=（BPF），二者实测于 Debian 12 / systemd 252。
@@ -1647,7 +1647,13 @@ require_local_dependencies() {
 }
 
 init_repo_root() {
-  # CONFIG_PATH 的“不得位于 worktree 内”是秘密防泄漏闸门；git 不可用或仓库身份不明时必须先失败。
+  # CONFIG_PATH 的“不得位于 worktree 内”是秘密防泄漏闸门。按安装形态区分：
+  #   - 脚本上一级有 .git（git clone 或 worktree）：git 不可用或仓库身份不明时必须先失败，不能跳过闸门；
+  #   - 没有 .git（pip 安装的副本）：本来就不存在可泄漏的仓库，REPO_ROOT 置空，所有“位于仓库内”判断随之跳过。
+  if [[ ! -e "${SCRIPT_DIR}/../.git" && ! -L "${SCRIPT_DIR}/../.git" ]]; then
+    REPO_ROOT=''
+    return 0
+  fi
   command -v git >/dev/null 2>&1 || die 3 '本机缺少 bootstrap 依赖：git'
   REPO_ROOT="$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel 2>/dev/null)" || die 3 '无法确定脚本所属 Git worktree'
   [[ -n "${REPO_ROOT}" && -d "${REPO_ROOT}" && ! -L "${REPO_ROOT}" ]] || die 3 '脚本所属 Git worktree 身份异常'
@@ -6642,7 +6648,8 @@ init_setup_host() {
   key="$(init_key_path "${host}" "${port}")"
   log_info "${label} ${host}:${port} 配置免密"
   rc=0
-  "${SCRIPT_DIR}/../direct/connect_to.sh" --setup-only --host "${host}" --port "${port}" --user root || rc="$?"
+  # 用 bash 显式执行：pip 安装的副本不保证保留可执行位。
+  bash "${SCRIPT_DIR}/../direct/connect_to.sh" --setup-only --host "${host}" --port "${port}" --user root || rc="$?"
   [[ "${rc}" -eq 0 ]] || die 3 "${label} ${host}:${port} 配置免密失败（原因见上方 reason=...），未生成配置文件；修正后重跑 init"
   if init_probe_ed25519 "${key}" "${host}" "${port}"; then
     return 0
@@ -6697,9 +6704,12 @@ init_chain() {
   config_file="${CHAIN_CONFIG_DIR}/${chain_id}.env"
   # 已存在就拒绝：覆盖会让已部署链的 state（绑定配置哈希）与配置对不上。
   [[ ! -e "${config_file}" && ! -L "${config_file}" ]] || die 2 "配置已存在：${config_file}；换一个 --id，或确认不再需要后手工删除它"
-  case "${config_file}" in
-    "${REPO_ROOT}"|"${REPO_ROOT}"/*) die 2 '配置目录位于本仓库内；请把 XDG_CONFIG_HOME 指到仓库外' ;;
-  esac
+  # REPO_ROOT 为空（pip 安装形态）时不判断；否则 "${REPO_ROOT}"/* 会变成 /*，把所有路径都当成仓库内。
+  if [[ -n "${REPO_ROOT}" ]]; then
+    case "${config_file}" in
+      "${REPO_ROOT}"|"${REPO_ROOT}"/*) die 2 '配置目录位于本仓库内；请把 XDG_CONFIG_HOME 指到仓库外' ;;
+    esac
+  fi
 
   init_setup_host 中转机 "${relay}" "${relay_port}"
   init_setup_host 出口机 "${exit_host}" "${exit_port}"

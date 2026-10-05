@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-05
+
+### 新增
+
+- 发布到 PyPI：`pipx install ownexit` 后得到单一命令 `ownexit`，子命令 `direct` / `subctl` / `connect` / `chain` / `multi` 与仓库里的脚本一一对应，参数原样转发。
+- README 加入 PyPI 徽章与演示动画（`scripts/make-assets.py` 生成，回放真实输出，IP 为示例）。
+- 发布工作流 `pypi.yml`（GitHub release 时经 PyPI Trusted Publishing 上传）；CI 新增打包安装检查。
+
+### 变更
+
+- 链式脚本的“配置不得位于仓库工作区内”检查只在 git clone 形态下执行；pip 安装的副本不在任何仓库里，跳过该检查。
+- 脚本之间改用 `bash <脚本>` 互相调用，不依赖文件的可执行位。
+
 ## [0.2.0] - 2026-10-05
 
 ### 新增
