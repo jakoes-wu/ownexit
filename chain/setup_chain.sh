@@ -1638,7 +1638,8 @@ require_local_dependencies() {
   esac
   bash -n "${SCRIPT_PATH}" || die 3 '当前 PATH 中的 bash 无法解析脚本'
   /bin/bash -n "${SCRIPT_PATH}" || die 3 '/bin/bash 无法解析脚本'
-  for command_name in ssh scp ssh-keygen curl openssl tar ps mktemp mkfifo stat readlink link ln sync awk sed grep sort tr head tail cmp find chmod mkdir rmdir rm cp mv cut cat date sleep uname kill dirname basename id git ${platform_commands}; do
+  # git 不在这份清单里：只有 git clone 形态需要它，由 init_repo_root 按安装形态自行检查；pip 安装的副本没有 git 也能运行。
+  for command_name in ssh scp ssh-keygen curl openssl tar ps mktemp mkfifo stat readlink link ln sync awk sed grep sort tr head tail cmp find chmod mkdir rmdir rm cp mv cut cat date sleep uname kill dirname basename id ${platform_commands}; do
     command -v "${command_name}" >/dev/null 2>&1 || die 3 "本机缺少依赖：${command_name}"
   done
   ssh -E /dev/null -G -F /dev/null localhost >/dev/null 2>&1 || die 3 '本机 OpenSSH 不支持独立 LogFile（-E）能力'

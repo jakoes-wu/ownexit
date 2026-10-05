@@ -343,7 +343,8 @@ require_local_dependencies() {
     Linux) platform_commands='ip timeout' ;;
     *) die 1 "控制端只支持 macOS 与 Linux（当前：$(uname -s)）" ;;
   esac
-  for command_name in ${platform_commands} curl openssl tar git awk sed grep sort tr head tail mktemp stat cut cat date sleep uname kill dirname basename id chmod mkdir rm cp mv wc; do
+  # git 不在这份清单里：只有 git clone 形态需要它，由 init_repo_root 按安装形态自行检查；pip 安装的副本没有 git 也能运行。
+  for command_name in ${platform_commands} curl openssl tar awk sed grep sort tr head tail mktemp stat cut cat date sleep uname kill dirname basename id chmod mkdir rm cp mv wc; do
     command -v "${command_name}" >/dev/null 2>&1 || die 1 "本机缺少依赖：${command_name}"
   done
   command -v shasum >/dev/null 2>&1 || command -v openssl >/dev/null 2>&1 || die 1 '本机缺少 SHA-256 工具'

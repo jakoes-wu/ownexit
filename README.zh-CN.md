@@ -43,6 +43,33 @@ ownexit direct --host 203.0.113.7   # 第一次会问一次 VPS 的 root 密码
 
 所有操作都在你的电脑上运行，经 SSH 操作服务器。配置、密钥和状态都留在你电脑上、本仓库之外。
 
+## 前置条件
+
+**服务器**：直连 1 台、链式 2 台，系统为 Debian 12 或 Ubuntu 22.04，能用 root 密码 SSH 登录（只用一次）。没买过 VPS？照着手把手教程做：[docs/manual/vps.md](docs/manual/vps.md)，包括怎么选、怎么下单、装系统和防火墙。
+
+**你的电脑**：
+
+| | 直连 | 链式 |
+| ---- | ---- | ---- |
+| 操作系统 | macOS（Linux 未测试） | macOS 或 Linux（WSL 按 Linux 算） |
+| 必需 | Python 3.8+ 与 `pipx`、`ssh`、`curl`、`openssl`、`expect` | 同左 |
+| 可选 | 无 | `qrencode`：`ownexit multi render` 输出二维码时用 |
+
+缺什么装什么：
+
+```sh
+# macOS（需要 Homebrew，https://brew.sh）；ssh、curl、openssl 系统自带
+brew install pipx expect
+pipx ensurepath            # 然后新开一个终端
+
+# Debian / Ubuntu / WSL
+sudo apt update
+sudo apt install -y pipx expect openssh-client curl openssl
+pipx ensurepath            # 然后新开一个终端
+```
+
+不支持 Windows 原生运行，请用 WSL。电脑上的代理开着 TUN 模式（Clash 等）时，部署期间先关掉，见[支持的平台](#支持的平台)。
+
 ## 安装
 
 ```sh
@@ -61,22 +88,12 @@ ownexit --help
 | `ownexit multi` | `chain/multi_chain_client.sh` |
 
 ```sh
+# 需要 git
 git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 ./direct/setup_direct.sh --host 203.0.113.7
 ```
 
 从 git clone 运行时，链式脚本还会拒绝放在仓库目录里的配置文件，防止真实 IP 和密钥被误提交。
-
-## 准备
-
-| | 直连 | 链式 |
-| ---- | ---- | ---- |
-| 你的电脑 | macOS（Linux 未测试） | macOS 或 Linux（WSL 按 Linux 算） |
-| 服务器 | 1 台 Debian / Ubuntu VPS | 2 台 Linux，同为 amd64 或同为 arm64（中转机 + 出口机） |
-| 登录方式 | root 密码 SSH，只用一次 | 同左，每台各一次 |
-| 本机工具 | `pipx`（git clone 方式用 `git`）、`ssh`、`curl`、`openssl`、`expect`（`brew install expect`） | 同左 |
-
-第一次运行会问每台服务器的 root 密码（不回显），之后全程使用 `~/.ssh/ownexit/` 下的专用密钥。
 
 ## 快速上手：直连
 

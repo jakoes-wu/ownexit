@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-05
+
+### 新增
+
+- README 在“安装”前加入“前置条件”：服务器要求，以及 macOS、Debian / Ubuntu / WSL 上安装 `pipx`、`expect` 等依赖的命令。
+- 新增 VPS 选购与系统安装手册（中文 `docs/manual/vps.md`、英文 `docs/manual/vps.en.md`）：怎么选、怎么下单、装或重装系统、防火墙与安全组、只给密钥登录时怎么办。
+
+### 修复
+
+- 用 pipx / pip 安装后，没有装 `git` 的电脑上运行 `ownexit chain` / `ownexit multi` 会报“本机缺少依赖：git”而退出；现在只有从 git clone 运行时才需要 `git`。
+
 ## [0.3.0] - 2026-10-05
 
 ### 新增
