@@ -149,7 +149,7 @@ Day to day: `ownexit chain --id main status | verify | conns | rollback`. Relay 
 | ---- | ---- | ---- |
 | Control machine | macOS (tested); Linux (untested); Windows not supported — try WSL at your own risk | macOS on Apple silicon (tested), macOS on Intel (untested), Linux amd64 (tested on Ubuntu 20.04), Linux arm64 and WSL (untested) |
 | Server OS | Debian, Ubuntu | Linux with systemd; the relay needs `systemd-socket-proxyd`; no nftables tables other than ownexit's own, UFW inactive |
-| Server CPU | whatever 233boy/sing-box supports (amd64, arm64) | amd64 (tested) or arm64 (untested); relay and exit must match |
+| Server CPU | whatever 233boy/sing-box supports (amd64, arm64) | amd64 (tested on cloud servers) or arm64 (tested on Ubuntu 22.04 arm64 virtual machines); relay and exit must match |
 | Clients | Clash Verge, mihomo, Shadowrocket tested; any VLESS-Reality client via `vless://` | same |
 
 If your computer runs a proxy in TUN mode (Clash and similar), SSH to the servers may be cut off halfway through a deploy. Turn TUN off, or route the relay and exit IPs directly, while running chain commands.

@@ -26,7 +26,7 @@ If unsure, start with one server in direct mode. You can add a relay later and t
 | Item | Choose | Why |
 | ---- | ---- | ---- |
 | Operating system | Debian 12 or Ubuntu 22.04 LTS (64-bit) | Direct supports only Debian / Ubuntu; relay needs systemd. Both systems qualify and are what this project is tested on |
-| CPU architecture | x86_64 (amd64) | The tested combination. arm64 is supported for relay but untested on real servers, and both servers must match |
+| CPU architecture | x86_64 (amd64) | Tested on real cloud servers. arm64 also works for relay (tested on Ubuntu 22.04 arm64 virtual machines, not yet on cloud servers); both servers must match |
 | Size | The entry plan is enough (e.g. 1 vCPU, 1 GB RAM) | The proxy itself uses very little; the route and traffic allowance matter more |
 | Public IP | One dedicated IPv4 | That is what websites see; shared-IP or NAT servers do not work |
 | Traffic | Check the monthly allowance and overage rules | Estimate from your own usage |
