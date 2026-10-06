@@ -118,15 +118,20 @@ curl -x http://127.0.0.1:7890 https://ipinfo.io   # 另开终端验证
 ./direct/subctl             # 免密登录这台 VPS
 ./direct/setup_direct.sh --rotate-token   # 怀疑订阅链接泄露时换一个新地址
 ./direct/setup_direct.sh --rotate-keys    # 怀疑节点凭据泄露时换一套 UUID / Reality 密钥 / short id
+./direct/setup_direct.sh --add-device phone     # 给一台设备单独一套凭据和订阅地址
+./direct/setup_direct.sh --remove-device phone  # 吊销这台设备，它的订阅地址同时删除
+./direct/subctl devices                   # 列出设备与各自的订阅地址
 ./direct/setup_direct.sh --uninstall      # 卸载 VPS 上的代理服务和订阅服务
 ./direct/doctor.sh                        # 诊断本机与服务器，逐项给出处理办法（ownexit doctor）
 ./direct/doctor.sh --ip-check             # 另在 VPS 上体检出口 IP（AI 服务、流媒体、常用网站）
+./direct/doctor.sh --scan-sni             # 在 VPS 上逐个测试候选伪装域名能否真正用于 Reality
 ```
 
 - 订阅服务是明文 HTTP 的公网端口，平时保持关闭，只在导入时临时打开。
 - 换一台 VPS：对新机器运行 `setup_direct.sh --host <新IP>`，再到客户端更新订阅。记住了多台 VPS 时，`subctl` 和 `setup_direct.sh` 不带 `--host` 会列出可选目标并退出。
 - 改伪装域名或代理端口：`setup_direct.sh --sni <域名>` 或 `--proxy-port <端口>`，UUID 和密钥不变，改完客户端要重新拉一次订阅。不是每个 HTTPS 站点都能当伪装域名：实测 `www.amazon.com`（默认）、`www.apple.com` 可用，`www.microsoft.com` 不可用（客户端握手被服务器判为无效）；换域名后先用一台设备确认能连上，连不上就换回。正在通过这条隧道上网时改握手参数会把自己锁在外面：先切到别的网络，再改。
-- 换凭据：`setup_direct.sh --rotate-keys` 在 VPS 上重新生成 UUID、Reality 密钥对和 short id，端口、SNI、订阅地址不变；新配置起不来会自动恢复原配置。旧节点立刻失效，所有设备都要重新拉订阅。可以和 `--rotate-token` 一起用，同时换掉订阅地址；不能和 `--migrate` / `--uninstall` 同用（233boy 旧版先迁移再换）。中途断开时重跑同一条命令即可，已经换过的不会再换一次。
+- 多设备：`--add-device <名字>` 给一台设备单独一个 UUID 和一组订阅地址（交付信息里单独列出，只发给这台设备），`--remove-device <名字>` 吊销它，它立即连不上、订阅地址也被删除，其它设备不受影响。现有的那套凭据就是 `default`，订阅地址不变。设备名只允许小写字母、数字和 `-`，最多 32 个字符，每台 VPS 最多 32 台（含 default）。`ownexit subctl devices` 列出设备与订阅地址。换了电脑后本机没有某台设备的订阅记录时，重跑一次 `setup_direct.sh` 会补生成；旧电脑上生成的设备订阅目录不会被自动删除。有设备后请保持本机为 0.7.0 及以上：旧版本改参数时会丢掉设备。
+- 换凭据：`setup_direct.sh --rotate-keys` 在 VPS 上重新生成全部设备的 UUID、Reality 密钥对和 short id，端口、SNI、订阅地址不变；新配置起不来会自动恢复原配置。旧节点立刻失效，所有设备都要重新拉订阅。可以和 `--rotate-token` 一起用，同时换掉订阅地址；不能和 `--migrate` / `--uninstall` 同用（233boy 旧版先迁移再换）。中途断开时重跑同一条命令即可，已经换过的不会再换一次。
 - 卸载：`setup_direct.sh --uninstall` 删除 VPS 上的 `ownexit-direct` 服务、订阅服务和相关目录；保留 SSH 免密、记住的目标、BBR 设置和迁移备份。
 - 这台 VPS 同时是链式部署的中转机时，直连新装、迁移、改参数、卸载之后，按脚本提示运行 `ownexit chain --id <名字> rebaseline`。
 - 重要文件都在本机仓库外：密钥在 `~/.ssh/ownexit/`，目标配置在 `~/.config/ownexit/direct/`，订阅 TOKEN 在 `~/.local/state/ownexit/direct/`。

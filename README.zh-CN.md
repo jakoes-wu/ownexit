@@ -120,7 +120,7 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
    ownexit subctl stop
    ```
 
-脚本会记住这台 VPS，之后不带参数也能用：`ownexit direct` 重新部署，`ownexit subctl status|start|stop|log|qr` 管理订阅服务、看日志、显示二维码，`ownexit direct --uninstall` 卸载，`ownexit direct --rotate-keys` 在服务器上更换 UUID、Reality 密钥和 short id（所有设备都要重新导入订阅）。
+脚本会记住这台 VPS，之后不带参数也能用：`ownexit direct` 重新部署，`ownexit subctl status|start|stop|log|qr` 管理订阅服务、看日志、显示二维码，`ownexit direct --uninstall` 卸载，`ownexit direct --rotate-keys` 在服务器上更换全部设备的 UUID、Reality 密钥和 short id（所有设备都要重新导入订阅）。`ownexit direct --add-device phone` 给一台设备单独一个 UUID 和订阅地址，`--remove-device phone` 吊销它而不影响其它设备，`ownexit subctl devices` 列出设备。
 
 **以前用旧版装过（233boy 脚本）？** 运行一次 `ownexit direct --migrate`：沿用原有 UUID、密钥、端口和 SNI，换成本项目自己的服务，并删除 233boy 的文件（先打包备份）；客户端和订阅链接都不用动。
 
@@ -146,7 +146,7 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 
 3. **导入**：节点链接在 `~/.local/state/ownexit/chains/main/client/node.txt`；也可以运行 `ownexit multi --chains main render` 生成二维码和 Clash 配置片段。
 
-日常操作：`ownexit chain --id main status | verify | conns | rollback`。`ownexit chain --id main rotate-keys` 原地更换出口机的 UUID、Reality 密钥和 short id（中转、端口、部署不变，之后重新导入 `node.txt`）。中转机上同时跑着直连、并且你迁移、改参数或卸载了这台的直连时，之后运行一次 `ownexit chain --id main rebaseline`，让链重新登记它要保护的服务（直连脚本会提醒你）。中转机被墙了？用 `init --id backup …` 再部署一台中转，再用 `multi_chain_client.sh` 把两条链合在一起，客户端会自动切换。完整参考见 [chain/README.md](chain/README.md)，逐步说明见 [docs/manual/chain.md](docs/manual/chain.md)。
+日常操作：`ownexit chain --id main status | verify | conns | rollback`。`ownexit chain --id main rotate-keys` 原地更换出口机全部设备的 UUID、Reality 密钥和 short id（中转、端口、部署不变，之后重新导入）。`add-device <名字>` / `remove-device <名字>` / `list-devices` 管理每台设备的 UUID。中转机上同时跑着直连、并且你迁移、改参数或卸载了这台的直连时，之后运行一次 `ownexit chain --id main rebaseline`，让链重新登记它要保护的服务（直连脚本会提醒你）。中转机被墙了？用 `init --id backup …` 再部署一台中转，再用 `multi_chain_client.sh` 把两条链合在一起，客户端会自动切换。完整参考见 [chain/README.md](chain/README.md)，逐步说明见 [docs/manual/chain.md](docs/manual/chain.md)。
 
 ## 支持的平台
 
@@ -171,7 +171,7 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 
 ## 常见问题
 
-**出问题了从哪查起？** 运行 `ownexit doctor`。它检查本机（依赖命令、代理环境变量、目录权限、到服务器的路由是否被代理 TUN 接管）、每台记住的直连 VPS 和每条链，并对每个问题给出处理办法。`ownexit doctor --ip-check` 还会在服务器上直接体检出口 IP：归属与类型、ChatGPT / Claude / Gemini、Netflix / YouTube Premium / Disney+、常用网站连通性（结果仅供参考）。检查链时会运行 `status`，期间该链会被锁住几秒到几十秒。
+**出问题了从哪查起？** 运行 `ownexit doctor`。它检查本机（依赖命令、代理环境变量、目录权限、到服务器的路由是否被代理 TUN 接管）、每台记住的直连 VPS 和每条链，并对每个问题给出处理办法。`ownexit doctor --scan-sni` 在出口服务器上逐个测试哪些伪装域名真正能用（在服务器本机回环上真实做一次 Reality 握手，不只看是否支持 TLS 1.3）。`ownexit doctor --ip-check` 还会在服务器上直接体检出口 IP：归属与类型、ChatGPT / Claude / Gemini、Netflix / YouTube Premium / Disney+、常用网站连通性（结果仅供参考）。检查链时会运行 `status`，期间该链会被锁住几秒到几十秒。
 
 **能改 SSH 端口或用户吗？** 直连用 `--port`、`--user`；链式用 `--relay-port`、`--exit-port`，链式要求 root。
 

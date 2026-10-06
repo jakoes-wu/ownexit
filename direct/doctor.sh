@@ -9,6 +9,7 @@
 #   - 链的检查调用同包内 ../chain/setup_chain.sh status：它会给该链加排他操作锁（约 10-30 秒，期间同一条链的
 #     deploy / verify 会得到 busy），并可能在中转机执行一次幂等的 systemctl start。
 #   - 不修改服务器配置，不改本机配置与状态文件，不写 known_hosts（SSH 用 -F /dev/null 与 StrictHostKeyChecking=yes）。
+#     --scan-sni 会在服务器 /tmp 下临时建目录、临时运行只监听 127.0.0.1 的 sing-box，结束即删。
 #   - 不应被 source。
 #
 # 设计：docs/feature/feature-doctor-ipcheck.md。
@@ -27,7 +28,10 @@ usage() {
   --user <u>         配合 --host：SSH 用户，默认 root
   --chain <id>       只检查这一条链（可与 --host 同用）
   --ip-check         另在每台出口服务器上做出口 IP 体检（直连 = VPS 本身，链式 = 出口机）
-  --local-only       只检查本机，不连接任何服务器（不能与 --host / --chain / --ip-check 同用）
+  --scan-sni         另在每台出口服务器上扫描伪装域名：对候选域名逐个做真实 Reality 握手（服务器 /tmp 下临时建目录、
+                     临时运行只监听 127.0.0.1 的 sing-box，结束即删）
+  --sni-candidates <a.com,b.com>  配合 --scan-sni：只测这些域名（最多 30 个），默认测内置的 15 个
+  --local-only       只检查本机，不连接任何服务器（不能与 --host / --chain / --ip-check / --scan-sni 同用）
   -h, --help         显示帮助
 
 示例:
@@ -36,6 +40,8 @@ usage() {
   ownexit doctor --ip-check
   ownexit doctor --host 203.0.113.7 --ip-check
   ownexit doctor --chain main
+  ownexit doctor --scan-sni
+  ownexit doctor --chain main --scan-sni --sni-candidates www.amazon.com,www.apple.com
 
 说明:
   - 链的检查运行 `ownexit chain --id <名字> status`，期间同一条链的其它命令会提示 busy。
@@ -57,6 +63,8 @@ SSH_PORT="22"
 SSH_USER="root"
 ONLY_CHAIN=""
 IP_CHECK=0
+SCAN_SNI=0
+SNI_CANDIDATES=""
 LOCAL_ONLY=0
 
 while [[ $# -gt 0 ]]; do
@@ -70,14 +78,26 @@ while [[ $# -gt 0 ]]; do
     --chain)      ONLY_CHAIN="${2:?--chain 需要一个参数}"; shift 2 ;;
     --chain=*)    ONLY_CHAIN="${1#*=}"; shift ;;
     --ip-check)   IP_CHECK=1; shift ;;
+    --scan-sni)   SCAN_SNI=1; shift ;;
+    --sni-candidates)   SNI_CANDIDATES="${2:?--sni-candidates 需要一个参数}"; shift 2 ;;
+    --sni-candidates=*) SNI_CANDIDATES="${1#*=}"; shift ;;
     --local-only) LOCAL_ONLY=1; shift ;;
     -h|--help)    usage; exit 0 ;;
     *)            die_usage "未知参数: $1（用 --help 查看用法）" ;;
   esac
 done
 
-if [[ "${LOCAL_ONLY}" == 1 && ( -n "${HOST}" || -n "${ONLY_CHAIN}" || "${IP_CHECK}" == 1 ) ]]; then
-  die_usage "--local-only 不能与 --host / --chain / --ip-check 同用"
+if [[ "${LOCAL_ONLY}" == 1 && ( -n "${HOST}" || -n "${ONLY_CHAIN}" || "${IP_CHECK}" == 1 || "${SCAN_SNI}" == 1 ) ]]; then
+  die_usage "--local-only 不能与 --host / --chain / --ip-check / --scan-sni 同用"
+fi
+if [[ -n "${SNI_CANDIDATES}" ]]; then
+  [[ "${SCAN_SNI}" == 1 ]] || die_usage "--sni-candidates 只能与 --scan-sni 同用"
+  n=0
+  for d in ${SNI_CANDIDATES//,/ }; do
+    n=$((n + 1))
+    [[ "${d}" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]] || die_usage "候选域名必须是 ASCII 域名：${d}"
+  done
+  (( n >= 1 && n <= 30 )) || die_usage "--sni-candidates 最多 30 个域名"
 fi
 [[ -z "${HOST}" ]] || validate_target "${HOST}" "${SSH_PORT}" "${SSH_USER}"
 if [[ -n "${ONLY_CHAIN}" && ! "${ONLY_CHAIN}" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]]; then
@@ -298,6 +318,7 @@ if [ -n "$port" ] && ss -H -ltn < /dev/null 2>/dev/null | awk '{print $4}' | gre
 printf 'KIND=%s\nACTIVE=%s\nPORT=%s\nLISTENING=%s\n' "$kind" "$active" "$port" "$listening"
 printf 'SUB_ACTIVE=%s\n' "$(systemctl is-active ownexit-subscription < /dev/null 2>/dev/null || true)"
 printf 'CC=%s\n' "$(sysctl -n net.ipv4.tcp_congestion_control < /dev/null 2>/dev/null || true)"
+printf 'SNI=%s\n' "$(awk -F= '$1 == "SNI" {print $2; exit}' /etc/ownexit-direct/client.env 2>/dev/null < /dev/null || true)"
 PROBE
 
 # 在出口服务器上执行的 IP 体检（docs/feature/feature-doctor-ipcheck.md §5.1.3）：只读，全部请求强制 IPv4、带超时，
@@ -337,6 +358,99 @@ for site in www.google.com www.youtube.com github.com www.wikipedia.org x.com te
   printf 'SITE_%s=%s\n' "$site" "$(c -o /dev/null -w '%{http_code} %{time_total}' "https://$site/" || true)"
 done
 PROBE
+
+# 在出口服务器上执行的伪装域名扫描（docs/feature/feature-devices-sni-scan.md §5.1.4）：对每个候选域名，
+# 用服务器上本项目安装的 sing-box 在 127.0.0.1 上临时起一对 Reality 服务端 / 客户端，真实握手一次；
+# 能经它拿到 generate_204 才算“可用”（只看 TLS 1.3 不够：www.microsoft.com 支持 TLS 1.3 却当不了伪装域名）。
+# 参数：$1 = direct | chain（决定去哪找 sing-box），$2 = 逗号分隔的候选域名。临时进程只监听 127.0.0.1 ，
+# 每个都套 timeout，目录与进程由 trap 在任何退出路径清理；所有命令 < /dev/null，避免吞掉 bash -s 后续的脚本行。
+read -r -d '' SCAN_PROBE <<'PROBE' || true
+kind="$1"; list="$2"
+for cmd in curl openssl timeout ss; do
+  command -v "$cmd" > /dev/null 2>&1 || { printf 'SCAN_ERROR=缺少 %s\n' "$cmd"; exit 0; }
+done
+bin=''
+if [ "$kind" = direct ]; then
+  bin="$(systemctl show ownexit-direct -p ExecStart --value < /dev/null 2>/dev/null | sed -n 's/.*path=\([^ ;]*\).*/\1/p' | head -n 1)"
+else
+  bin="$(ls /opt/ownexit-chain/bin/sing-box-* 2>/dev/null < /dev/null | sort | tail -n 1)"
+fi
+[ -n "$bin" ] && [ -x "$bin" ] || { printf 'SCAN_SKIP=没有本项目安装的 sing-box\n'; exit 0; }
+work="$(mktemp -d)"
+pids=''
+cleanup() { for p in $pids; do kill "$p" 2> /dev/null || true; done; rm -rf "$work"; }
+trap cleanup EXIT HUP INT TERM
+free_port() {
+  local i p
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    p=$(( (RANDOM % 40000) + 20000 ))
+    ss -Hltn < /dev/null | awk '{print $4}' | grep -Eq "[:.]$p\$" || { printf '%s' "$p"; return 0; }
+  done
+  return 1
+}
+IFS=',' read -r -a domains <<< "$list"
+for d in "${domains[@]}"; do
+  [ -n "$d" ] || continue
+  tls13=no; h2=no; ok=no; t=0
+  if out="$(timeout 12 openssl s_client -connect "$d:443" -servername "$d" -tls1_3 -groups X25519 -alpn h2 < /dev/null 2>&1)"; then
+    tls13=yes
+    printf '%s' "$out" | grep -q 'ALPN protocol: h2' && h2=yes
+  fi
+  sp="$(free_port)" && cp="$(free_port)" || { printf 'SNI=%s|err|%s|%s|0\n' "$d" "$tls13" "$h2"; continue; }
+  kp="$("$bin" generate reality-keypair < /dev/null)"
+  pk="$(printf '%s\n' "$kp" | awk -F': ' '$1 == "PrivateKey" {print $2}')"
+  pb="$(printf '%s\n' "$kp" | awk -F': ' '$1 == "PublicKey" {print $2}')"
+  u="$("$bin" generate uuid < /dev/null)"
+  cat > "$work/s.json" <<EOF
+{"log":{"level":"error"},"inbounds":[{"type":"vless","listen":"127.0.0.1","listen_port":$sp,"users":[{"uuid":"$u","flow":"xtls-rprx-vision"}],"tls":{"enabled":true,"server_name":"$d","reality":{"enabled":true,"handshake":{"server":"$d","server_port":443},"private_key":"$pk","short_id":["0123456789abcdef"]}}}],"outbounds":[{"type":"direct"}]}
+EOF
+  cat > "$work/c.json" <<EOF
+{"log":{"level":"error"},"inbounds":[{"type":"mixed","listen":"127.0.0.1","listen_port":$cp}],"outbounds":[{"type":"vless","server":"127.0.0.1","server_port":$sp,"uuid":"$u","flow":"xtls-rprx-vision","tls":{"enabled":true,"server_name":"$d","utls":{"enabled":true,"fingerprint":"chrome"},"reality":{"enabled":true,"public_key":"$pb","short_id":"0123456789abcdef"}}}]}
+EOF
+  timeout 20 "$bin" run -c "$work/s.json" < /dev/null > "$work/s.log" 2>&1 & ps1=$!
+  timeout 20 "$bin" run -c "$work/c.json" < /dev/null > "$work/c.log" 2>&1 & ps2=$!
+  pids="$ps1 $ps2"
+  sleep 1
+  r="$(curl -4 -sS -m 12 -o /dev/null -w '%{http_code} %{time_total}' -x "socks5h://127.0.0.1:$cp" https://www.gstatic.com/generate_204 < /dev/null 2>/dev/null || true)"
+  [ "${r%% *}" = 204 ] && ok=yes && t="${r#* }"
+  kill "$ps1" "$ps2" 2> /dev/null || true
+  wait "$ps1" "$ps2" 2> /dev/null || true
+  pids=''
+  printf 'SNI=%s|%s|%s|%s|%s\n' "$d" "$ok" "$tls13" "$h2" "$t"
+done
+PROBE
+
+SCAN_DEFAULT_CANDIDATES='www.amazon.com,www.apple.com,www.microsoft.com,www.cloudflare.com,www.nvidia.com,www.tesla.com,www.samsung.com,www.oracle.com,www.intel.com,www.amd.com,www.yahoo.com,www.bing.com,dl.google.com,gateway.icloud.com,swdist.apple.com'
+
+# 本机渲染扫描结果。$1 = 服务器标签，$2 = 远端输出（空 = 未执行），$3 = 当前 SNI，$4 = direct | chain。
+render_scan() {
+  local label="$1" out="$2" current="$3" kind="$4" v line d ok tls h2 t mark
+  echo "== 伪装域名扫描：${label}（本机回环 Reality 握手；结果仅供参考） =="
+  if [[ -z "${out}" ]]; then echo "  未执行（SSH 失败）"; return 0; fi
+  v="$(printf '%s\n' "${out}" | sed -n 's/^SCAN_ERROR=//p')"
+  if [[ -n "${v}" ]]; then echo "  无法判定（${v}）"; return 0; fi
+  v="$(printf '%s\n' "${out}" | sed -n 's/^SCAN_SKIP=//p')"
+  if [[ -n "${v}" ]]; then echo "  跳过（${v}）"; return 0; fi
+  # 可用的按握手耗时升序，再列不可用的。
+  for ok in yes no err; do
+    while IFS='|' read -r d v tls h2 t; do
+      [[ "${v}" == "${ok}" ]] || continue
+      mark=''
+      [[ "${d}" != "${current}" ]] || mark='（当前）'
+      case "${v}" in
+        yes) line="可用    握手 $(printf '%s' "${t}" | awk '{printf "%.2f", $1}') 秒" ;;
+        no)  line="不可用" ;;
+        *)   line="无法判定（端口不足）" ;;
+      esac
+      printf '  %-22s %s  TLS1.3+X25519=%s  h2=%s%s\n' "${d}" "${line}" "${tls}" "${h2}" "${mark}"
+    done < <(printf '%s\n' "${out}" | sed -n 's/^SNI=//p' | sort -t'|' -k5,5n)
+  done
+  if [[ "${kind}" == direct ]]; then
+    echo "  改用其它域名：ownexit direct --sni <域名>（改完先用一台设备确认能连上）"
+  else
+    echo "  链式改伪装域名需要 rollback 后改配置的 REALITY_SERVER_NAME 再 deploy：会删除全部设备，所有客户端重新导入"
+  fi
+}
 
 # 本机渲染 IP 体检结果。$1 = 服务器标签，$2 = 远端输出（为空表示没执行成功）。
 render_ipcheck() {
@@ -382,7 +496,7 @@ render_ipcheck() {
 }
 
 check_direct() {
-  local user="$1" host="$2" port="$3" label key err rc out kind active pport listening
+  local user="$1" host="$2" port="$3" label key err rc out out_probe scan_out kind active pport listening
   label="${user}@${host}:${port}"
   echo "== 直连 VPS ${label} =="
   key="${KEY_DIR}/id_ed25519_$(target_safe_name "${user}" "${host}" "${port}")"
@@ -411,6 +525,7 @@ check_direct() {
   fi
   ok "直连 ${label} SSH 免密登录正常"
   out="$(printf '%s\n' "${DIRECT_PROBE}" | ssh "${SSH_SAFE_OPTS[@]}" -i "${key}" -p "${port}" "${user}@${host}" 'bash -s' 2>/dev/null)" || out=''
+  out_probe="${out}"
   kind="$(printf '%s\n' "${out}" | kv_get /dev/stdin KIND)"
   active="$(printf '%s\n' "${out}" | kv_get /dev/stdin ACTIVE)"
   pport="$(printf '%s\n' "${out}" | kv_get /dev/stdin PORT)"
@@ -450,6 +565,11 @@ check_direct() {
     out="$(printf '%s\n' "${IPCHECK_PROBE}" | ssh "${SSH_SAFE_OPTS[@]}" -i "${key}" -p "${port}" "${user}@${host}" 'bash -s' 2>/dev/null)" || out=''
     render_ipcheck "${label}" "${out}"
   fi
+  if [[ "${SCAN_SNI}" == 1 ]]; then
+    echo "  （扫描 $(printf '%s' "${SNI_CANDIDATES:-${SCAN_DEFAULT_CANDIDATES}}" | tr ',' '\n' | awk 'NF {c++} END {print c + 0}') 个域名，通常 1-2 分钟）"
+    scan_out="$(printf '%s\n' "${SCAN_PROBE}" | ssh "${SSH_SAFE_OPTS[@]}" -i "${key}" -p "${port}" "${user}@${host}" "bash -s -- direct ${SNI_CANDIDATES:-${SCAN_DEFAULT_CANDIDATES}}" 2>/dev/null)" || scan_out=''
+    render_scan "${label}" "${scan_out}" "$(printf '%s\n' "${out_probe}" | kv_get /dev/stdin SNI)" direct
+  fi
 }
 
 check_chain() {
@@ -479,6 +599,14 @@ check_chain() {
     proxy="ssh -F /dev/null -i ${rkey} -p ${rport:-22} -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o ConnectTimeout=8 -W %h:%p root@${relay}"
     out="$(printf '%s\n' "${IPCHECK_PROBE}" | ssh "${SSH_SAFE_OPTS[@]}" -i "${ekey}" -p "${eport:-22}" -o ProxyCommand="${proxy}" "root@${exit_host}" 'bash -s' 2>/dev/null)" || out=''
     render_ipcheck "链 ${id} 出口机 ${exit_host}" "${out}"
+  fi
+  if [[ "${SCAN_SNI}" == 1 ]]; then
+    relay="$(kv_get "${file}" RELAY_HOST)"; rport="$(kv_get "${file}" RELAY_SSH_PORT)"; rkey="$(kv_get "${file}" RELAY_SSH_KEY)"
+    exit_host="$(kv_get "${file}" EXIT_HOST)"; eport="$(kv_get "${file}" EXIT_SSH_PORT)"; ekey="$(kv_get "${file}" EXIT_SSH_KEY)"
+    proxy="ssh -F /dev/null -i ${rkey} -p ${rport:-22} -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o ConnectTimeout=8 -W %h:%p root@${relay}"
+    echo "  （扫描 $(printf '%s' "${SNI_CANDIDATES:-${SCAN_DEFAULT_CANDIDATES}}" | tr ',' '\n' | awk 'NF {c++} END {print c + 0}') 个域名，通常 1-2 分钟）"
+    out="$(printf '%s\n' "${SCAN_PROBE}" | ssh "${SSH_SAFE_OPTS[@]}" -i "${ekey}" -p "${eport:-22}" -o ProxyCommand="${proxy}" "root@${exit_host}" "bash -s -- chain ${SNI_CANDIDATES:-${SCAN_DEFAULT_CANDIDATES}}" 2>/dev/null)" || out=''
+    render_scan "链 ${id} 出口机 ${exit_host}" "${out}" "$(kv_get "${file}" REALITY_SERVER_NAME)" chain
   fi
 }
 

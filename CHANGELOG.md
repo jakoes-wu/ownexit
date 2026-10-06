@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-05
+
+### 新增
+
+- 多设备（直连与链式）：每台设备一个独立 UUID，可单独吊销，其它设备不受影响。直连 `--add-device` / `--remove-device`（每台设备有自己的订阅地址）与 `subctl devices`；链式 `add-device` / `remove-device` / `list-devices`（每台设备一个节点文件）。现有的那套凭据就是 `default`，订阅地址与 `node.txt` 不变。
+- `ownexit doctor --scan-sni`：在出口服务器上对候选伪装域名逐个做真实 Reality 握手（本机回环），按可用与握手耗时排序；可用 `--sni-candidates` 指定候选。
+
+### 变更
+
+- 凭据轮换（直连 `--rotate-keys`、链式 `rotate-keys`）同时重新生成全部设备的 UUID。
+- 链式 `status` 在出口机有未完成的凭据或设备操作时输出 `reason=exit-op-pending next=rerun-interrupted-command`（原为 `reason=rotate-pending next=run-rotate-keys`）。
+- 新部署的链与改过参数的直连，服务器配置的 users 项带 `name` 字段。
+
 ## [0.6.0] - 2026-10-05
 
 ### 新增
