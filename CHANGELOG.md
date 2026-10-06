@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-06
+
+### 新增
+
+- 接口冻结：命令行、配置键、本机与服务器文件格式在 1.x 内只增不减，已有部署升级后无需重新部署或重新导入客户端；不兼容改动只在 2.0 并提供迁移。规则见 `docs/reference/compatibility.md`。
+- 参考文档 `docs/reference/commands.md`（命令、参数、退出码、机器可读输出、环境变量）与 `docs/reference/files.md`（文件、键、路径、节点名）。
+- `scripts/check_interface.sh`：CI 自动比对源码与参考文档里的参数、子命令、status 取值、配置 / 状态键、订阅文件名，不一致时失败。
+
+### 变更
+
+- PyPI 分类标为 Development Status :: 5 - Production/Stable。
+- 本版本不改变任何命令、输出与文件格式。
+
 ## [0.7.0] - 2026-10-05
 
 ### 新增
