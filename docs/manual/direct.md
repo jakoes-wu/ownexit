@@ -150,7 +150,7 @@ curl -x http://127.0.0.1:7890 https://ipinfo.io   # 另开终端验证
 | 提示“服务器上是用 233boy 脚本装的旧版”（退出码 2） | 这台 VPS 是用旧版 ownexit（233boy 脚本）部署的 | 运行 `setup_direct.sh --migrate`，见第 9 节 |
 | 提示“上次未完成的操作恢复失败” | 迁移等操作中途 VPS 断电，恢复时新服务也起不来 | 按提示看 `subctl log`；迁移备份在 `/var/backups/ownexit-direct/` |
 | 国内网站也走了代理 | 客户端的 GeoIP / GeoSite 数据库没下载完 | 在客户端设置里手动更新一次数据库 |
-| 测试端口时“秒通”或结果互相矛盾 | 本机开着 TUN，所有连接被本地代理接管 | 关掉 TUN 再测 |
+| 测试端口时“秒通”或结果互相矛盾 | 本机开着 TUN，所有连接被本地代理接管 | 关掉 TUN 再测，或让 VPS 的 IP 不经过 Clash（见 [让指定 IP 不走 Clash Verge 的代理](clash-direct-ips.md)） |
 | SSH 时刷 `setlocale: LC_ALL: cannot change locale` | 本机把中文 locale 转发给了 VPS | 无害；本仓库脚本已强制发送 `C.UTF-8` |
 | 节点能连但很慢 | BBR 未生效，或线路高峰拥堵 | 看 `setup_direct.sh` 输出里 BBR 是否为 `[+]`；观察高峰时段，必要时换线路 |
 
