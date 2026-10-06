@@ -159,6 +159,10 @@ Day to day: `ownexit chain --id main status | verify | conns | rollback`. `ownex
 
 If your computer runs a proxy in TUN mode (Clash and similar), SSH to the servers may be cut off halfway through a deploy. Turn TUN off, or route the relay and exit IPs directly, while running chain commands.
 
+## Stability
+
+From 1.0.0 the command-line interface, configuration keys and on-disk formats are frozen for the whole 1.x series: releases only add things, nothing is renamed or removed, and existing deployments keep working after an upgrade without redeploying or re-importing clients. Breaking changes are reserved for 2.0 and will come with a migration. The frozen surface is listed in [docs/reference/commands.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/reference/commands.md) and [docs/reference/files.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/reference/files.md); the rules are in [docs/reference/compatibility.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/reference/compatibility.md) (all in Chinese).
+
 ## Security notes
 
 - No real IP, password or key ever goes into this repository. There is no "edit the IP at the top of the script" step and no `--password` option. Passwords are typed interactively (or passed via `OWNEXIT_SSH_PASSWORD` for non-interactive use), submitted once per try, and never written to disk.

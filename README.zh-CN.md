@@ -159,6 +159,10 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 
 如果你的电脑开着代理的 TUN 模式（Clash 一类），部署途中到服务器的 SSH 可能被切断。运行链式命令时请关掉 TUN，或让中转机、出口机的 IP 走直连。
 
+## 稳定性
+
+从 1.0.0 起，命令行、配置键和本机 / 服务器上的文件格式在整个 1.x 系列内冻结：新版本只增加功能，不改名、不删除，已有部署升级后不需要重新部署，客户端也不需要重新导入。不兼容的改动只在 2.0 做，并提供迁移。被冻结的接口逐项列在 [docs/reference/commands.md](docs/reference/commands.md) 与 [docs/reference/files.md](docs/reference/files.md)，规则见 [docs/reference/compatibility.md](docs/reference/compatibility.md)。
+
 ## 安全须知
 
 - 真实 IP、密码和密钥都不会进入本仓库。没有“编辑脚本顶部填 IP”的用法，也没有 `--password` 选项。密码交互输入（非交互场景用环境变量 `OWNEXIT_SSH_PASSWORD`），不写盘。
