@@ -119,6 +119,8 @@ curl -x http://127.0.0.1:7890 https://ipinfo.io   # 另开终端验证
 ./direct/setup_direct.sh --rotate-token   # 怀疑订阅链接泄露时换一个新地址
 ./direct/setup_direct.sh --rotate-keys    # 怀疑节点凭据泄露时换一套 UUID / Reality 密钥 / short id
 ./direct/setup_direct.sh --uninstall      # 卸载 VPS 上的代理服务和订阅服务
+./direct/doctor.sh                        # 诊断本机与服务器，逐项给出处理办法（ownexit doctor）
+./direct/doctor.sh --ip-check             # 另在 VPS 上体检出口 IP（AI 服务、流媒体、常用网站）
 ```
 
 - 订阅服务是明文 HTTP 的公网端口，平时保持关闭，只在导入时临时打开。
@@ -130,6 +132,8 @@ curl -x http://127.0.0.1:7890 https://ipinfo.io   # 另开终端验证
 - 重要文件都在本机仓库外：密钥在 `~/.ssh/ownexit/`，目标配置在 `~/.config/ownexit/direct/`，订阅 TOKEN 在 `~/.local/state/ownexit/direct/`。
 
 ## 7. 常见问题
+
+遇到问题先运行 `ownexit doctor`：它逐项检查本机依赖、代理环境变量、目录权限、到 VPS 的路由是否经过代理 TUN，以及 VPS 上的服务、订阅、BBR，并给出处理办法。`--ip-check` 在 VPS 上直接请求各服务，判断出口 IP 能否使用 ChatGPT / Claude / Gemini、Netflix / YouTube Premium / Disney+，结果仅供参考（各服务随时调整规则，认不出的返回显示“无法判断”）。
 
 | 问题 | 可能原因 | 解决办法 |
 | ---- | ---- | ---- |

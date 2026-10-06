@@ -171,6 +171,8 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 
 ## 常见问题
 
+**出问题了从哪查起？** 运行 `ownexit doctor`。它检查本机（依赖命令、代理环境变量、目录权限、到服务器的路由是否被代理 TUN 接管）、每台记住的直连 VPS 和每条链，并对每个问题给出处理办法。`ownexit doctor --ip-check` 还会在服务器上直接体检出口 IP：归属与类型、ChatGPT / Claude / Gemini、Netflix / YouTube Premium / Disney+、常用网站连通性（结果仅供参考）。检查链时会运行 `status`，期间该链会被锁住几秒到几十秒。
+
 **能改 SSH 端口或用户吗？** 直连用 `--port`、`--user`；链式用 `--relay-port`、`--exit-port`，链式要求 root。
 
 **我有好几台 VPS。** 用 `--host` 指定。不带 `--host` 时，`ownexit direct` 和 `ownexit subctl` 会列出记住的几台并退出。

@@ -37,7 +37,7 @@ jobs:
       - name: Help output
         # 每个入口的 --help 都要退出 0，未知参数都要非 0 退出。
         run: |
-          for f in direct/setup_direct.sh direct/connect_to.sh direct/sync_to_vps.sh direct/subctl direct/direct_remote.sh \
+          for f in direct/setup_direct.sh direct/connect_to.sh direct/sync_to_vps.sh direct/subctl direct/direct_remote.sh direct/doctor.sh \
                    chain/setup_chain.sh chain/multi_chain_client.sh scripts/check_public.sh; do
             "$f" --help > /dev/null
             if "$f" --no-such-option < /dev/null > /dev/null 2>&1; then echo "$f accepted an unknown option"; exit 1; fi
@@ -63,7 +63,7 @@ jobs:
           cd /tmp
           /tmp/venv/bin/ownexit --version
           /tmp/venv/bin/ownexit --help
-          for c in direct subctl connect chain multi; do /tmp/venv/bin/ownexit "$c" --help > /dev/null; done
+          for c in direct subctl connect chain multi doctor; do /tmp/venv/bin/ownexit "$c" --help > /dev/null; done
           if /tmp/venv/bin/ownexit no-such-command > /dev/null 2>&1; then echo "unknown command accepted"; exit 1; fi
 
   bash32:

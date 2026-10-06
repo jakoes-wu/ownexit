@@ -64,6 +64,7 @@ chain/setup_chain.sh --id main conns      # 中转机上有哪些来源 IP 在�
 chain/setup_chain.sh --id main ban 203.0.113.7    # 拉黑陌生来源
 chain/setup_chain.sh --id main rotate-keys   # 更换出口机的 UUID / Reality 密钥 / short id
 chain/setup_chain.sh --id main rollback   # 拆除这条链，两台机器恢复到部署前
+ownexit doctor --chain main --ip-check    # 诊断本机与这条链，并在出口机上体检出口 IP
 ```
 
 中转端口没有鉴权，`conns` 里出现不认识的来源 IP 时先 `ban`。
@@ -95,6 +96,7 @@ chain/multi_chain_client.sh --chains main,backup render
 | `init` 报“中转机上的 sing-box 状态不完整” | 让既有 sing-box 完整运行（服务、配置、进程都在），或彻底移除，再重跑 |
 | `init` 报“配置已存在” | 已经有同名的链；换一个 `--id`，或确认旧链不再需要（先 rollback）后删除旧配置文件 |
 | `preflight` 报防火墙或 `sockets.target.wants` 问题 | 按报错里给出的命令处理；脚本不会替你改防火墙或创建 systemd 标准目录 |
+| 本机开着 TUN、`status` / `verify` 输出 `[ssh-retry]` | 只读命令遇到 SSH 断开会自动重试最多 3 次；频繁出现时关闭 TUN 或让中转机、出口机的 IP 走直连（`ownexit doctor` 会指出哪些 IP 经过 TUN） |
 | 操作中途 SSH 断开、`verify` 报 drift | 本机 TUN 可能接管了到中转机的 SSH；关闭 TUN（或让中转机、出口机的 IP 走直连）后重跑 |
 | 报“配置目录身份或权限不安全” | 配置 / 状态目录的某一级上级目录可被同组或其他用户写入（如权限 775）；换到权限为 755 / 700 的目录下 |
 | 报“中转机与出口机的 CPU 架构必须相同” | 两台机器一台 amd64、一台 arm64，暂不支持 |

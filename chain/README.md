@@ -243,6 +243,8 @@ chain/setup_chain.sh --id main rehost-exit
 
 这个命令不走事务：每个远端步骤都用“整文件哈希守门 + 单行替换”，同时接受旧形态和已迁移形态，中途失败直接重跑同一条命令即可收敛；状态已经绑定新配置时输出 `rehost=noop` 并返回 0。退出码：0 成功或 noop；2 参数错误或其它配置键不一致；3 新 IP 不可达、缺 known_hosts 条目或不是同一台机器；5 锁、状态损坏、有未完成事务或收尾 verify 失败；1 远端迁移或本地提交失败（信息里带远端码 171–177 及含义）。
 
+`status`、不带 `--with-fail-closed` 的 `verify`、`conns`、`banlist` 是只读命令：SSH 返回 255（连接层失败）且不是控制端 600 秒超时时，自动重试最多 3 次（间隔 3 / 6 秒），stderr 输出 `[ssh-retry] role=… attempt=n/3`；verify 里的中转 smoke 不重试。其它命令不重试。
+
 注意：本机开着 Clash 一类的 TUN 模式时，发往中转机的 SSH 也可能被代理接管，部署过程中任何一次 SSH 断开都会让命令以退出码 3 停下（只读阶段）或留下待恢复的事务（之后由下一条 deploy / rollback 按事务记录收敛）。relay 重启或客户端在链之间切换的瞬间，控制端 SSH 会被切断，收尾 verify 可能报 drift 或残留。此时状态已经提交，直接再跑一次 `verify` 即可；想避免的话，执行前关闭 TUN，或让中转机 IP 走直连。
 
 ## 多链客户端聚合（`multi_chain_client.sh`）

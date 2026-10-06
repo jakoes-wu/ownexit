@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-05
+
+### 新增
+
+- `ownexit doctor`：检查本机（依赖命令、代理环境变量、目录权限、到服务器的路由是否经过代理 TUN）、每台记住的直连 VPS（密钥、SSH、服务、订阅、BBR）与每条链（运行 `status`），逐项输出 OK / WARN / FAIL 和处理办法。
+- `ownexit doctor --ip-check`：在出口服务器上体检出口 IP：归属与类型、ChatGPT / Claude / Gemini、Netflix / YouTube Premium / Disney+、常用网站连通性（仅供参考）。
+
+### 变更
+
+- 链式只读命令（`status`、不带 `--with-fail-closed` 的 `verify`、`conns`、`banlist`）遇到 SSH 连接层失败（255，非控制端超时）时自动重试最多 3 次，减少本机开着 TUN 时的偶发失败；修改类命令不重试。
+
 ## [0.5.0] - 2026-10-05
 
 ### 新增
