@@ -17,7 +17,7 @@
 #      新装、修复、改参数、迁移（--migrate）、卸载（--uninstall）；改动 sing-box 的操作由 VPS 上的
 #      systemd 临时单元执行（direct_remote.sh），SSH 断开不影响，中途断电下次运行自动恢复
 #   5. 从 VPS 读回 /etc/ownexit-direct/client.env 得到节点参数（服务器是唯一权威源）
-#   6. 在本地暂存目录渲染订阅产物：<TOKEN>/clash.yaml、shadowrocket.txt、node.txt、空 index.html、订阅服务单元
+#   6. 在本地暂存目录渲染订阅产物：<TOKEN>/clash.yaml、shadowrocket.txt、node.txt、sing-box.json、空 index.html、订阅服务单元
 #   7. 调 sync_to_vps.sh 一次性同步到 VPS /opt/ownexit-subscription/，启用订阅服务
 #   8. 分层验证：VPS 主机、订阅服务、订阅链接拉取校验
 #   9. 打印订阅 URL、节点链接、二维码（有 qrencode 时）与后续步骤；同机有链时提示 rebaseline
@@ -35,6 +35,10 @@ NODE_NAME="ownexit-direct"
 SUB_BASE_DIR="/opt/ownexit-subscription"
 SUB_SERVICE="ownexit-subscription"
 ROTATE_TOKEN=0
+# --rotate-keys：在服务器上重新生成 UUID / Reality 密钥 / short id（端口、SNI、订阅地址不变）。
+ROTATE_KEYS=0
+# 本次运行中已经完成过一次凭据轮换（来自恢复的未完成操作）；为 1 时不再轮换，避免用户重跑时凭据被换两次。
+ROTATED=0
 DO_MIGRATE=0
 DO_UNINSTALL=0
 WANT_SNI=""
@@ -65,7 +69,7 @@ SSH 端口不是 22 时:
 之后重新部署 / 换了客户端要重新拉订阅（自动使用上次记住的 VPS）:
   $(basename "$0")
 换 Reality 伪装域名或代理端口（UUID 与密钥不变，客户端需重新导入订阅）:
-  $(basename "$0") --sni www.microsoft.com
+  $(basename "$0") --sni www.apple.com
   $(basename "$0") --proxy-port 34567
 把用 233boy 脚本装的旧版换成本项目的服务（沿用原有 UUID / 密钥 / 端口 / SNI，客户端不用动）:
   $(basename "$0") --migrate
@@ -73,19 +77,25 @@ SSH 端口不是 22 时:
   $(basename "$0") --uninstall
 怀疑订阅链接泄露，换一个新的订阅地址:
   $(basename "$0") --rotate-token
+怀疑节点凭据泄露，换一套新的 UUID / Reality 密钥 / short id（所有设备都要重新导入订阅）:
+  $(basename "$0") --rotate-keys
+  $(basename "$0") --rotate-keys --rotate-token
 
 选项:
   --host <ip/host>            出口 VPS 地址；不给时用上次记住的 VPS，没有则交互提问
   -u, --user <user>           SSH 用户名，默认 root
   -P, --port <port>           SSH 端口，默认 22
-  --sni <域名>                Reality 伪装域名；新装默认 ${DIRECT_SNI_DEFAULT}
+  --sni <域名>                Reality 伪装域名；新装默认 ${DIRECT_SNI_DEFAULT}。不是每个 HTTPS 站点都能用
+                              （实测 www.microsoft.com 不可用），改完先用一台设备确认能连上
   --proxy-port <端口>         代理端口；新装默认在 20000-59999 随机
   --migrate                   把 233boy 旧版迁移为本项目的服务（一次性）
   --uninstall                 卸载直连服务与订阅服务
   --rotate-token              重新生成 TOKEN 和 SUB_PORT，并清理 VPS 上旧 TOKEN 目录
+  --rotate-keys               重新生成 UUID / Reality 密钥 / short id；失败时自动恢复原配置
   -h, --help                  显示帮助
 
---migrate、--uninstall、--rotate-token 三者互斥；--sni / --proxy-port 不能与 --uninstall 同用。
+--migrate、--uninstall、--rotate-token 三者互斥；--rotate-keys 不能与 --migrate / --uninstall 同用；
+--sni / --proxy-port 不能与 --uninstall 同用。
 
 退出码: 0 全部通过；1 部署失败或有验证项未通过；2 参数错误、缺参数（非终端运行时）或服务器是旧版需要 --migrate。
 EOF
@@ -115,12 +125,15 @@ while [[ $# -gt 0 ]]; do
     --migrate)        DO_MIGRATE=1; shift ;;
     --uninstall)      DO_UNINSTALL=1; shift ;;
     --rotate-token)   ROTATE_TOKEN=1; shift ;;
+    --rotate-keys)    ROTATE_KEYS=1; shift ;;
     -h|--help)        usage; exit 0 ;;
     *)                die_usage "未知参数: $1（用 --help 查看用法）" ;;
   esac
 done
 
 (( DO_MIGRATE + DO_UNINSTALL + ROTATE_TOKEN <= 1 )) || die_usage "--migrate、--uninstall、--rotate-token 只能选一个"
+# 迁移承诺“沿用旧凭据”，与轮换矛盾；卸载后无凭据可换。要换旧版的凭据：先 --migrate，再 --rotate-keys。
+(( DO_MIGRATE + DO_UNINSTALL + ROTATE_KEYS <= 1 )) || die_usage "--rotate-keys 不能与 --migrate / --uninstall 同用（旧版先 --migrate 再 --rotate-keys）"
 if [[ "${DO_UNINSTALL}" == 1 && ( -n "${WANT_SNI}" || -n "${WANT_PROXY_PORT}" ) ]]; then
   die_usage "--uninstall 不能与 --sni / --proxy-port 同用"
 fi
@@ -435,9 +448,16 @@ echo "[*] 服务器状态：STATE=${STATE} ARCH=${REMOTE_ARCH}"
 # 未完成的操作先恢复（§5.1.2 第 5 条）：只有成功或已回到可用旧状态（rolled-back）才继续本次请求。
 if [[ "${STATE}" == in_progress ]]; then
   echo "[*] 恢复上次未完成的操作：OP=$(kv_get "${PROBE}" TXN_OP) STEP=$(kv_get "${PROBE}" TXN_STEP)"
+  RECOVERED_ROTATE="$(kv_get "${PROBE}" TXN_ROTATE)"
   run_op_to_end
   if ! op_ok && [[ "$(kv_get "${OP_RESULT}" REASON)" != rolled-back ]]; then
     die "上次未完成的操作恢复失败（REASON=$(kv_get "${OP_RESULT}" REASON)），本次请求未执行；详见上方 [vps] 日志与 ownexit subctl log"
+  fi
+  # 恢复完成的是一次改参数：节点参数已变，后面要提示重新导入与同机链的 rebaseline。
+  # 只有结果 ok 才算凭据已换；rolled-back 表示回到了旧凭据，本次 --rotate-keys 仍要照常执行。
+  if [[ "$(kv_get "${OP_RESULT}" OP)" == reparam ]] && op_ok; then
+    CHANGED_PARAMS_RECOVERED=1
+    [[ "${RECOVERED_ROTATE}" != 1 ]] || ROTATED=1
   fi
   probe_server
   echo "[*] 恢复后的服务器状态：STATE=${STATE}"
@@ -486,10 +506,12 @@ server_port_in_use() {
   vssh "ss -H -ltn | awk '{print \$4}' | grep -Eq '[:.]$1\$'" >/dev/null 2>&1
 }
 
-CHANGED_PARAMS=0
+CHANGED_PARAMS="${CHANGED_PARAMS_RECOVERED:-0}"
+DO_ROTATE=0
 case "${STATE}" in
   none)
     [[ "${DO_MIGRATE}" == 0 ]] || { echo "[!] 服务器上没有可迁移的 233boy 旧版" >&2; exit 2; }
+    [[ "${ROTATE_KEYS}" == 0 ]] || echo "[*] 新装本来就会生成全新凭据，忽略 --rotate-keys"
     ensure_sub_params
     if [[ -n "${WANT_PROXY_PORT}" ]]; then
       [[ "${WANT_PROXY_PORT}" != "${SUB_PORT}" ]] || die_usage "--proxy-port 与订阅端口 ${SUB_PORT} 相同，请换一个"
@@ -516,15 +538,26 @@ case "${STATE}" in
     NEW_SNI=""; NEW_PORT=""
     [[ -z "${WANT_SNI}" || "${WANT_SNI}" == "${CUR_SNI}" ]] || NEW_SNI="${WANT_SNI}"
     [[ -z "${WANT_PROXY_PORT}" || "${WANT_PROXY_PORT}" == "${CUR_PORT}" ]] || NEW_PORT="${WANT_PROXY_PORT}"
-    if [[ -n "${NEW_SNI}" || -n "${NEW_PORT}" ]]; then
+    if [[ "${ROTATE_KEYS}" == 1 && "${ROTATED}" == 1 ]]; then
+      echo "[*] 刚恢复完成的操作已经换过凭据，本次不再轮换"
+    elif [[ "${ROTATE_KEYS}" == 1 ]]; then
+      DO_ROTATE=1
+    fi
+    if [[ -n "${NEW_SNI}" || -n "${NEW_PORT}" || "${DO_ROTATE}" == 1 ]]; then
       if [[ -n "${NEW_PORT}" ]]; then
         [[ "${NEW_PORT}" != "${SUB_PORT}" ]] || die_usage "--proxy-port 与订阅端口 ${SUB_PORT} 相同，请换一个"
         ! server_port_in_use "${NEW_PORT}" || die_usage "VPS 上端口 ${NEW_PORT} 已被占用"
       fi
-      echo "[*] 改参数：sni ${CUR_SNI} -> ${NEW_SNI:-不变}，port ${CUR_PORT} -> ${NEW_PORT:-不变}（UUID 与密钥不变）"
-      start_op reparam "NEW_SNI=${NEW_SNI}" "NEW_PORT=${NEW_PORT}"
+      if [[ "${DO_ROTATE}" == 1 ]]; then
+        CRED_NOTE="凭据=重新生成 UUID / Reality 密钥 / short id"
+      else
+        CRED_NOTE="UUID 与密钥不变"
+      fi
+      echo "[*] 改参数：sni ${CUR_SNI} -> ${NEW_SNI:-不变}，port ${CUR_PORT} -> ${NEW_PORT:-不变}（${CRED_NOTE}）"
+      start_op reparam "NEW_SNI=${NEW_SNI}" "NEW_PORT=${NEW_PORT}" "ROTATE=${DO_ROTATE}"
       op_ok || die "改参数失败（REASON=$(kv_get "${OP_RESULT}" REASON)），VPS 已恢复原配置"
       CHANGED_PARAMS=1
+      [[ "${DO_ROTATE}" == 0 ]] || ROTATED=1
     else
       BIN_OK="$(vssh "test -f /opt/ownexit-direct/bin/sing-box-${SING_BOX_VERSION} && sha256sum /opt/ownexit-direct/bin/sing-box-${SING_BOX_VERSION} | awk '{print \$1}'" 2>/dev/null || true)"
       if [[ "${BIN_OK}" != "${BINARY_SHA256}" ]] || ! vssh "systemctl is-active --quiet ownexit-direct" >/dev/null 2>&1; then
@@ -658,6 +691,58 @@ printf '\n' >> "${STAGING}/${TOKEN}/shadowrocket.txt"
 # 备用节点链接（明文）
 printf '%s\n' "${SR_LINK}" > "${STAGING}/${TOKEN}/node.txt"
 
+# sing-box.json：sing-box 官方客户端（SFI / SFA / SFM，1.12 及以上）可直接导入的完整配置。
+# 路由意图同 clash.yaml：国内域名与国内 IP 目标直连，其余走出口；规则集经代理下载（GitHub raw 在国内常不可达）。
+# tun 入站给图形客户端开 VPN 用，mixed 入站给命令行 / 手动代理用，端口与 clash.yaml 的 mixed-port 一致。
+# route.default_domain_resolver 不能删：1.12 起没有它 check 直接报 FATAL。
+SB_FLOW_FIELD=""
+[[ -z "${PROXY_FLOW}" ]] || SB_FLOW_FIELD="\"flow\": \"${PROXY_FLOW}\", "
+cat > "${STAGING}/${TOKEN}/sing-box.json" <<EOF
+{
+  "log": { "level": "warn" },
+  "dns": {
+    "servers": [
+      { "type": "https", "tag": "remote", "server": "1.1.1.1", "detour": "proxy" },
+      { "type": "local", "tag": "local" }
+    ],
+    "rules": [{ "rule_set": "geosite-cn", "server": "local" }],
+    "final": "remote"
+  },
+  "inbounds": [
+    { "type": "tun", "tag": "tun-in", "address": ["172.19.0.1/30"], "auto_route": true, "strict_route": true },
+    { "type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 7890 }
+  ],
+  "outbounds": [
+    {
+      "type": "vless", "tag": "proxy",
+      "server": "${PROXY_SERVER}", "server_port": ${PROXY_PORT},
+      "uuid": "${PROXY_UUID}", ${SB_FLOW_FIELD}
+      "tls": {
+        "enabled": true, "server_name": "${PROXY_SNI}",
+        "utls": { "enabled": true, "fingerprint": "chrome" },
+        "reality": { "enabled": true, "public_key": "${PROXY_PBK}", "short_id": "${PROXY_SID}" }
+      }
+    },
+    { "type": "direct", "tag": "direct" }
+  ],
+  "route": {
+    "rules": [
+      { "action": "sniff" },
+      { "protocol": "dns", "action": "hijack-dns" },
+      { "ip_is_private": true, "outbound": "direct" },
+      { "rule_set": ["geosite-cn", "geoip-cn"], "outbound": "direct" }
+    ],
+    "rule_set": [
+      { "type": "remote", "tag": "geosite-cn", "format": "binary", "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs", "download_detour": "proxy" },
+      { "type": "remote", "tag": "geoip-cn", "format": "binary", "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs", "download_detour": "proxy" }
+    ],
+    "final": "proxy",
+    "auto_detect_interface": true,
+    "default_domain_resolver": "local"
+  }
+}
+EOF
+
 # 空 index.html：python3 http.server 对无 index.html 的根目录会返回目录列表，
 # 把所有 TOKEN 目录名暴露出来，随机 token 形同虚设
 : > "${STAGING}/index.html"
@@ -685,6 +770,15 @@ for field in "server: ${PROXY_SERVER}" "uuid: ${PROXY_UUID}" "public-key: ${PROX
   grep -qF "${field}" "${STAGING}/${TOKEN}/clash.yaml" \
     || die "本地渲染的 clash.yaml 缺少字段：${field}"
 done
+for field in "\"server\": \"${PROXY_SERVER}\"" "\"uuid\": \"${PROXY_UUID}\"" "\"public_key\": \"${PROXY_PBK}\""; do
+  grep -qF "${field}" "${STAGING}/${TOKEN}/sing-box.json" \
+    || die "本地渲染的 sing-box.json 缺少字段：${field}"
+done
+# 有 python3 时再做一次 JSON 解析（不新增本机依赖：没有就跳过）。
+if command -v python3 >/dev/null 2>&1; then
+  python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "${STAGING}/${TOKEN}/sing-box.json" \
+    || die "本地渲染的 sing-box.json 不是合法 JSON"
+fi
 grep -qF "http.server ${SUB_PORT}" "${STAGING}/${SUB_SERVICE}.service" \
   || die "systemd 单元 SUB_PORT 替换失败"
 pass "本地订阅产物渲染并校验完成"
@@ -726,6 +820,7 @@ fi
 
 CLASH_URL="http://${HOST}:${SUB_PORT}/${TOKEN}/clash.yaml"
 SR_URL="http://${HOST}:${SUB_PORT}/${TOKEN}/shadowrocket.txt"
+SINGBOX_URL="http://${HOST}:${SUB_PORT}/${TOKEN}/sing-box.json"
 NODE_URL="http://${HOST}:${SUB_PORT}/${TOKEN}/node.txt"
 
 echo "[*] 验证：VPS 主机层"
@@ -774,7 +869,8 @@ cat <<EOF
 ==================== 交付结果 ====================
 订阅链接（客户端「新增订阅链接」直接粘贴）:
   Clash Verge / mihomo : ${CLASH_URL}
-  Shadowrocket         : ${SR_URL}
+  Shadowrocket / v2rayN: ${SR_URL}
+  sing-box             : ${SINGBOX_URL}
   节点链接备份(明文)    : ${NODE_URL}
 
 vless 节点链接（仅故障排查/备份用）:
@@ -784,6 +880,8 @@ vless 节点链接（仅故障排查/备份用）:
   1. Clash Verge / mihomo：「订阅」页粘贴 Clash 订阅 URL → 导入并选中 → 代理页 PROXY 组选 ${NODE_NAME}
      → 开启系统代理（或 Tun 模式）→ 模式选「规则」
   2. iPhone Shadowrocket：+ → Subscribe → 粘贴 Shadowrocket 订阅 URL → 连接
+     v2rayN / v2rayNG：订阅分组 → 添加 → 粘贴同一条 URL → 更新订阅
+     sing-box 官方客户端（1.12+）：配置 → 新建 → 远程 → 粘贴 sing-box 订阅 URL
   3. 连上后访问 ipinfo.io，确认出口 IP = ${VPS_PUBLIC_IP:-VPS IP}
   4. 所有设备都导入后，关掉订阅服务缩小暴露面：ownexit subctl stop
 
@@ -791,8 +889,11 @@ vless 节点链接（仅故障排查/备份用）:
   - 订阅是明文 HTTP：只在新增/更新客户端时手动拉取，不要配置成高频自动更新
   - 以后要给新设备导入订阅：先 ownexit subctl start，导入后再 stop
   - 怀疑订阅泄露时运行：$(basename "$0") --rotate-token
+  - 怀疑节点凭据泄露时运行：$(basename "$0") --rotate-keys（所有设备都要重新导入）
 EOF
-if [[ "${CHANGED_PARAMS}" == 1 && "${STATE}" != legacy ]]; then
+if [[ "${ROTATED}" == 1 ]]; then
+  echo "  - 已更换节点凭据：所有设备都要重新拉取订阅，旧节点已失效"
+elif [[ "${CHANGED_PARAMS}" == 1 && "${STATE}" != legacy ]]; then
   echo "  - 本次改了节点参数：已导入的客户端需要重新拉取一次订阅"
 fi
 echo "=================================================="

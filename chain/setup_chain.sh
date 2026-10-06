@@ -162,6 +162,7 @@ usage() {
   $(basename "${SCRIPT_PATH}") --config <绝对路径> banlist
   $(basename "${SCRIPT_PATH}") --config <绝对路径> rehost-exit
   $(basename "${SCRIPT_PATH}") --config <绝对路径> rebaseline
+  $(basename "${SCRIPT_PATH}") --config <绝对路径> rotate-keys
   $(basename "${SCRIPT_PATH}") -h | --help
 
 作用:
@@ -179,10 +180,13 @@ usage() {
   unban      从黑名单移除；列表为空时删除中转 drop-in，恢复"无 drop-in"契约。
   banlist    只读对照本地黑名单与中转两个 unit 的 IPAddressDeny 回读值，不一致返回 5。
   rehost-exit  出口机同机换 IP：先在 config 改 EXIT_HOST / EXPECTED_EXIT_IPV4，再原地迁移
-  rebaseline   中转机上的既有 sing-box 合法变化后（233boy 迁移为 ownexit-direct、直连改参数 / 新装 / 卸载），
-               按现场重新判定 RELAY_COHOSTS_SINGBOX 并重新登记基线；凭据、端口、node.txt 不变
              中转转发目标与两端 owner、本地 state，最后自动完整 verify。要求新 IP 的主机指纹与 state
              一致（同一台机）；UUID、密钥、端口、客户端订阅都不变；中途失败可重跑，已迁移时输出 noop。
+  rebaseline   中转机上的既有 sing-box 合法变化后（233boy 迁移为 ownexit-direct、直连改参数 / 新装 / 卸载），
+               按现场重新判定 RELAY_COHOSTS_SINGBOX 并重新登记基线；凭据、端口、node.txt 不变
+  rotate-keys  在出口机上重新生成 UUID / Reality 密钥 / short id，重启出口机 sing-box，更新 node.txt 与 state，
+               最后自动完整 verify；中转、端口、部署 ID 不变。所有客户端都要重新导入 node.txt
+               （多链聚合需重新 render）。中途失败直接重跑同一条命令收敛。
 
 参数:
   --config <路径>       仓库外 600 regular file，格式见 chain.example.env（init 会自动生成）。
@@ -560,7 +564,7 @@ parse_args() {
   COMMAND="$3"
   shift 3
   case "${COMMAND}" in
-    preflight|deploy|status|rollback|conns|banlist|rehost-exit|rebaseline)
+    preflight|deploy|status|rollback|conns|banlist|rehost-exit|rebaseline|rotate-keys)
       [[ "$#" -eq 0 ]] || die 2 "${COMMAND} 不接受额外参数"
       ;;
     verify)
@@ -4221,6 +4225,7 @@ local_deployment_residue_absent() {
     "${CHAIN_STATE_DIR}"/.stage-owner.*.tmp \
     "${CHAIN_STATE_DIR}"/.state.env.*.tmp \
     "${CHAIN_STATE_DIR}"/.transaction.env.*.tmp \
+    "${CHAIN_STATE_DIR}"/.node.txt.rotate.*.tmp \
     "${CHAIN_STATE_DIR}"/.lock.*.chain.tmp; do
     [[ ! -e "${candidate}" && ! -L "${candidate}" ]] || return 1
   done
@@ -4371,6 +4376,11 @@ EOF
 pid="$(systemctl show "$unit_name" -p MainPID --value)"
 [[ "$pid" =~ ^[1-9][0-9]*$ && "$(readlink -f "/proc/$pid/exe")" == "$binary" ]] || exit 146
 ss -H -ltnp | awk -v suffix=":$port" -v pid="pid=$pid," 'substr($4, length($4)-length(suffix)+1) == suffix && index($0, pid) {found=1} END {exit found ? 0 : 1}' || exit 147
+# rotate-keys 的辅助文件（待切换配置 / 参数 / 旧配置备份 / 临时文件）只在命令中途存在；还在就说明轮换没收尾，
+# 必须先重跑 rotate-keys，否则 rollback 会把含私钥的辅助文件留在机器上。
+for rotate_leftover in "/etc/ownexit-chain/$chain_id".rotate.*; do
+  [[ ! -e "$rotate_leftover" && ! -L "$rotate_leftover" ]] || exit 150
+done
 cd /
 env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LD_LIBRARY_PATH= LD_PRELOAD= "$binary" check -c "$config" >/dev/null
 printf 'VERIFY_EXIT=ok\n'
@@ -4506,6 +4516,8 @@ probe_remote_resources() {
   else
     rc="$?"
   fi
+  # 150 = 出口机上有未收尾的 rotate-keys 辅助文件；单独返回 33，让 status / verify / rollback 能提示重跑 rotate-keys。
+  [[ "${rc}" -ne 150 ]] || return 33
   [[ "${rc}" -eq 0 ]] || { [[ "${rc}" -eq 255 ]] && return 22; return 32; }
   [[ "${output}" == VERIFY_EXIT=ok ]] || return 32
   if [[ "${EXIT_SOURCE_FILTER}" == managed ]]; then
@@ -4546,10 +4558,13 @@ verify_chain_smokes() {
 }
 
 full_verify() {
+  local rc
   remote_platform_preflight
   probe_exit_tls
   probe_exit_exit
-  verify_remote_resources yes || die 5 '远端文件、unit、进程、listener 或 binary 发生 drift'
+  if probe_remote_resources yes; then rc=0; else rc="$?"; fi
+  [[ "${rc}" -ne 33 ]] || die 5 '出口机上有未完成的 rotate-keys（辅助文件未清理）；重跑 rotate-keys 收敛'
+  [[ "${rc}" -eq 0 ]] || die 5 '远端文件、unit、进程、listener 或 binary 发生 drift'
   verify_local_artifacts || die 5 '本地 state 配套产物发生 drift'
   verify_relay_baseline || die 5 '中转既有 sing-box 零回归基线发生变化'
   smoke_from_relay "${EXIT_HOST}" "${EXIT_REALITY_PORT}" exit-direct
@@ -5305,6 +5320,12 @@ remove_active_local_artifacts() {
     rm -f "${CHAIN_STATE_DIR}/client/node.txt" || die 1 'node.txt 删除失败'
   fi
   [[ ! -d "${CHAIN_STATE_DIR}/client" ]] || rmdir "${CHAIN_STATE_DIR}/client" || die 1 'client 目录删除失败'
+  # rotate-keys 中断留下的 node.txt 临时文件：不删的话 state 删除后它会被判成孤儿，status / deploy / rollback 都卡住。
+  for file in "${CHAIN_STATE_DIR}"/.node.txt.rotate.*.tmp; do
+    [[ -e "${file}" || -L "${file}" ]] || continue
+    require_secure_user_file "${file}" 600 || die 1 "rotate-keys 残留删除前身份异常：${file}"
+    rm -f "${file}" || die 1 "rotate-keys 残留删除失败：${file}"
+  done
   for file in relay-config-manifest.txt relay-unit-manifest.txt relay-binary-manifest.txt relay-listeners.txt; do
     if [[ -e "${CHAIN_STATE_DIR}/baseline/${file}" || -L "${CHAIN_STATE_DIR}/baseline/${file}" ]]; then
       require_secure_user_file "${CHAIN_STATE_DIR}/baseline/${file}" 600 || die 1 "baseline 删除前身份异常：${file}"
@@ -5427,7 +5448,9 @@ rollback_chain() {
   verify_loaded_binding
   ensure_local_assets_match_state
   remote_platform_preflight
-  verify_remote_resources no || die 6 'rollback 预校验发现远端 drift'
+  if probe_remote_resources no; then rc=0; else rc="$?"; fi
+  [[ "${rc}" -ne 33 ]] || die 6 'rollback 预校验发现出口机上有未完成的 rotate-keys；先重跑 rotate-keys 收敛再 rollback'
+  [[ "${rc}" -eq 0 ]] || die 6 'rollback 预校验发现远端 drift'
   verify_local_artifacts || die 6 'rollback 预校验发现本地产物 drift'
   verify_relay_baseline || die 6 'rollback 预校验发现既有 sing-box 基线变化'
   watchdog_is_absent || die 6 '存在 active/残留 fail-closed watchdog，拒绝 rollback'
@@ -5752,7 +5775,8 @@ configured_local_resources_absent() {
     "${CHAIN_STATE_DIR}"/.stage-local-* \
     "${CHAIN_STATE_DIR}"/.stage-owner.*.tmp \
     "${CHAIN_STATE_DIR}"/.state.env.*.tmp \
-    "${CHAIN_STATE_DIR}"/.transaction.env.*.tmp; do
+    "${CHAIN_STATE_DIR}"/.transaction.env.*.tmp \
+    "${CHAIN_STATE_DIR}"/.node.txt.rotate.*.tmp; do
     [[ ! -e "${candidate}" && ! -L "${candidate}" ]] || return 1
   done
 }
@@ -6671,6 +6695,351 @@ rebaseline_chain() {
   log_info "rebaseline 通过；chain=${CHAIN_ID} kind=${REBASELINE_LIVE_COHOST} elapsed=$(elapsed_seconds)s"
 }
 
+# ---------- 出口机凭据轮换：rotate-keys（docs/feature/feature-formats-key-rotation.md §5.1.3） ----------
+#
+# 只换出口机 sing-box 的 UUID / Reality 密钥对 / short id；中转、端口、部署 ID、owner、配置摘要都不变。
+# 不走事务（同 rehost-exit）：中间状态放在出口机的三个辅助文件里，本地 state 最后提交，任一步中断后
+# 重跑同一条命令都能按现场收敛。私钥只在出口机上生成和保存，不经过本机。
+#   <id>.rotate.json      待切换的新配置（含新私钥）
+#   <id>.rotate.env       新配置的哈希与客户端参数（无私钥）
+#   <id>.rotate.bak.json  切换前的旧配置，新配置起不来时用它恢复
+# 辅助文件存在期间 verify / status / rollback 都会拒绝（出口机核验脚本 exit 150），提示重跑 rotate-keys。
+
+ROTATE_RESULT=''
+ROTATE_NEW_EXIT_SHA256=''
+
+# 测试钩子：在本机侧的指定阶段后以退出码 99 结束（stage / swap 两个阶段在远端脚本内实现）；正常使用不要设置。
+rotate_test_stop() {
+  if [[ "${OWNEXIT_TEST_ROTATE_STOP_AFTER:-}" == "$1" ]]; then
+    log_warn "测试钩子：rotate-keys 在 $1 之后停止"
+    exit 99
+  fi
+}
+
+# 出口机上执行的轮换脚本。mode=apply 按判定表生成 / 切换 / 恢复；mode=cleanup 只在线上已是新配置时删除辅助文件。
+write_rotate_remote_script() {
+  local output
+  output="$1"
+  cat > "${output}" <<'ROTATE_REMOTE'
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+export LC_ALL=C
+mode="$1"
+chain_id="$2"
+[[ "$chain_id" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || exit 191
+live="/etc/ownexit-chain/$chain_id.exit.json"
+pending="/etc/ownexit-chain/$chain_id.rotate.json"
+env_file="/etc/ownexit-chain/$chain_id.rotate.env"
+bak="/etc/ownexit-chain/$chain_id.rotate.bak.json"
+unit="ownexit-chain-exit-$chain_id.service"
+# 临时文件统一叫 <id>.rotate.<用途>.<pid>.tmp：任何退出路径都清掉（其中可能有新私钥），也在 verify 的 150 检查范围内。
+trap 'rm -f /etc/ownexit-chain/"$chain_id".rotate.*."$$".tmp' EXIT
+
+sha() { sha256sum "$1" | awk '{print $1}'; }
+env_get() { awk -F= -v k="$1" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$env_file"; }
+remove_helpers() {
+  rm -f /etc/ownexit-chain/"$chain_id".rotate.json /etc/ownexit-chain/"$chain_id".rotate.env /etc/ownexit-chain/"$chain_id".rotate.bak.json
+}
+
+[[ -f "$live" && ! -L "$live" && "$(stat -c %u:%g:%a "$live")" == 0:0:600 ]] || exit 191
+
+if [[ "$mode" == cleanup ]]; then
+  # 只有线上已经是新配置时才删：此前删掉 bak 会让“新配置起不来”时无法恢复。
+  [[ "$(sha "$live")" == "$3" ]] || exit 197
+  remove_helpers
+  printf 'CLEANUP=ok\n'
+  exit 0
+fi
+
+port="$3"
+state_hash="$4"
+binary="$5"
+test_stop="$6"
+break_port="$7"
+[[ -f "$binary" && ! -L "$binary" && -x "$binary" ]] || exit 198
+
+check_config() {
+  (cd / && env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LD_LIBRARY_PATH= LD_PRELOAD= "$binary" check -c "$1" >/dev/null 2>&1)
+}
+
+# 最多等 10 秒：服务 active、主进程是固定二进制、并且由它监听 Reality 端口（与 verify 出口机脚本同一判据）。
+wait_ready() {
+  local i pid
+  for i in $(seq 1 20); do
+    if [[ "$(systemctl is-active "$unit" || true)" == active ]]; then
+      pid="$(systemctl show "$unit" -p MainPID --value)"
+      if [[ "$pid" =~ ^[1-9][0-9]*$ && "$(readlink -f "/proc/$pid/exe")" == "$binary" ]] \
+        && ss -H -ltnp | awk -v suffix=":$port" -v pid="pid=$pid," 'substr($4, length($4)-length(suffix)+1) == suffix && index($0, pid) {found=1} END {exit found ? 0 : 1}'; then
+        return 0
+      fi
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
+# 测试钩子：把文件里 "listen_port": <port>, 这一行换成 break_port，构造“配置合法但起不来”。
+apply_break_port() {
+  local file tmp
+  file="$1"
+  [[ "$break_port" != - ]] || return 0
+  tmp="/etc/ownexit-chain/$chain_id.rotate.break.$$.tmp"
+  awk -v from="    \"listen_port\": $port," -v to="    \"listen_port\": $break_port," \
+    '{ if ($0 == from) { print to; n++ } else print } END { exit n == 1 ? 0 : 3 }' "$file" > "$tmp" || exit 192
+  chown root:root "$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$file"
+}
+
+# 新配置起不来：放回旧配置并重启。恢复成功 195（线上回到轮换前），恢复后仍起不来 196（需人工处理）。
+restore_old() {
+  mv -f "$bak" "$live"
+  rm -f /etc/ownexit-chain/"$chain_id".rotate.json /etc/ownexit-chain/"$chain_id".rotate.env
+  systemctl restart "$unit" || true
+  if wait_ready; then exit 195; fi
+  exit 196
+}
+
+# 生成待切换配置：在线上配置基础上只替换 UUID、私钥、short id 三行（行格式由 deploy 模板固定），
+# 不重新渲染整份模板，避免与 write_prepare_exit_script 的模板分叉。先写 env 再写 json，
+# 两者都在时以 env 里的哈希核对 json，半写状态只会被判成“残缺”而重新生成。
+generate_pending() {
+  local keypair private_key public_key uuid short_id tmp_json tmp_env new_hash
+  remove_helpers
+  keypair="$("$binary" generate reality-keypair)"
+  private_key="$(printf '%s\n' "$keypair" | awk -F': ' '$1 == "PrivateKey" {print $2}')"
+  public_key="$(printf '%s\n' "$keypair" | awk -F': ' '$1 == "PublicKey" {print $2}')"
+  uuid="$("$binary" generate uuid)"
+  short_id="$("$binary" generate rand --hex 8)"
+  [[ "$private_key" =~ ^[A-Za-z0-9_-]+$ && "$public_key" =~ ^[A-Za-z0-9_-]+$ ]] || exit 194
+  [[ "$uuid" =~ ^[0-9a-f-]{36}$ && "$short_id" =~ ^[0-9a-f]{16}$ ]] || exit 194
+  tmp_json="/etc/ownexit-chain/$chain_id.rotate.json.$$.tmp"
+  tmp_env="/etc/ownexit-chain/$chain_id.rotate.env.$$.tmp"
+  awk -v u="$uuid" -v k="$private_key" -v s="$short_id" '
+    {
+      t = $0
+      sub(/^[ ]+/, "", t)
+      if (index(t, "\"users\": [{ \"uuid\": \"") == 1) { print "    \"users\": [{ \"uuid\": \"" u "\", \"flow\": \"xtls-rprx-vision\" }],"; nu++; next }
+      if (index(t, "\"private_key\": \"") == 1) { print "        \"private_key\": \"" k "\","; nk++; next }
+      if (index(t, "\"short_id\": [\"") == 1) { print "        \"short_id\": [\"" s "\"]"; ns++; next }
+      print
+    }
+    END { exit (nu == 1 && nk == 1 && ns == 1) ? 0 : 3 }' "$live" > "$tmp_json" || exit 192
+  chown root:root "$tmp_json"
+  chmod 600 "$tmp_json"
+  apply_break_port "$tmp_json"
+  check_config "$tmp_json" || exit 194
+  new_hash="$(sha "$tmp_json")"
+  printf 'NEW_SHA256=%s\nVLESS_UUID=%s\nREALITY_PUBLIC_KEY=%s\nREALITY_SHORT_ID=%s\n' \
+    "$new_hash" "$uuid" "$public_key" "$short_id" > "$tmp_env"
+  chown root:root "$tmp_env"
+  chmod 600 "$tmp_env"
+  mv -f "$tmp_env" "$env_file"
+  mv -f "$tmp_json" "$pending"
+}
+
+# 切换：先把旧配置备份成 bak（已有且就是 state 记录的旧配置时复用），再原子替换并重启。
+do_swap() {
+  local tmp
+  if [[ ! -f "$bak" || "$(sha "$bak")" != "$state_hash" ]]; then
+    tmp="/etc/ownexit-chain/$chain_id.rotate.bak.$$.tmp"
+    cp -p "$live" "$tmp"
+    mv -f "$tmp" "$bak"
+  fi
+  mv -f "$pending" "$live"
+  systemctl restart "$unit" || true
+  wait_ready || restore_old
+}
+
+live_hash="$(sha "$live")"
+env_new=''
+if [[ -f "$env_file" && ! -L "$env_file" ]]; then
+  env_new="$(env_get NEW_SHA256)"
+fi
+
+if [[ "$live_hash" == "$state_hash" ]]; then
+  if [[ -n "$env_new" && "$env_new" == "$live_hash" ]]; then
+    # 上一次已经提交了 state、只差清理：不再轮换，交给本机核对参数后走 cleanup。
+    result=resumed-after-commit
+  elif [[ -n "$env_new" && -f "$pending" && ! -L "$pending" && "$(sha "$pending")" == "$env_new" ]]; then
+    # 上一次在切换前中断：复用已生成的待切换配置。
+    result=resumed
+    do_swap
+  else
+    result=fresh
+    generate_pending
+    [[ "$test_stop" != stage ]] || exit 99
+    do_swap
+  fi
+elif [[ -n "$env_new" && "$live_hash" == "$env_new" ]]; then
+  # 已切换但本地还没提交：文件已是新配置，进程可能仍在跑旧配置（切换后、重启前中断），所以无条件重启一次。
+  result=already
+  [[ -f "$bak" && ! -L "$bak" ]] || exit 196
+  apply_break_port "$live"
+  systemctl restart "$unit" || true
+  wait_ready || restore_old
+else
+  # 线上配置既不是 state 记录的，也不是本命令生成的：外部改动，什么都不动。
+  exit 193
+fi
+[[ "$test_stop" != swap || "$result" == resumed-after-commit ]] || exit 99
+printf 'RESULT=%s\n' "$result"
+printf 'VLESS_UUID=%s\n' "$(env_get VLESS_UUID)"
+printf 'REALITY_PUBLIC_KEY=%s\n' "$(env_get REALITY_PUBLIC_KEY)"
+printf 'REALITY_SHORT_ID=%s\n' "$(env_get REALITY_SHORT_ID)"
+printf 'EXIT_EXIT_SHA256=%s\n' "$(sha "$live")"
+ROTATE_REMOTE
+  chmod 600 "${output}"
+}
+
+# 远端退出码 → 可读原因。
+rotate_remote_reason() {
+  case "$1" in
+    191) printf '191 出口机配置文件身份或权限异常（要求 root:root 600、非软链）' ;;
+    192) printf '192 出口机配置中 UUID / 私钥 / short id 行不是各恰好 1 行（不是 deploy 生成的形态）' ;;
+    193) printf '193 出口机配置与 state 记录的哈希不符，且不是本命令生成的新配置（外部改动）' ;;
+    194) printf '194 新凭据生成失败或新配置 sing-box check 未通过（线上未改动）' ;;
+    195) printf '195 新配置启动失败，已恢复旧配置（线上仍是轮换前的凭据）' ;;
+    196) printf '196 新配置启动失败，恢复旧配置后仍未起来（需人工检查出口机）' ;;
+    197) printf '197 清理时线上配置不是新配置，拒绝删除辅助文件' ;;
+    198) printf '198 出口机固定 sing-box 二进制缺失' ;;
+    255) printf '255 SSH 不可达或会话中断' ;;
+    *) printf '%s 远端脚本异常退出' "$1" ;;
+  esac
+}
+
+# 执行远端 apply，结果写入 ROTATE_RESULT、VLESS_UUID / REALITY_PUBLIC_KEY / REALITY_SHORT_ID 与 ROTATE_NEW_EXIT_SHA256。
+rotate_exit_apply() {
+  local script output rc test_stop break_port
+  script="${OP_TMP}/rotate-remote.sh"
+  write_rotate_remote_script "${script}"
+  test_stop='-'
+  case "${OWNEXIT_TEST_ROTATE_STOP_AFTER:-}" in stage|swap) test_stop="${OWNEXIT_TEST_ROTATE_STOP_AFTER}" ;; esac
+  # ssh 会吞掉空参数，未设置时用 - 占位。
+  break_port="${OWNEXIT_TEST_ROTATE_BREAK_PORT:--}"
+  if output="$(ssh_exit_stdin bash -s -- apply "${CHAIN_ID}" "${EXIT_REALITY_PORT}" "${EXIT_EXIT_SHA256}" "${REMOTE_BIN}" "${test_stop}" "${break_port}" < "${script}")"; then rc=0; else rc="$?"; fi
+  if [[ "${rc}" -eq 99 && "${test_stop}" != - ]]; then
+    log_warn "测试钩子：rotate-keys 在远端 ${test_stop} 之后停止"
+    exit 99
+  fi
+  [[ "${rc}" -ne 255 ]] || die 3 "出口机轮换失败：$(rotate_remote_reason 255)"
+  [[ "${rc}" -eq 0 ]] || die 1 "出口机轮换失败：$(rotate_remote_reason "${rc}")"
+  ROTATE_RESULT="$(rehost_output_value "${output}" RESULT)"
+  VLESS_UUID="$(rehost_output_value "${output}" VLESS_UUID)"
+  REALITY_PUBLIC_KEY="$(rehost_output_value "${output}" REALITY_PUBLIC_KEY)"
+  REALITY_SHORT_ID="$(rehost_output_value "${output}" REALITY_SHORT_ID)"
+  ROTATE_NEW_EXIT_SHA256="$(rehost_output_value "${output}" EXIT_EXIT_SHA256)"
+  [[ "${ROTATE_RESULT}" =~ ^(fresh|resumed|already|resumed-after-commit)$ ]] || die 1 '出口机轮换输出格式异常（RESULT）'
+  [[ "${VLESS_UUID}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ && "${REALITY_PUBLIC_KEY}" =~ ^[A-Za-z0-9_-]+$ && "${REALITY_SHORT_ID}" =~ ^[0-9a-f]{16}$ ]] \
+    || die 1 '出口机未返回完整客户端参数'
+  [[ "${ROTATE_NEW_EXIT_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die 1 '出口机轮换输出格式异常（EXIT_EXIT_SHA256）'
+  log_info "[rotate] exit=${ROTATE_RESULT} new_exit_sha256=${ROTATE_NEW_EXIT_SHA256:0:12}"
+}
+
+# 发布新 node.txt：临时文件放在 state 目录（不放 client/，否则中断残留会让 rollback 的 rmdir client 失败），
+# 同一文件系统内 mv 原子替换。旧 node.txt 是 deploy 时的硬链接，替换不影响 audit 里的副本。
+publish_rotated_node() {
+  local tmp
+  tmp="${CHAIN_STATE_DIR}/.node.txt.rotate.${OPERATION_ID}.tmp"
+  render_node_artifact "${tmp}"
+  NODE_SHA256="$(sha256_file "${tmp}")"
+  mv -f "${tmp}" "${CHAIN_STATE_DIR}/client/node.txt" || die 1 'node.txt 替换失败'
+  require_secure_user_file "${CHAIN_STATE_DIR}/client/node.txt" 600 || die 1 'node.txt 替换后身份异常'
+  [[ "$(sha256_file "${CHAIN_STATE_DIR}/client/node.txt")" == "${NODE_SHA256}" ]] || die 1 'node.txt 替换后 hash 不符'
+  log_info '[rotate] node published'
+}
+
+# 提交新 state（同 commit_rehost_state）：旧 state 先归档再替换；此时全局变量里凭据、EXIT_EXIT_SHA256、
+# NODE_SHA256 是新值，其余字段原样沿用 state。
+commit_rotate_state() {
+  local audit payload
+  ensure_private_dir "${CHAIN_STATE_DIR}/audit" || die 1 'rotate audit 父目录不安全'
+  audit="${CHAIN_STATE_DIR}/audit/rotated.${DEPLOYMENT_ID}.${OPERATION_ID}"
+  [[ ! -e "${audit}" && ! -L "${audit}" ]] || die 1 "rotate audit 目录碰撞：${audit}"
+  mkdir "${audit}" || die 1 'rotate audit 目录创建失败'
+  chmod 700 "${audit}" || die 1 'rotate audit 目录权限设置失败'
+  # 直接写最终文件名：audit 下以 . 开头的 *.tmp 会被残留检查判 drift。
+  cp "${STATE_FILE}" "${audit}/state.env" || die 1 'rotate 旧 state 归档失败'
+  chmod 600 "${audit}/state.env" || die 1 'rotate 旧 state 归档权限设置失败'
+  [[ "$(sha256_file "${audit}/state.env")" == "$(sha256_file "${STATE_FILE}")" ]] || die 1 'rotate 旧 state 归档复核失败'
+  EXIT_EXIT_SHA256="${ROTATE_NEW_EXIT_SHA256}"
+  payload="${OP_TMP}/state-payload"
+  render_state_payload "${payload}" || die 1 'rotate state payload 生成失败'
+  write_checksummed_file "${STATE_FILE}" replace "${payload}"
+  if probe_state_file "${STATE_FILE}"; then :; else die 1 "rotate 后 state 校验失败：${STATE_PROBE_REASON}"; fi
+  log_info "[rotate] state committed audit=${audit}"
+}
+
+rotate_cleanup_remote() {
+  local script rc
+  script="${OP_TMP}/rotate-remote.sh"
+  write_rotate_remote_script "${script}"
+  if ssh_exit_stdin bash -s -- cleanup "${CHAIN_ID}" "${EXIT_EXIT_SHA256}" < "${script}" >/dev/null; then rc=0; else rc="$?"; fi
+  [[ "${rc}" -ne 255 ]] || die 3 "出口机辅助文件清理失败：$(rotate_remote_reason 255)；重跑 rotate-keys 收敛"
+  [[ "${rc}" -eq 0 ]] || die 1 "出口机辅助文件清理失败：$(rotate_remote_reason "${rc}")"
+  log_info '[rotate] remote cleanup done'
+}
+
+rotate_keys_chain() {
+  local rc leftover old_uuid old_pbk old_sid
+  if acquire_chain_lock 1; then rc=0; else rc="$?"; fi
+  case "${rc}" in
+    0) ;;
+    10) die 5 '同一 chain 有活动锁（busy）；稍后重试' ;;
+    11) die 5 '存在 stale lock；先运行 verify 或其它 mutating 命令归档' ;;
+    *) die 5 '无法安全取得 chain lock' ;;
+  esac
+  require_local_dependencies
+  [[ ! -e "${JOURNAL_FILE}" && ! -L "${JOURNAL_FILE}" ]] || die 5 '存在 incomplete transaction，rotate-keys 拒绝'
+  [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 'chain 尚未部署'
+  if probe_state_file "${STATE_FILE}"; then rc=0; else rc="$?"; fi
+  case "${rc}" in
+    0) ;;
+    # rc=12：schema 与 checksum 通过、只是配置与 state 绑定不一致；rotate-keys 不迁移任何配置键。
+    12) die 2 '配置与 state 不一致；rotate-keys 要求配置未改动（换出口 IP 用 rehost-exit，中转现状变化用 rebaseline）' ;;
+    *) die 5 "state.env 校验失败：${STATE_PROBE_REASON}" ;;
+  esac
+  render_ssh_config
+  if probe_loaded_binding; then rc=0; else rc="$?"; fi
+  case "${rc}" in
+    0) ;;
+    11) die 5 '中转 SSH key 指纹漂移' ;;
+    12) die 5 '出口机 SSH key 指纹漂移' ;;
+    21) die 3 '中转实际协商 host-key 探针不可达' ;;
+    22) die 3 '经中转访问出口机失败' ;;
+    31) die 3 '中转实际协商 host-key 指纹漂移' ;;
+    32) die 3 '出口机实际协商 host-key 指纹漂移' ;;
+    *) die 5 '主机/密钥绑定核验异常' ;;
+  esac
+  # 上次中断留下的 node.txt 临时文件：与 rollback 侧同一口径，身份正常才删。
+  for leftover in "${CHAIN_STATE_DIR}"/.node.txt.rotate.*.tmp; do
+    [[ -e "${leftover}" || -L "${leftover}" ]] || continue
+    require_secure_user_file "${leftover}" 600 || die 5 "rotate-keys 本机残留身份异常：${leftover}"
+    rm -f "${leftover}" || die 5 "rotate-keys 本机残留删除失败：${leftover}"
+  done
+  log_info "[rotate] start chain=${CHAIN_ID} deployment=${DEPLOYMENT_ID:0:12}"
+  old_uuid="${VLESS_UUID}"; old_pbk="${REALITY_PUBLIC_KEY}"; old_sid="${REALITY_SHORT_ID}"
+  rotate_exit_apply
+  if [[ "${ROTATE_RESULT}" == resumed-after-commit ]]; then
+    # state 已在上一次提交：出口机报告的参数必须与 state 一致，否则说明现场与记录对不上，不做清理。
+    [[ "${VLESS_UUID}" == "${old_uuid}" && "${REALITY_PUBLIC_KEY}" == "${old_pbk}" && "${REALITY_SHORT_ID}" == "${old_sid}" && "${ROTATE_NEW_EXIT_SHA256}" == "${EXIT_EXIT_SHA256}" ]] \
+      || die 1 '出口机辅助文件中的参数与已提交的 state 不一致，拒绝清理；请人工核对出口机 /etc/ownexit-chain'
+  else
+    publish_rotated_node
+    rotate_test_stop node
+    commit_rotate_state
+    rotate_test_stop state
+  fi
+  rotate_cleanup_remote
+  rotate_test_stop cleanup
+  ensure_local_assets_match_state
+  full_verify
+  printf 'rotate=done chain=%s result=%s\n' "${CHAIN_ID}" "${ROTATE_RESULT}"
+  log_info "[rotate] 所有客户端需要重新导入 ${CHAIN_STATE_DIR}/client/node.txt（多链聚合需重新 render）"
+  log_info "rotate-keys 通过；chain=${CHAIN_ID} result=${ROTATE_RESULT} elapsed=$(elapsed_seconds)s"
+}
+
 status_chain() {
   local rc
   if [[ -e "${JOURNAL_FILE}" || -L "${JOURNAL_FILE}" ]]; then
@@ -6783,6 +7152,7 @@ status_chain() {
     0) ;;
     21) printf 'status=unreachable role=relay reason=resource-probe next=retry-status\n'; return 5 ;;
     22) printf 'status=unreachable role=exit reason=resource-probe next=retry-status\n'; return 5 ;;
+    33) printf 'status=drifted reason=rotate-pending next=run-rotate-keys\n'; return 5 ;;
     *) printf 'status=drifted reason=remote-resource-unit-process-or-listener next=run-verify\n'; return 5 ;;
   esac
   printf 'status=deployed health=healthy deployment=%s\n' "${DEPLOYMENT_ID:0:12}"
@@ -7150,6 +7520,9 @@ main() {
       ;;
     rebaseline)
       rebaseline_chain
+      ;;
+    rotate-keys)
+      rotate_keys_chain
       ;;
   esac
 }

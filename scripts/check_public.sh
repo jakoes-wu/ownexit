@@ -61,6 +61,7 @@ ipv4_allowed() {
   (( a == 198 && b == 51 && c == 100 )) && return 0           # RFC 5737 TEST-NET-2
   (( a == 203 && b == 0 && c == 113 )) && return 0            # RFC 5737 TEST-NET-3
   (( a == 198 && (b == 18 || b == 19) )) && return 0          # mihomo fake-ip 网段 198.18.0.0/15
+  [[ "${ip}" == 172.19.0.1 ]] && return 0                    # sing-box.json 的 tun 虚拟网卡地址（客户端本机虚拟网段，固定值）
   case "${ip}" in
     1.1.1.1|8.8.8.8|223.5.5.5|119.29.29.29) return 0 ;;      # 渲染配置里用到的公共 DNS
   esac

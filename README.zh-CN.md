@@ -105,12 +105,13 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 
    依次完成：配免密、检查系统、开启 BBR、由服务器自己下载固定版本的 sing-box 官方包并校验 SHA-256、在服务器上生成 Reality 密钥、生成订阅、上传并逐层验证，全程不用回答问题。想自己指定伪装域名或代理端口，加 `--sni <域名>` 或 `--proxy-port <端口>`；以后换参数也是带新值重跑一次（UUID 与密钥不变）。
 
-2. **导入设备**：脚本最后打印三条链接。
+2. **导入设备**：脚本最后打印四条链接。
 
    | 链接 | 给谁用 |
    | ---- | ---- |
    | `…/clash.yaml` | Clash Verge、mihomo、Clash Meta for Android |
-   | `…/shadowrocket.txt` | iPhone Shadowrocket |
+   | `…/shadowrocket.txt` | iPhone Shadowrocket、v2rayN / v2rayNG |
+   | `…/sing-box.json` | sing-box 官方客户端（SFI / SFA / SFM，1.12 及以上） |
    | `…/node.txt` | 明文 `vless://` 链接，给其它客户端 |
 
 3. **检查并收尾**：在设备上打开 `https://ipinfo.io`，应当显示你 VPS 的 IP。然后关掉订阅服务，需要时再开：
@@ -119,7 +120,7 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
    ownexit subctl stop
    ```
 
-脚本会记住这台 VPS，之后不带参数也能用：`ownexit direct` 重新部署，`ownexit subctl status|start|stop|log|qr` 管理订阅服务、看日志、显示二维码，`ownexit direct --uninstall` 卸载。
+脚本会记住这台 VPS，之后不带参数也能用：`ownexit direct` 重新部署，`ownexit subctl status|start|stop|log|qr` 管理订阅服务、看日志、显示二维码，`ownexit direct --uninstall` 卸载，`ownexit direct --rotate-keys` 在服务器上更换 UUID、Reality 密钥和 short id（所有设备都要重新导入订阅）。
 
 **以前用旧版装过（233boy 脚本）？** 运行一次 `ownexit direct --migrate`：沿用原有 UUID、密钥、端口和 SNI，换成本项目自己的服务，并删除 233boy 的文件（先打包备份）；客户端和订阅链接都不用动。
 
@@ -145,7 +146,7 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 
 3. **导入**：节点链接在 `~/.local/state/ownexit/chains/main/client/node.txt`；也可以运行 `ownexit multi --chains main render` 生成二维码和 Clash 配置片段。
 
-日常操作：`ownexit chain --id main status | verify | conns | rollback`。中转机上同时跑着直连、并且你迁移、改参数或卸载了这台的直连时，之后运行一次 `ownexit chain --id main rebaseline`，让链重新登记它要保护的服务（直连脚本会提醒你）。中转机被墙了？用 `init --id backup …` 再部署一台中转，再用 `multi_chain_client.sh` 把两条链合在一起，客户端会自动切换。完整参考见 [chain/README.md](chain/README.md)，逐步说明见 [docs/manual/chain.md](docs/manual/chain.md)。
+日常操作：`ownexit chain --id main status | verify | conns | rollback`。`ownexit chain --id main rotate-keys` 原地更换出口机的 UUID、Reality 密钥和 short id（中转、端口、部署不变，之后重新导入 `node.txt`）。中转机上同时跑着直连、并且你迁移、改参数或卸载了这台的直连时，之后运行一次 `ownexit chain --id main rebaseline`，让链重新登记它要保护的服务（直连脚本会提醒你）。中转机被墙了？用 `init --id backup …` 再部署一台中转，再用 `multi_chain_client.sh` 把两条链合在一起，客户端会自动切换。完整参考见 [chain/README.md](chain/README.md)，逐步说明见 [docs/manual/chain.md](docs/manual/chain.md)。
 
 ## 支持的平台
 
@@ -154,7 +155,7 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 | 控制端 | macOS（已测试）；Linux（已在 Ubuntu 22.04 测试）；不支持 Windows，可自行尝试 WSL | Apple 芯片的 Mac（已测试）、Intel Mac（未测试）、Linux amd64（已在 Ubuntu 20.04 测试）、Linux arm64 与 WSL（未测试） |
 | 服务器系统 | Debian、Ubuntu（systemd 240 及以上） | 带 systemd 的 Linux；中转机需要 `systemd-socket-proxyd`；除本项目自己的表外没有 nftables 表，UFW 未启用 |
 | 服务器 CPU | amd64（已在云服务器上测试）或 arm64（已在 Ubuntu 22.04 arm64 虚拟机上测试） | amd64（已在云服务器上测试）或 arm64（已在 Ubuntu 22.04 arm64 虚拟机上测试），两台须相同 |
-| 客户端 | 已测试 Clash Verge、mihomo、Shadowrocket；其它支持 VLESS-Reality 的客户端可用 `vless://` 导入 | 同左 |
+| 客户端 | 已测试 Clash Verge、mihomo、Shadowrocket；另提供 sing-box 与 v2rayN 订阅；其它支持 VLESS-Reality 的客户端可用 `vless://` 导入 | 已测试 Clash Verge、mihomo、Shadowrocket；其它支持 VLESS-Reality 的客户端可用 `vless://` 导入 |
 
 如果你的电脑开着代理的 TUN 模式（Clash 一类），部署途中到服务器的 SSH 可能被切断。运行链式命令时请关掉 TUN，或让中转机、出口机的 IP 走直连。
 
@@ -162,7 +163,7 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 
 - 真实 IP、密码和密钥都不会进入本仓库。没有“编辑脚本顶部填 IP”的用法，也没有 `--password` 选项。密码交互输入（非交互场景用环境变量 `OWNEXIT_SSH_PASSWORD`），不写盘。
 - 密码输错最多可重试 3 次，每次只向服务器提交一次，不容易触发 fail2ban 一类的封禁。失败时最后一行是 `reason=bad-password`、`reason=password-disabled` 或 `reason=unreachable`。
-- 直连的订阅服务是明文 HTTP、靠随机路径保护。平时用 `ownexit subctl stop` 关闭，只在导入时打开；链接泄露时用 `ownexit direct --rotate-token` 换一个。
+- 直连的订阅服务是明文 HTTP、靠随机路径保护。平时用 `ownexit subctl stop` 关闭，只在导入时打开；链接泄露时用 `ownexit direct --rotate-token` 换一个；节点凭据泄露时用 `--rotate-keys` 换一套。
 - 中转机只运行 `systemd-socket-proxyd`；Reality 私钥只存在于出口机权限 600 的文件里。默认情况下，出口机的 Reality 端口只接受中转机的连接（一张随出口服务起停的 nftables 表）。
 - 直连和链式都由每台服务器下载固定版本的官方 sing-box 发布包，并校验归档和 binary 的 SHA-256；服务器访问不了 GitHub 时改由你的电脑下载后上传。Reality 私钥在服务器上生成，不离开服务器。
 

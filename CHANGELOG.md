@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-05
+
+### 新增
+
+- 直连订阅新增 `sing-box.json`：sing-box 官方客户端（SFI / SFA / SFM，1.12 及以上）可直接导入的完整配置；v2rayN / v2rayNG 使用已有的 base64 订阅（交付信息与手册写明）。
+- 直连 `--rotate-keys`：在服务器上重新生成 UUID、Reality 密钥对与 short id，端口、SNI、订阅地址不变；失败自动恢复原配置，中途断开重跑不会换两次。
+- 链式 `rotate-keys`：原地更换出口机的 UUID、Reality 密钥对与 short id，中转、端口、部署 ID 不变，更新 `node.txt` 后自动跑完整 verify；中途断开重跑同一条命令收敛。辅助文件未清理时 `status` 输出 `reason=rotate-pending next=run-rotate-keys`，`verify` / `rollback` 拒绝执行。
+
+### 修复
+
+- 直连恢复上次中断的改参数操作后，没有提示重新导入订阅与同机链的 `rebaseline`。
+- 直连帮助里改伪装域名的示例 `--sni www.microsoft.com` 实测不可用（客户端 Reality 握手被服务器判为无效），改为实测可用的 `www.apple.com`，并在帮助与手册中提示换域名后先实测。
+
 ## [0.4.0] - 2026-10-05
 
 ### 新增
