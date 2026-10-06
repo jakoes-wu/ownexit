@@ -135,6 +135,10 @@
 | `--sni` | init | Reality 伪装域名，默认 www.amazon.com |
 | `--exit-source-filter` | init | managed（默认）/ provider / none |
 | `--with-fail-closed` | verify | 额外验证中转停止时出口不泄露 |
+| `--to` | migrate-exit | 新出口机 IPv4；与 `--abort`、`--abandon-cleanup` 互斥 |
+| `--to-port` | migrate-exit | 新出口机 SSH 端口，默认 22；只能与 `--to` 同用 |
+| `--abort` | migrate-exit | 中转切换之前放弃迁移，恢复原配置 |
+| `--abandon-cleanup` | migrate-exit | 迁移已提交、旧出口机永久失联时放弃清理 |
 
 ### 子命令
 
@@ -157,6 +161,7 @@
 | `add-device` | 新增一台设备（跟设备名） |
 | `remove-device` | 吊销一台设备（跟设备名） |
 | `list-devices` | 只读列出设备 |
+| `migrate-exit` | 出口机迁到另一台机器，凭据与客户端不变（跟 `--to` / `--abort` / `--abandon-cleanup`） |
 
 ### 退出码
 
@@ -166,9 +171,9 @@
 | 1 | 运行时失败（远端操作、本地提交等） |
 | 2 | 参数错误、配置与 state 不一致、设备操作被拒 |
 | 3 | 预检 / 检查失败、远端不可达或主机指纹不符（`preflight` 的失败一律为 3；`init` 配免密或探测失败也是 3） |
-| 4 | `deploy` 失败（远端不可达仍为 3） |
-| 5 | `status` 不健康（busy / stale_lock / incomplete / unreachable / orphaned / drifted）、`verify` 失败；其它命令的锁、state 损坏、未完成事务或收尾 verify 失败 |
-| 6 | `rollback` 预校验或执行失败 |
+| 4 | `deploy` 失败（远端不可达仍为 3；迁移进行中被拒也是 4）；`migrate-exit` 发现新出口机上已有本链文件 |
+| 5 | `status` 不健康（busy / stale_lock / incomplete / unreachable / orphaned / drifted）、`verify` 失败；其它命令的锁、state 损坏、未完成事务或收尾 verify 失败；出口机迁移进行中时 rehost-exit / rebaseline / rotate-keys / add-device / remove-device 被拒 |
+| 6 | `rollback` 预校验或执行失败（含出口机迁移进行中被拒） |
 
 ### 输出
 
@@ -209,6 +214,7 @@ stdout 上的下列行冻结；stderr 上 `[chain][<子命令>] INFO / WARN / ER
 | `reason=deployment-residue` | 有部署残留 |
 | `reason=resource-probe` | 资源核验时不可达 |
 | `reason=exit-op-pending` | 出口机有未完成的凭据或设备操作 |
+| `reason=exit-migration-pending` | 出口机迁移进行中（本机有迁移记录） |
 | `reason=remote-resource-unit-process-or-listener` | 远端文件、unit、进程或监听不一致 |
 | `next=run-mutating-command` | 运行修改类命令（deploy / rollback）让事务收敛或归档旧锁 |
 | `next=inspect-transaction` | 人工检查事务文件 |
@@ -221,7 +227,7 @@ stdout 上的下列行冻结；stderr 上 `[chain][<子命令>] INFO / WARN / ER
 | `next=inspect-platform` | 人工检查远端平台 |
 | `next=inspect-baseline` | 检查中转机既有 sing-box（必要时 rebaseline） |
 | `next=inspect-residue` | 人工检查残留 |
-| `next=rerun-interrupted-command` | 重跑中断的 rotate-keys / add-device / remove-device |
+| `next=rerun-interrupted-command` | 重跑中断的 rotate-keys / add-device / remove-device / migrate-exit（迁移也可 `--abort` / `--abandon-cleanup`） |
 | `next=run-verify` | 运行 verify 查看详情 |
 
 #### 其它命令输出
@@ -239,6 +245,8 @@ stdout 上的下列行冻结；stderr 上 `[chain][<子命令>] INFO / WARN / ER
 | `banned` | `banned entry=<条目> entries=<数量> destroyed=<数量>` | ban |
 | `already-covered` | `already-covered entry=<条目> by=<已有条目>` | ban（已被覆盖时） |
 | `unbanned` | `unbanned entry=<条目> entries=<数量>` | unban |
+| `migrate=done` | `migrate=done chain=<链> exit=<新出口机 IP>:<端口> old_exit_cleanup=<done / pending>` | migrate-exit |
+| `migrate=aborted` | `migrate=aborted chain=<链>` | migrate-exit --abort |
 
 行首的键与取值冻结；其余键只冻结键名，键的顺序不承诺。
 

@@ -94,6 +94,9 @@ chain/setup_chain.sh --id main banlist            # 对照本地黑名单与中�
 # 出口机同一台机器换了公网 IP（先改配置里的 EXIT_HOST / EXPECTED_EXIT_IPV4）
 chain/setup_chain.sh --id main rehost-exit
 
+# 出口机换一台机器（凭据与客户端不变；第一次会问新机器的 root 密码）
+chain/setup_chain.sh --id main migrate-exit --to 203.0.113.30
+
 # 中转机上的直连迁移 / 改参数 / 新装 / 卸载之后，重新登记要保护的既有 sing-box
 chain/setup_chain.sh --id main rebaseline
 
@@ -254,6 +257,24 @@ chain/setup_chain.sh --id main rehost-exit
 只允许配置里 `EXIT_HOST` / `EXPECTED_EXIT_IPV4` 两个键与状态不同，其余键不一致退出 2。经中转机登录新 IP 后，协商到的主机指纹必须等于状态里记录的值，否则退出 3（说明换成了另一台机器）。迁移顺序：出口机 owner → 中转机 owner 与 relay service 的 `ExecStart` 目标（改完 `daemon-reload`；正在运行的 relay 若仍指向旧目标就重启一次，在途连接会断开，客户端自动重连）→ 本地状态（旧状态归档到 `audit/rehosted.<部署ID>.<操作ID>/state.env`）→ 自动跑与 `verify` 相同的完整核验。UUID、Reality 密钥、端口和 `client/node.txt` 都不变，客户端不用重新导入。
 
 这个命令不走事务：每个远端步骤都用“整文件哈希守门 + 单行替换”，同时接受旧形态和已迁移形态，中途失败直接重跑同一条命令即可收敛；状态已经绑定新配置时输出 `rehost=noop` 并返回 0。退出码：0 成功或 noop；2 参数错误或其它配置键不一致；3 新 IP 不可达、缺 known_hosts 条目或不是同一台机器；5 锁、状态损坏、有未完成事务或收尾 verify 失败；1 远端迁移或本地提交失败（信息里带远端码 171–177 及含义）。
+
+## 出口机换一台机器
+
+出口机要换成另一台机器（换服务商、换机房、旧机器到期）时，用 `migrate-exit`，不要 rollback 加 deploy：它把旧出口机上本链的配置（含 Reality 私钥）原样搬到新机器，UUID、密钥、short id、全部设备、中转地址与端口都不变，客户端不用重新导入。
+
+```bash
+chain/setup_chain.sh --id main migrate-exit --to 203.0.113.30              # 新机器 SSH 端口不是 22 时加 --to-port 2222
+chain/setup_chain.sh --id main migrate-exit --abort                        # 中转切换之前放弃迁移
+chain/setup_chain.sh --id main migrate-exit --abandon-cleanup              # 迁移已完成、旧机器永久失联时放弃清理
+```
+
+前提：链已 deploy 且健康，旧出口机仍能经中转登录（私钥只在它上面；旧机器已经登录不了时只能 rollback + deploy，或迁移后再 `rotate-keys`）；新机器与中转同为 amd64 或 arm64，上面没有本链的文件。`EXIT_SOURCE_FILTER=provider` 时，先在新服务商的安全组里只放行中转机，否则切换前的拒绝侧探针会失败。
+
+过程：给新机器配免密（第一次问一次 root 密码，非终端时用 `OWNEXIT_SSH_PASSWORD`；输入密码期间持有全局锁，其它链的 deploy 会等待）→ 在新机器上问 ipinfo.io 得到新的出口 IP（终端里要确认）→ 写迁移记录 `<状态目录>/chains/<id>/migrate-exit.env`，备份配置为 `<id>.env.bak.<时间>` 后改写其中 `EXIT_HOST` / `EXIT_SSH_PORT` / `EXIT_SSH_KEY` / `EXPECTED_EXIT_IPV4` 四行 → 新机器装固定版本 sing-box，把旧机器的配置经本机内存搬过去（不落本机磁盘），沿用原端口（被占用时另选），启动服务 → 切换前探针（出口 IP、经中转直连新机器的 Reality 握手、非中转来源被拒）→ 中转转发目标切到新机器（relay 重启一次，在途连接断开，客户端自动重连）→ 核验后提交本地状态（旧状态归档到 `audit/migrated.<部署ID>.<操作ID>/`）→ 停止并删除旧出口机上本链的服务、配置、单元与白名单 → 自动完整 verify。成功时 stdout 输出 `migrate=done chain=<id> exit=<新 IP>:<端口> old_exit_cleanup=done`。
+
+中途断开时重跑同一条命令（`--to` 必须相同）：实际进度按现场判断（配置、状态、中转指向哪台出口机），已完成的步骤不会重做。中转切换之前可以 `--abort`：拆掉新机器上的半成品、恢复原配置，链回到旧出口机，输出 `migrate=aborted`；中转已经切换后只能继续完成。迁移进行中 `status` 输出 `status=drifted reason=exit-migration-pending next=rerun-interrupted-command`，deploy、rollback、rehost-exit、rebaseline、rotate-keys、add-device、remove-device 拒绝执行。清理旧机器时 SSH 不通，输出 `old_exit_cleanup=pending` 并保留记录，旧机器恢复后重跑补做；永久失联用 `--abandon-cleanup`（旧机器上本链的配置含私钥会留下，需自行销毁该机器）。
+
+多条链共用这台出口机时逐条迁移；多链聚合要求各链出口 IP 相同，全部迁完后再 `multi_chain_client.sh … render`。退出码：0 成功；2 参数错误、`--to` 是当前出口机 / 中转机 / 同一台机器、重跑时 `--to` 不一致、中转已切换后 `--abort`；3 新旧机器不可达、配免密失败或主机指纹不符；4 新机器上已有本链的文件；5 锁、状态损坏、旧链不健康或有未完成操作；1 远端操作、核验或本地提交失败。
 
 `status`、不带 `--with-fail-closed` 的 `verify`、`conns`、`banlist` 是只读命令：SSH 返回 255（连接层失败）且不是控制端 600 秒超时时，自动重试最多 3 次（间隔 3 / 6 秒），stderr 输出 `[ssh-retry] role=… attempt=n/3`；verify 里的中转 smoke 不重试。其它命令不重试。
 

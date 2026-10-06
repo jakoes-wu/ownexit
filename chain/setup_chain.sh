@@ -10,6 +10,8 @@
 #   - rebaseline 要求链已 deploy；只允许配置里 RELAY_COHOSTS_SINGBOX 一键与 state 不同（由它自己改写）。
 #   - rehost-exit 要求链已 deploy、config 已改好新 EXIT_HOST / EXPECTED_EXIT_IPV4、known_hosts 已有新 IP 的
 #     ed25519 条目，且新 IP 与 state 的主机指纹一致（同一台出口机）。
+#   - migrate-exit 要求链已 deploy 且健康、旧出口机仍可经中转登录；新出口机由本命令配免密（非终端时需要
+#     OWNEXIT_SSH_PASSWORD），且与中转同架构、没有本链的文件。
 # 调用方：由维护者在本仓库或任意目录直接执行；不应被 source。
 
 set -euo pipefail
@@ -79,6 +81,8 @@ MANAGED_LAST_TIMEOUT=0
 # kick/ban/unban 的目标；ban/unban 经 normalize_ip_entry 规范化为 a.b.c.d/N 后才落黑名单。
 TARGET_IP=''
 BLACKLIST_FILE=''
+# migrate-exit 是否显式给了 --to-port（只用于参数互斥校验）。
+MIGRATE_TO_PORT_GIVEN=0
 # 中转受管 drop-in 文件名；verify/rollback 只放行这一个文件，其余 drop-in 一律判 drifted。
 readonly RELAY_BLACKLIST_DROPIN='50-ownexit-chain-blacklist.conf'
 CONFIG_SHA256=''
@@ -175,6 +179,9 @@ usage() {
   $(basename "${SCRIPT_PATH}") --config <绝对路径> add-device <名字>
   $(basename "${SCRIPT_PATH}") --config <绝对路径> remove-device <名字>
   $(basename "${SCRIPT_PATH}") --config <绝对路径> list-devices
+  $(basename "${SCRIPT_PATH}") --config <绝对路径> migrate-exit --to <ipv4> [--to-port <n>]
+  $(basename "${SCRIPT_PATH}") --config <绝对路径> migrate-exit --abort
+  $(basename "${SCRIPT_PATH}") --config <绝对路径> migrate-exit --abandon-cleanup
   $(basename "${SCRIPT_PATH}") -h | --help
 
 作用:
@@ -203,6 +210,11 @@ usage() {
                设备名 [a-z0-9][a-z0-9-]{0,31}，default 保留，每条链最多 32 台（含 default）。
   remove-device 吊销一台设备，它立即连不上；其它设备不受影响。两者中途失败都可重跑同一条命令收敛。
   list-devices 只读列出出口机上的设备与本机节点文件路径。
+  migrate-exit 把出口机迁到另一台机器：给新机器配免密（第一次问一次 root 密码），沿用原配置（UUID、密钥、
+               全部设备）在新机器上起服务，中转转发目标切过去，提交 state 后自动清理旧出口机上本链的服务与文件，
+               最后完整 verify。客户端不用重新导入。旧出口机必须还能登录（私钥只在它上面）。中途失败重跑同一条
+               命令收敛；中转切换前可用 --abort 放弃；旧机器永久失联时用 --abandon-cleanup 放弃清理。
+               多条链共用同一台出口机时逐条迁移，全部迁完后重新 multi render。
 
 参数:
   --config <路径>       仓库外 600 regular file，格式见 chain.example.env（init 会自动生成）。
@@ -212,6 +224,9 @@ usage() {
                 --exit-source-filter 出口机 Reality 端口如何只放行中转：managed（默认，本项目加 nft 白名单）、
                 provider（服务商安全组负责）、none（不限制）；managed / provider 时部署严格检查。
   --with-fail-closed    仅可跟在 verify 后；会短暂停止本 chain 并验证新连接失败。
+  --to <ipv4>           migrate-exit 的新出口机地址；--to-port 新出口机 SSH 端口，默认 22。
+  --abort               migrate-exit 在中转切换之前放弃迁移：拆掉新机器上的半成品，恢复原配置。
+  --abandon-cleanup     migrate-exit 提交后旧出口机永久失联时放弃清理（本链配置含私钥会留在旧机器上）。
   <ipv4>                kick 只接受点分 IPv4；ban/unban 另接受 CIDR，且主机位必须为 0（如 198.51.100.0/24）。
   -h, --help            显示本帮助并返回 0，不读取配置、不连接远端。
 
@@ -240,6 +255,9 @@ usage() {
   $(basename "${SCRIPT_PATH}") --config "${HOME}/.config/ownexit/chains/demo.env" unban 203.0.113.7
   $(basename "${SCRIPT_PATH}") --config "${HOME}/.config/ownexit/chains/demo.env" banlist
   $(basename "${SCRIPT_PATH}") --config "${HOME}/.config/ownexit/chains/demo.env" rehost-exit
+  $(basename "${SCRIPT_PATH}") --id main migrate-exit --to 203.0.113.30
+  $(basename "${SCRIPT_PATH}") --id main migrate-exit --to 203.0.113.30 --to-port 2222
+  $(basename "${SCRIPT_PATH}") --id main migrate-exit --abort
 
 安全边界:
   脚本不修改防火墙、云厂商安全组、现有 sing-box 配置。
@@ -595,6 +613,23 @@ parse_args() {
       elif [[ "$#" -ne 0 ]]; then
         die 2 'verify 只接受可选的 --with-fail-closed'
       fi
+      ;;
+    migrate-exit)
+      # 三种用法互斥：--to <IPv4> [--to-port N]（开始或重跑）、--abort、--abandon-cleanup。
+      MIGRATE_TO_PORT=22
+      while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+          --to) [[ "$#" -ge 2 && -z "${MIGRATE_MODE}" ]] || die 2 '--to 需要 IPv4，且不能与 --abort / --abandon-cleanup 同用'; MIGRATE_MODE=run; MIGRATE_TO="$2"; shift 2 ;;
+          --to-port)
+            [[ "$#" -ge 2 && "$2" =~ ^[1-9][0-9]{0,4}$ ]] && (( $2 <= 65535 )) || die 2 '--to-port 必须是 1-65535'
+            MIGRATE_TO_PORT="$2"; MIGRATE_TO_PORT_GIVEN=1; shift 2 ;;
+          --abort) [[ -z "${MIGRATE_MODE}" ]] || die 2 '--abort 不能与 --to / --abandon-cleanup 同用'; MIGRATE_MODE=abort; shift ;;
+          --abandon-cleanup) [[ -z "${MIGRATE_MODE}" ]] || die 2 '--abandon-cleanup 不能与 --to / --abort 同用'; MIGRATE_MODE=abandon; shift ;;
+          *) die 2 "migrate-exit 不认识的参数：$1" ;;
+        esac
+      done
+      [[ -n "${MIGRATE_MODE}" ]] || die 2 'migrate-exit 需要 --to <IPv4>（或 --abort / --abandon-cleanup）'
+      [[ "${MIGRATE_MODE}" == run || "${MIGRATE_TO_PORT_GIVEN}" == 0 ]] || die 2 '--to-port 只能与 --to 同用'
       ;;
     kick|ban|unban)
       # 目标 IP 在这里只做形态校验；规范化（补 /32、主机位清零校验）在 normalize_ip_entry 内完成。
@@ -3478,9 +3513,16 @@ owner_b64="$7"
 source_filter="$8"
 nft_path="$9"
 relay_source="${10}"
+# reuse：migrate-exit 已把旧出口机的 exit.json 搬进暂存，跳过生成密钥与渲染配置，只渲染 owner 与 unit；
+# deploy 传 -，行为不变。
+reuse="${11:--}"
 [[ -d "$stage" && ! -L "$stage" && "$(stat -c %u:%g:%a "$stage")" == 0:0:700 ]] || exit 81
 [[ "$(sha256sum "$stage/stage-owner.env" | awk '{print $1}')" == "$stage_owner_hash" ]] || exit 82
 [[ -f "$binary" && ! -L "$binary" && "$(stat -c %u:%g:%a "$binary")" == 0:0:755 ]] || exit 83
+config="$stage/$chain_id.exit.json"
+if [[ "$reuse" == reuse ]]; then
+  [[ -f "$config" && ! -L "$config" && "$(stat -c %u:%g:%a "$config")" == 0:0:600 ]] || exit 88
+else
 set +x
 keypair="$("$binary" generate reality-keypair)"
 private_key="$(printf '%s\n' "$keypair" | awk -F': ' '$1 == "PrivateKey" {print $2}')"
@@ -3490,7 +3532,6 @@ short_id="$("$binary" generate rand --hex 8)"
 [[ "$private_key" =~ ^[A-Za-z0-9_-]+$ && "$public_key" =~ ^[A-Za-z0-9_-]+$ ]] || exit 84
 [[ "$uuid" =~ ^[0-9a-f-]{36}$ && "$short_id" =~ ^[0-9a-f]{16}$ ]] || exit 85
 
-config="$stage/$chain_id.exit.json"
 cat > "$config" <<EOF
 {
   "log": { "level": "info", "timestamp": true },
@@ -3522,6 +3563,7 @@ cat > "$config" <<EOF
 EOF
 chown root:root "$config"
 chmod 600 "$config"
+fi
 
 owner="$stage/$chain_id.owner.env"
 printf '%s' "$owner_b64" | base64 -d > "$owner"
@@ -3569,9 +3611,11 @@ chmod 644 "$unit"
 cd /
 env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LD_LIBRARY_PATH= LD_PRELOAD= "$binary" check -c "$config" >/dev/null
 systemd-analyze verify "$unit" >/dev/null
-printf 'VLESS_UUID=%s\n' "$uuid"
-printf 'REALITY_PUBLIC_KEY=%s\n' "$public_key"
-printf 'REALITY_SHORT_ID=%s\n' "$short_id"
+if [[ "$reuse" != reuse ]]; then
+  printf 'VLESS_UUID=%s\n' "$uuid"
+  printf 'REALITY_PUBLIC_KEY=%s\n' "$public_key"
+  printf 'REALITY_SHORT_ID=%s\n' "$short_id"
+fi
 printf 'EXIT_OWNER_SHA256=%s\n' "$(sha256sum "$owner" | awk '{print $1}')"
 printf 'EXIT_EXIT_SHA256=%s\n' "$(sha256sum "$config" | awk '{print $1}')"
 printf 'EXIT_SERVICE_SHA256=%s\n' "$(sha256sum "$unit" | awk '{print $1}')"
@@ -3602,7 +3646,7 @@ prepare_exit_exit() {
   fi
   script="${OP_TMP}/prepare-exit.sh"
   write_prepare_exit_script "${script}"
-  output="$(ssh_exit_stdin bash -s -- "${EXIT_STAGE_PATH}" "${EXIT_STAGE_OWNER_SHA256}" "${REMOTE_BIN}" "${CHAIN_ID}" "${EXIT_REALITY_PORT}" "${REALITY_SERVER_NAME}" "${owner_b64}" "${EXIT_SOURCE_FILTER}" "${EXIT_NFT_PATH:--}" "${relay_source}" < "${script}")" || die 1 '出口机 Reality config/unit staging 失败'
+  output="$(ssh_exit_stdin bash -s -- "${EXIT_STAGE_PATH}" "${EXIT_STAGE_OWNER_SHA256}" "${REMOTE_BIN}" "${CHAIN_ID}" "${EXIT_REALITY_PORT}" "${REALITY_SERVER_NAME}" "${owner_b64}" "${EXIT_SOURCE_FILTER}" "${EXIT_NFT_PATH:--}" "${relay_source}" - < "${script}")" || die 1 '出口机 Reality config/unit staging 失败'
   VLESS_UUID="$(printf '%s\n' "${output}" | awk -F= '$1 == "VLESS_UUID" {print $2}')"
   REALITY_PUBLIC_KEY="$(printf '%s\n' "${output}" | awk -F= '$1 == "REALITY_PUBLIC_KEY" {print $2}')"
   REALITY_SHORT_ID="$(printf '%s\n' "${output}" | awk -F= '$1 == "REALITY_SHORT_ID" {print $2}')"
@@ -4299,6 +4343,7 @@ local_deployment_residue_absent() {
     "${CHAIN_STATE_DIR}"/.transaction.env.*.tmp \
     "${CHAIN_STATE_DIR}"/.node.txt.rotate.*.tmp \
     "${CHAIN_STATE_DIR}"/devices/.*.tmp \
+    "${CHAIN_STATE_DIR}"/.migrate-exit.env.*.tmp \
     "${CHAIN_STATE_DIR}"/.lock.*.chain.tmp; do
     [[ ! -e "${candidate}" && ! -L "${candidate}" ]] || return 1
   done
@@ -4813,6 +4858,7 @@ deploy_chain() {
   acquire_global_lock
   if acquire_chain_lock 1; then rc=0; else rc="$?"; fi
   [[ "${rc}" -eq 0 ]] || die 1 'chain 正被其它操作占用或锁无法安全回收'
+  migrate_gate
   require_local_dependencies
   if [[ -e "${JOURNAL_FILE}" || -L "${JOURNAL_FILE}" ]]; then
     # 事务恢复必须作为独立命令执行；放进 `if`/`||` 会让 Bash 关闭整个函数链的 errexit。
@@ -5501,6 +5547,7 @@ rollback_chain() {
   local rc
   if acquire_chain_lock 1; then rc=0; else rc="$?"; fi
   [[ "${rc}" -eq 0 ]] || die 6 'chain 正被其它操作占用或锁无法安全回收'
+  migrate_gate
   require_local_dependencies
   render_ssh_config
   if [[ -e "${JOURNAL_FILE}" || -L "${JOURNAL_FILE}" ]]; then
@@ -6480,6 +6527,7 @@ rehost_exit_chain() {
     11) die 5 '存在 stale lock；先运行 verify 或其它 mutating 命令归档' ;;
     *) die 5 '无法安全取得 chain lock' ;;
   esac
+  migrate_gate
   require_local_dependencies
   [[ ! -e "${JOURNAL_FILE}" && ! -L "${JOURNAL_FILE}" ]] || die 5 '存在 incomplete transaction，rehost-exit 拒绝'
   [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 'chain 尚未部署'
@@ -6699,6 +6747,7 @@ rebaseline_chain() {
     11) die 5 '存在 stale lock；先运行 verify 或其它 mutating 命令归档' ;;
     *) die 5 '无法安全取得 chain lock' ;;
   esac
+  migrate_gate
   require_local_dependencies
   [[ ! -e "${JOURNAL_FILE}" && ! -L "${JOURNAL_FILE}" ]] || die 5 '存在 incomplete transaction，rebaseline 拒绝'
   [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 'chain 尚未部署'
@@ -7262,6 +7311,9 @@ exit_op_prepare() {
     11) die 5 '存在 stale lock；先运行 verify 或其它 mutating 命令归档' ;;
     *) die 5 '无法安全取得 chain lock' ;;
   esac
+  # 迁移闸门放在 state 核对之前：迁移中配置与 state 必然不一致，否则会先报“配置与 state 不一致”而看不到迁移提示。
+  # list-devices 只读，不拦。
+  [[ "${COMMAND}" == list-devices ]] || migrate_gate
   require_local_dependencies
   [[ ! -e "${JOURNAL_FILE}" && ! -L "${JOURNAL_FILE}" ]] || die 5 "存在 incomplete transaction，${COMMAND} 拒绝"
   [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 'chain 尚未部署'
@@ -7360,6 +7412,977 @@ list_devices_chain() {
   done <<< "${names}"
 }
 
+# ---------- 出口机跨机迁移：migrate-exit（docs/feature/feature-exit-migration.md） ----------
+#
+# 用途：把链的出口机换成另一台机器，UUID、Reality 密钥、short id、全部设备、中转地址与端口不变，客户端不重新导入。
+# 关键约束：
+#   - 不走事务（同 rehost-exit / rotate-keys）：每一步都可重跑，本机 state 最后提交；中间状态放在迁移记录
+#     ${CHAIN_STATE_DIR}/migrate-exit.env 里。
+#   - 迁移记录里的 PHASE 只作下限参考，实际进度由现场推导（migrate_derive_stage）：配置是新是旧、state 绑定哪份配置、
+#     中转 owner / service 指向旧还是新。这样“动作已完成、PHASE 还没写”就崩溃的情况也能正确接续，--abort 不会误拆新链。
+#   - 私钥（出口机 exit.json）从旧出口机经本机内存直接写到新出口机：只存在于 bash 变量与管道里，不落本机磁盘，
+#     不出现在命令行参数与日志里。
+#   - 不调用 deploy 的 prepare_exit_exit / install_exit_exit / activate_exit_exit（它们会写 transaction.env）。
+
+MIGRATE_MODE=''
+MIGRATE_TO=''
+MIGRATE_TO_PORT=''
+MIGRATE_FILE=''
+# 推导出的实际阶段：recorded / executing / partial / switched / cleanup（见 migrate_derive_stage）。
+MIGRATE_STAGE=''
+# 迁移前 state 里的中转 owner / service 哈希。中转切换脚本必须拿它们作“state 值”核对，
+# 不能用切换后已被改写成新哈希的全局 RELAY_*_SHA256，否则重跑会把已迁移形态误判为 drift。
+MIGRATE_STATE_RELAY_OWNER_SHA256=''
+MIGRATE_STATE_RELAY_SERVICE_SHA256=''
+MIGRATE_CLEANUP_RESULT=''
+
+# 迁移记录的键，顺序即文件顺序。值为空时写 -（空值在 ssh 参数里会被吞掉，也不便校验）。
+migrate_record_keys() {
+  cat <<'MIGRATE_KEYS'
+SCHEMA_VERSION
+CHAIN_ID
+PHASE
+MIGRATE_ID
+OLD_EXIT_HOST
+OLD_EXIT_SSH_PORT
+OLD_EXIT_SSH_KEY
+OLD_EXIT_SSH_KEY_FINGERPRINT
+OLD_EXPECTED_EXIT_IPV4
+OLD_EXIT_HOSTKEY_FINGERPRINT
+OLD_EXIT_REALITY_PORT
+OLD_EXIT_OWNER_SHA256
+OLD_EXIT_EXIT_SHA256
+OLD_EXIT_SERVICE_SHA256
+OLD_CONFIG_SHA256
+NEW_EXIT_HOST
+NEW_EXIT_SSH_PORT
+NEW_EXIT_SSH_KEY
+NEW_EXIT_SSH_KEY_FINGERPRINT
+NEW_EXPECTED_EXIT_IPV4
+NEW_EXIT_HOSTKEY_FINGERPRINT
+NEW_CONFIG_SHA256
+CONFIG_BACKUP
+NEW_EXIT_REALITY_PORT
+OLD_RELAY_TARGET
+NEW_RELAY_TARGET
+BINARY_STAGE_PATH
+BINARY_STAGE_OWNER_SHA256
+BINARY_STAGE_OWNER_TEMP_PATH
+CONFIG_STAGE_PATH
+CONFIG_STAGE_OWNER_SHA256
+CONFIG_STAGE_OWNER_TEMP_PATH
+NEW_EXIT_OWNER_SHA256
+NEW_EXIT_EXIT_SHA256
+NEW_EXIT_SERVICE_SHA256
+MIGRATE_KEYS
+}
+# 加载时把全部记录变量置空：首次迁移（还没有记录）时这些变量要在准备阶段逐个赋值，
+# set -u 下提前读到未赋值的变量会直接退出（例如 migrate_use_exit new 时新端口、新哈希都还没有）。
+while IFS= read -r migrate_key; do
+  eval "MIGRATE_${migrate_key}=''"
+done < <(migrate_record_keys)
+unset migrate_key
+
+# 测试钩子：在指定步骤后以退出码 99 结束，用于中断恢复用例；正常使用不要设置。
+migrate_test_stop() {
+  if [[ "${OWNEXIT_TEST_MIGRATE_STOP_AFTER:-}" == "$1" ]]; then
+    log_warn "测试钩子：migrate-exit 在 $1 之后停止"
+    exit 99
+  fi
+}
+
+# 迁移记录存在时拒绝其它修改类命令：它们按 state 或配置单方面操作出口机，会和迁移的中间状态互相踩踏。
+# 退出码由 die 按命令映射（rollback 为 6，deploy 为 4），其余为 5。
+migrate_gate() {
+  [[ -e "${CHAIN_STATE_DIR}/migrate-exit.env" || -L "${CHAIN_STATE_DIR}/migrate-exit.env" ]] || return 0
+  die 5 "链 ${CHAIN_ID} 正在迁移出口机，先重跑 migrate-exit（或 --abort / --abandon-cleanup）"
+}
+
+# 写迁移记录：同目录临时文件 + mv 原子替换，读者只会看到完整的旧记录或完整的新记录。
+migrate_write_record() {
+  local tmp key value
+  ensure_private_dir "${CHAIN_STATE_DIR}" || die 1 'chain state 目录身份或权限不安全'
+  tmp="${CHAIN_STATE_DIR}/.migrate-exit.env.${LOCK_OPERATION_ID}.tmp"
+  ( set -o noclobber; : > "${tmp}" ) 2>/dev/null || die 1 '迁移记录临时文件碰撞'
+  chmod 600 "${tmp}" || die 1 '迁移记录临时文件权限设置失败'
+  while IFS= read -r key; do
+    case "${key}" in
+      SCHEMA_VERSION) value=1 ;;
+      CHAIN_ID) value="${CHAIN_ID}" ;;
+      *) eval "value=\"\${MIGRATE_${key}:-}\"" ;;
+    esac
+    [[ -n "${value}" ]] || value='-'
+    printf '%s=%s\n' "${key}" "${value}" >> "${tmp}" || die 1 '迁移记录写入失败'
+  done < <(migrate_record_keys)
+  sync || die 1 '迁移记录持久化失败'
+  mv -f "${tmp}" "${MIGRATE_FILE}" || die 1 '迁移记录原子替换失败'
+  sync || die 1 '迁移记录持久化失败'
+}
+
+# 读迁移记录到 MIGRATE_<键>；格式不对就拒绝（记录是迁移中唯一的新出口机参数来源，猜测会拆错机器）。
+migrate_load_record() {
+  local expected actual key value
+  require_secure_user_file "${MIGRATE_FILE}" 600 || die 5 "迁移记录身份或权限异常：${MIGRATE_FILE}"
+  expected="$(migrate_record_keys)"
+  actual="$(awk -F= 'NF >= 2 {print $1}' "${MIGRATE_FILE}")"
+  [[ "${actual}" == "${expected}" ]] || die 5 "迁移记录键不完整或顺序不符：${MIGRATE_FILE}"
+  [[ -z "$(grep -nEv '^[A-Z][A-Z0-9_]*=[A-Za-z0-9._/@+,=:~-]+$' "${MIGRATE_FILE}" || true)" ]] || die 5 "迁移记录含非法字符：${MIGRATE_FILE}"
+  [[ "$(kv_get "${MIGRATE_FILE}" SCHEMA_VERSION)" == 1 ]] || die 5 '迁移记录 SCHEMA_VERSION 不认识'
+  [[ "$(kv_get "${MIGRATE_FILE}" CHAIN_ID)" == "${CHAIN_ID}" ]] || die 5 '迁移记录不属于本链'
+  while IFS= read -r key; do
+    case "${key}" in SCHEMA_VERSION|CHAIN_ID) continue ;; esac
+    value="$(kv_get "${MIGRATE_FILE}" "${key}")"
+    [[ "${value}" != - ]] || value=''
+    eval "MIGRATE_${key}=\"\${value}\""
+  done < <(migrate_record_keys)
+  [[ "${MIGRATE_PHASE}" =~ ^(recorded|config-rewritten|relay-switched|committed)$ ]] || die 5 "迁移记录 PHASE 不认识：${MIGRATE_PHASE}"
+  [[ "${MIGRATE_MIGRATE_ID}" =~ ^[0-9a-f]{32}$ ]] || die 5 '迁移记录 MIGRATE_ID 格式错误'
+  is_ipv4 "${MIGRATE_OLD_EXIT_HOST}" && is_ipv4 "${MIGRATE_NEW_EXIT_HOST}" || die 5 '迁移记录中的出口机地址不是 IPv4'
+  is_ipv4 "${MIGRATE_OLD_EXPECTED_EXIT_IPV4}" && is_ipv4 "${MIGRATE_NEW_EXPECTED_EXIT_IPV4}" || die 5 '迁移记录中的出口 IP 不是 IPv4'
+  for value in "${MIGRATE_OLD_CONFIG_SHA256}" "${MIGRATE_NEW_CONFIG_SHA256}" "${MIGRATE_OLD_EXIT_OWNER_SHA256}" "${MIGRATE_OLD_EXIT_EXIT_SHA256}" "${MIGRATE_OLD_EXIT_SERVICE_SHA256}"; do
+    [[ "${value}" =~ ^[0-9a-f]{64}$ ]] || die 5 '迁移记录中的旧哈希格式错误'
+  done
+  [[ "${MIGRATE_OLD_EXIT_HOSTKEY_FINGERPRINT}" == SHA256:* && "${MIGRATE_NEW_EXIT_HOSTKEY_FINGERPRINT}" == SHA256:* ]] || die 5 '迁移记录中的主机指纹格式错误'
+  [[ "${MIGRATE_OLD_EXIT_SSH_KEY_FINGERPRINT}" == SHA256:* && "${MIGRATE_NEW_EXIT_SSH_KEY_FINGERPRINT}" == SHA256:* ]] || die 5 '迁移记录中的密钥指纹格式错误'
+}
+
+# 把出口机相关全局变量切到旧机或新机，然后重渲染 SSH 配置；之后 ssh_exit / ssh_exit_stdin 就指向这台机器（经中转机转接）。
+# 必须直接在当前 shell 调用（不能放进 $( ) 子 shell），否则变量切换不会生效。
+migrate_use_exit() {
+  if [[ "$1" == old ]]; then
+    EXIT_HOST="${MIGRATE_OLD_EXIT_HOST}"
+    EXIT_SSH_PORT="${MIGRATE_OLD_EXIT_SSH_PORT}"
+    EXIT_SSH_KEY="${MIGRATE_OLD_EXIT_SSH_KEY}"
+    EXIT_SSH_KEY_FINGERPRINT="${MIGRATE_OLD_EXIT_SSH_KEY_FINGERPRINT}"
+    EXIT_HOSTKEY_FINGERPRINT="${MIGRATE_OLD_EXIT_HOSTKEY_FINGERPRINT}"
+    EXPECTED_EXIT_IPV4="${MIGRATE_OLD_EXPECTED_EXIT_IPV4}"
+    EXIT_REALITY_PORT="${MIGRATE_OLD_EXIT_REALITY_PORT}"
+    EXIT_OWNER_SHA256="${MIGRATE_OLD_EXIT_OWNER_SHA256}"
+    EXIT_EXIT_SHA256="${MIGRATE_OLD_EXIT_EXIT_SHA256}"
+    EXIT_SERVICE_SHA256="${MIGRATE_OLD_EXIT_SERVICE_SHA256}"
+  else
+    EXIT_HOST="${MIGRATE_NEW_EXIT_HOST}"
+    EXIT_SSH_PORT="${MIGRATE_NEW_EXIT_SSH_PORT}"
+    EXIT_SSH_KEY="${MIGRATE_NEW_EXIT_SSH_KEY}"
+    EXIT_SSH_KEY_FINGERPRINT="${MIGRATE_NEW_EXIT_SSH_KEY_FINGERPRINT}"
+    EXIT_HOSTKEY_FINGERPRINT="${MIGRATE_NEW_EXIT_HOSTKEY_FINGERPRINT}"
+    EXPECTED_EXIT_IPV4="${MIGRATE_NEW_EXPECTED_EXIT_IPV4}"
+    EXIT_REALITY_PORT="${MIGRATE_NEW_EXIT_REALITY_PORT}"
+    EXIT_OWNER_SHA256="${MIGRATE_NEW_EXIT_OWNER_SHA256}"
+    EXIT_EXIT_SHA256="${MIGRATE_NEW_EXIT_EXIT_SHA256}"
+    EXIT_SERVICE_SHA256="${MIGRATE_NEW_EXIT_SERVICE_SHA256}"
+  fi
+  # EXIT_ENABLE_LINK_TARGET 只由 CHAIN_ID 决定，迁移前后相同，不需要切换。
+  render_ssh_config
+  log_info "[migrate] exit context=$1 host=${EXIT_HOST}"
+}
+
+# 中转与当前上下文出口机的身份核验：私钥指纹、实际协商的主机指纹都必须等于期望值。
+migrate_check_binding() {
+  local fingerprint
+  [[ "$(fingerprint_private_key "${RELAY_SSH_KEY}")" == "${RELAY_SSH_KEY_FINGERPRINT}" ]] || die 5 '中转 SSH key 指纹漂移'
+  [[ "$(fingerprint_private_key "${EXIT_SSH_KEY}")" == "${EXIT_SSH_KEY_FINGERPRINT}" ]] || die 5 "出口机 ${EXIT_HOST} 的 SSH key 指纹与迁移记录不符"
+  fingerprint="$(negotiated_hostkey_fingerprint chain-relay)" || die 3 '中转实际协商 host-key 探针不可达'
+  [[ "${fingerprint}" == "${RELAY_HOSTKEY_FINGERPRINT}" ]] || die 3 '中转实际协商 host-key 指纹漂移'
+  fingerprint="$(negotiated_hostkey_fingerprint chain-exit)" || die 3 "经中转访问出口机 ${EXIT_HOST} 失败"
+  [[ "${fingerprint}" == "${EXIT_HOSTKEY_FINGERPRINT}" ]] || die 3 "出口机 ${EXIT_HOST} 的主机指纹与迁移记录不符"
+}
+
+# 当前配置的四个出口键属于迁移前（old）、迁移后（new）还是都不是（other）。
+migrate_config_side() {
+  if [[ "${EXIT_HOST}" == "${MIGRATE_NEW_EXIT_HOST}" && "${EXIT_SSH_PORT}" == "${MIGRATE_NEW_EXIT_SSH_PORT}" && "${EXIT_SSH_KEY}" == "${MIGRATE_NEW_EXIT_SSH_KEY}" && "${EXPECTED_EXIT_IPV4}" == "${MIGRATE_NEW_EXPECTED_EXIT_IPV4}" ]]; then
+    printf 'new'
+  elif [[ "${EXIT_HOST}" == "${MIGRATE_OLD_EXIT_HOST}" && "${EXIT_SSH_PORT}" == "${MIGRATE_OLD_EXIT_SSH_PORT}" && "${EXIT_SSH_KEY}" == "${MIGRATE_OLD_EXIT_SSH_KEY}" && "${EXPECTED_EXIT_IPV4}" == "${MIGRATE_OLD_EXPECTED_EXIT_IPV4}" ]]; then
+    printf 'old'
+  else
+    printf 'other'
+  fi
+}
+
+# 中转现场只读检查：owner 与 service 分别是 state 值（state）、已迁移形态（new）还是外部改动（drift）。
+# 与 rehost 远端脚本同一套整行匹配 / ExecStart 后缀匹配，但只读不写。rehost 脚本先改 owner 再改 service，
+# 所以合法组合只有 state:state、new:state、new:new 三种。
+write_migrate_relay_probe_script() {
+  local output
+  output="$1"
+  cat > "${output}" <<'MIGRATE_RELAY_PROBE'
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+export LC_ALL=C
+chain_id="$1"
+owner_state_hash="$2"
+old_cfg="$3"
+new_cfg="$4"
+service_state_hash="$5"
+old_target="$6"
+new_target="$7"
+owner="/etc/ownexit-chain/$chain_id.owner.env"
+service="/etc/systemd/system/ownexit-chain-relay-$chain_id.service"
+sha() { sha256sum "$1" | awk '{print $1}'; }
+replace_owner() { awk -v from="$2" -v to="$3" '{ if ($0 == from) print to; else print }' "$1"; }
+replace_service() {
+  awk -v sfx=" $2" -v to=" $3" '{
+    if (index($0, "ExecStart=") == 1 && length($0) > length(sfx) && substr($0, length($0) - length(sfx) + 1) == sfx)
+      print substr($0, 1, length($0) - length(sfx)) to
+    else
+      print
+  }' "$1"
+}
+side() {
+  local file mode state_hash kind
+  file="$1"; mode="$2"; state_hash="$3"; kind="$4"
+  if [[ ! -f "$file" || -L "$file" || "$(stat -c %u:%g:%a "$file")" != "0:0:$mode" ]]; then
+    printf 'drift'
+  elif [[ "$(sha "$file")" == "$state_hash" ]]; then
+    printf 'state'
+  elif [[ "$kind" == owner && "$(replace_owner "$file" "CONFIG_SHA256=$new_cfg" "CONFIG_SHA256=$old_cfg" | sha256sum | awk '{print $1}')" == "$state_hash" ]]; then
+    printf 'new'
+  elif [[ "$kind" == service && "$(replace_service "$file" "$new_target" "$old_target" | sha256sum | awk '{print $1}')" == "$state_hash" ]]; then
+    printf 'new'
+  else
+    printf 'drift'
+  fi
+}
+o="$(side "$owner" 600 "$owner_state_hash" owner)"
+s="$(side "$service" 644 "$service_state_hash" service)"
+case "$o:$s" in
+  state:state) printf 'RELAY=none\n' ;;
+  new:state) printf 'RELAY=partial\n' ;;
+  new:new) printf 'RELAY=switched\n' ;;
+  *) printf 'RELAY=drift owner=%s service=%s\n' "$o" "$s" ;;
+esac
+MIGRATE_RELAY_PROBE
+  chmod 600 "${output}"
+}
+
+migrate_relay_status() {
+  local script output
+  if [[ -z "${MIGRATE_NEW_RELAY_TARGET}" ]]; then
+    # 新端口还没选定时中转切换不可能开始。
+    printf 'none'
+    return 0
+  fi
+  script="${OP_TMP}/migrate-relay-probe.sh"
+  write_migrate_relay_probe_script "${script}"
+  output="$(ssh_relay_stdin bash -s -- "${CHAIN_ID}" "${MIGRATE_STATE_RELAY_OWNER_SHA256}" "${MIGRATE_OLD_CONFIG_SHA256}" "${MIGRATE_NEW_CONFIG_SHA256}" "${MIGRATE_STATE_RELAY_SERVICE_SHA256}" "${MIGRATE_OLD_RELAY_TARGET}" "${MIGRATE_NEW_RELAY_TARGET}" < "${script}")" || die 3 '中转现场检查失败（SSH 不可达或远端脚本异常）'
+  output="$(printf '%s\n' "${output}" | awk '$1 ~ /^RELAY=/ {sub(/^RELAY=/, ""); print; exit}')"
+  [[ -n "${output}" ]] || die 3 '中转现场检查输出格式异常'
+  printf '%s' "${output}"
+}
+
+# 由现场推导实际阶段，结果写入 MIGRATE_STAGE。返回时：state 字段已按它绑定的那份配置加载进全局变量，
+# CONFIG_SHA256 与四个出口键是配置文件里的当前值。
+migrate_derive_stage() {
+  local side rc relay saved_host saved_port saved_key saved_exit
+  side="$(migrate_config_side)"
+  case "${side}" in
+    other) die 2 "配置里的出口机参数既不是迁移前也不是迁移后的值；请人工核对 ${CONFIG_PATH} 与 ${MIGRATE_CONFIG_BACKUP:-（无备份）}" ;;
+    old)
+      if probe_state_file "${STATE_FILE}"; then rc=0; else rc="$?"; fi
+      [[ "${rc}" -eq 0 ]] || die 2 "配置为迁移前的值，但 state 与它不一致（${STATE_PROBE_REASON}）；请人工核对"
+      MIGRATE_STAGE=recorded
+      return 0
+      ;;
+  esac
+  if probe_state_file "${STATE_FILE}"; then rc=0; else rc="$?"; fi
+  if [[ "${rc}" -eq 0 ]]; then
+    MIGRATE_STAGE=cleanup
+    return 0
+  fi
+  [[ "${rc}" -eq 12 ]] || die 5 "state.env 校验失败：${STATE_PROBE_REASON}"
+  # 临时换回迁移前的四个键重算摘要再核 state；其余 9 个键与校验和仍按原逻辑逐项核验，豁免范围不会被放宽。
+  saved_host="${EXIT_HOST}"; saved_port="${EXIT_SSH_PORT}"; saved_key="${EXIT_SSH_KEY}"; saved_exit="${EXPECTED_EXIT_IPV4}"
+  EXIT_HOST="${MIGRATE_OLD_EXIT_HOST}"; EXIT_SSH_PORT="${MIGRATE_OLD_EXIT_SSH_PORT}"; EXIT_SSH_KEY="${MIGRATE_OLD_EXIT_SSH_KEY}"; EXPECTED_EXIT_IPV4="${MIGRATE_OLD_EXPECTED_EXIT_IPV4}"
+  CONFIG_SHA256="$(normalized_config | sha256_text)"
+  if probe_state_file "${STATE_FILE}"; then rc=0; else rc="$?"; fi
+  EXIT_HOST="${saved_host}"; EXIT_SSH_PORT="${saved_port}"; EXIT_SSH_KEY="${saved_key}"; EXPECTED_EXIT_IPV4="${saved_exit}"
+  CONFIG_SHA256="$(normalized_config | sha256_text)"
+  [[ "${rc}" -eq 0 ]] || die 2 'state 既不绑定当前配置也不绑定迁移前的配置；请人工核对配置与 state'
+  [[ "${CONFIG_SHA256}" == "${MIGRATE_NEW_CONFIG_SHA256}" ]] || die 2 '当前配置摘要与迁移记录不符；除四个出口键外配置还被改过'
+  MIGRATE_STATE_RELAY_OWNER_SHA256="${RELAY_OWNER_SHA256}"
+  MIGRATE_STATE_RELAY_SERVICE_SHA256="${RELAY_SERVICE_SHA256}"
+  migrate_use_exit new
+  relay="$(migrate_relay_status)"
+  case "${relay}" in
+    none) MIGRATE_STAGE=executing ;;
+    partial) MIGRATE_STAGE=partial ;;
+    switched) MIGRATE_STAGE=switched ;;
+    *) die 1 "中转上本链的 owner / service 被外部改动（${relay}），迁移不再继续；请人工核对中转 /etc/ownexit-chain 与 relay service" ;;
+  esac
+}
+
+# 改写配置文件中的四个出口键（各恰好 1 行，其余字节不变）；改写前备份到同目录 <文件名>.bak.<时间>。
+migrate_rewrite_config() {
+  local tmp key value count
+  if [[ -z "${MIGRATE_CONFIG_BACKUP}" ]]; then
+    MIGRATE_CONFIG_BACKUP="${CONFIG_PATH}.bak.$(date '+%Y%m%d_%H%M%S')"
+    [[ ! -e "${MIGRATE_CONFIG_BACKUP}" && ! -L "${MIGRATE_CONFIG_BACKUP}" ]] || die 1 "配置备份路径碰撞：${MIGRATE_CONFIG_BACKUP}"
+    ( set -o noclobber; cat "${CONFIG_PATH}" > "${MIGRATE_CONFIG_BACKUP}" ) || die 1 '配置备份失败'
+    chmod 600 "${MIGRATE_CONFIG_BACKUP}" || die 1 '配置备份权限设置失败'
+    migrate_write_record
+  fi
+  require_secure_user_file "${MIGRATE_CONFIG_BACKUP}" 600 || die 1 "配置备份身份或权限异常：${MIGRATE_CONFIG_BACKUP}"
+  for key in EXIT_HOST EXIT_SSH_PORT EXIT_SSH_KEY EXPECTED_EXIT_IPV4; do
+    count="$(awk -v k="${key}=" 'index($0, k) == 1 {n++} END {print n + 0}' "${CONFIG_PATH}")"
+    [[ "${count}" == 1 ]] || die 2 "配置文件中 ${key}= 不是恰好 1 行：${CONFIG_PATH}"
+  done
+  tmp="$(dirname "${CONFIG_PATH}")/.$(basename "${CONFIG_PATH}").migrate.$$.tmp"
+  awk -v h="EXIT_HOST=${MIGRATE_NEW_EXIT_HOST}" -v p="EXIT_SSH_PORT=${MIGRATE_NEW_EXIT_SSH_PORT}" \
+      -v k="EXIT_SSH_KEY=${MIGRATE_NEW_EXIT_SSH_KEY}" -v e="EXPECTED_EXIT_IPV4=${MIGRATE_NEW_EXPECTED_EXIT_IPV4}" '{
+    if (index($0, "EXIT_HOST=") == 1) print h
+    else if (index($0, "EXIT_SSH_PORT=") == 1) print p
+    else if (index($0, "EXIT_SSH_KEY=") == 1) print k
+    else if (index($0, "EXPECTED_EXIT_IPV4=") == 1) print e
+    else print
+  }' "${CONFIG_PATH}" > "${tmp}" || die 1 '配置改写失败'
+  chmod 600 "${tmp}" || die 1 '配置临时文件权限设置失败'
+  mv -f "${tmp}" "${CONFIG_PATH}" || die 1 '配置原子替换失败'
+  EXIT_HOST="${MIGRATE_NEW_EXIT_HOST}"
+  EXIT_SSH_PORT="${MIGRATE_NEW_EXIT_SSH_PORT}"
+  EXIT_SSH_KEY="${MIGRATE_NEW_EXIT_SSH_KEY}"
+  EXPECTED_EXIT_IPV4="${MIGRATE_NEW_EXPECTED_EXIT_IPV4}"
+  value="$(normalized_config | sha256_text)"
+  [[ "${value}" == "${MIGRATE_NEW_CONFIG_SHA256}" ]] || die 1 '改写后的配置摘要与迁移记录不符'
+  CONFIG_SHA256="${value}"
+  MIGRATE_PHASE='config-rewritten'
+  migrate_write_record
+  log_info "[migrate] config rewritten backup=${MIGRATE_CONFIG_BACKUP}"
+}
+
+# 给新出口机配免密并登记 ed25519 主机指纹（与 init_setup_host 同一套做法，报错文字指向本命令而不是 init）。
+migrate_setup_new_host() {
+  local key rc
+  key="$(init_key_path "${MIGRATE_TO}" "${MIGRATE_TO_PORT}")"
+  log_info "[migrate] 新出口机 ${MIGRATE_TO}:${MIGRATE_TO_PORT} 配置免密"
+  rc=0
+  # connect_to.sh 的进度行写在 stdout；转到 stderr，stdout 只留 migrate= 这一行机器可读输出。
+  bash "${SCRIPT_DIR}/../direct/connect_to.sh" --setup-only --host "${MIGRATE_TO}" --port "${MIGRATE_TO_PORT}" --user root >&2 || rc="$?"
+  [[ "${rc}" -eq 0 ]] || die 3 "新出口机 ${MIGRATE_TO}:${MIGRATE_TO_PORT} 配置免密失败（原因见上方 reason=...）；配置与 state 未改动"
+  if ! init_probe_ed25519 "${key}" "${MIGRATE_TO}" "${MIGRATE_TO_PORT}"; then
+    init_record_ed25519_hostkey "${key}" "${MIGRATE_TO}" "${MIGRATE_TO_PORT}" \
+      || die 3 "新出口机 ${MIGRATE_TO}:${MIGRATE_TO_PORT} 无法取得 ed25519 host key（chain 只接受 ed25519）"
+    init_probe_ed25519 "${key}" "${MIGRATE_TO}" "${MIGRATE_TO_PORT}" \
+      || die 3 "新出口机 ${MIGRATE_TO}:${MIGRATE_TO_PORT} 补记 ed25519 host key 后仍无法用 ed25519 登录"
+  fi
+  require_private_key_file "${key}" || die 3 "新出口机私钥身份或权限异常：${key}"
+  MIGRATE_NEW_EXIT_SSH_KEY="${key}"
+  MIGRATE_NEW_EXIT_SSH_KEY_FINGERPRINT="$(fingerprint_private_key "${key}")" || die 3 '无法读取新出口机私钥指纹'
+  [[ "${MIGRATE_NEW_EXIT_SSH_KEY_FINGERPRINT}" == SHA256:* ]] || die 3 '新出口机私钥指纹格式错误'
+  [[ "${MIGRATE_NEW_EXIT_SSH_KEY_FINGERPRINT}" != "${RELAY_SSH_KEY_FINGERPRINT}" ]] || die 2 '新出口机与中转使用了同一把私钥；chain 要求两把不同的私钥'
+}
+
+# 准备阶段（没有迁移记录时）：核旧链健康、探新机器，写迁移记录并改写配置。远端不做任何修改。
+migrate_prepare() {
+  local rc new_fp exit_ip answer path
+  if probe_state_file "${STATE_FILE}"; then rc=0; else rc="$?"; fi
+  case "${rc}" in
+    0) ;;
+    12) die 2 '配置与 state 不一致；migrate-exit 要求配置未改动（出口机参数由本命令自己改写）' ;;
+    *) die 5 "state.env 校验失败：${STATE_PROBE_REASON}" ;;
+  esac
+  is_ipv4 "${MIGRATE_TO}" || die 2 "--to 必须是 IPv4：${MIGRATE_TO}"
+  [[ "${MIGRATE_TO}" != "${RELAY_HOST}" ]] || die 2 '--to 不能是中转机'
+  [[ "${MIGRATE_TO}" != "${EXIT_HOST}" ]] || die 2 '--to 就是当前出口机；同一台机器换 IP 用 rehost-exit'
+  # 旧链健康核验，顺序与 rollback 前置一致；同时让 remote_platform_preflight 给 SOCKET_PROXYD_PATH 赋值。
+  render_ssh_config
+  if probe_loaded_binding; then rc=0; else rc="$?"; fi
+  case "${rc}" in
+    0) ;;
+    11) die 5 '中转 SSH key 指纹漂移' ;;
+    12) die 5 '出口机 SSH key 指纹漂移' ;;
+    21) die 3 '中转实际协商 host-key 探针不可达' ;;
+    22) die 3 '经中转访问旧出口机失败；旧出口机已经登录不了时不能迁移（私钥只在旧机器上），改用 rollback + deploy' ;;
+    31) die 3 '中转实际协商 host-key 指纹漂移' ;;
+    32) die 3 '旧出口机实际协商 host-key 指纹漂移' ;;
+    *) die 5 '主机/密钥绑定核验异常' ;;
+  esac
+  remote_platform_preflight
+  if probe_remote_resources no; then rc=0; else rc="$?"; fi
+  [[ "${rc}" -ne 33 ]] || die 5 '旧出口机上有未完成的凭据或设备操作（辅助文件未清理）；先重跑中断的那条命令（rotate-keys / add-device / remove-device）收敛'
+  [[ "${rc}" -eq 0 ]] || die 5 '旧链远端资源不健康；先运行 verify 查明并收敛'
+  MIGRATE_MIGRATE_ID="$(random_hex_128)"
+  MIGRATE_OLD_EXIT_HOST="${EXIT_HOST}"
+  MIGRATE_OLD_EXIT_SSH_PORT="${EXIT_SSH_PORT}"
+  MIGRATE_OLD_EXIT_SSH_KEY="${EXIT_SSH_KEY}"
+  MIGRATE_OLD_EXIT_SSH_KEY_FINGERPRINT="${EXIT_SSH_KEY_FINGERPRINT}"
+  MIGRATE_OLD_EXPECTED_EXIT_IPV4="${EXPECTED_EXIT_IPV4}"
+  MIGRATE_OLD_EXIT_HOSTKEY_FINGERPRINT="${EXIT_HOSTKEY_FINGERPRINT}"
+  MIGRATE_OLD_EXIT_REALITY_PORT="${EXIT_REALITY_PORT}"
+  MIGRATE_OLD_EXIT_OWNER_SHA256="${EXIT_OWNER_SHA256}"
+  MIGRATE_OLD_EXIT_EXIT_SHA256="${EXIT_EXIT_SHA256}"
+  MIGRATE_OLD_EXIT_SERVICE_SHA256="${EXIT_SERVICE_SHA256}"
+  MIGRATE_OLD_CONFIG_SHA256="${CONFIG_SHA256}"
+  MIGRATE_OLD_RELAY_TARGET="${EXIT_HOST}:${EXIT_REALITY_PORT}"
+  MIGRATE_NEW_EXIT_HOST="${MIGRATE_TO}"
+  MIGRATE_NEW_EXIT_SSH_PORT="${MIGRATE_TO_PORT}"
+  migrate_setup_new_host
+  # 新机器指纹经中转取得：同时证明中转到新机器的 SSH 可达（迁移后的所有管理都走这条路）。
+  migrate_use_exit new
+  new_fp="$(negotiated_hostkey_fingerprint chain-exit)" || die 3 "经中转访问新出口机 ${MIGRATE_TO}:${MIGRATE_TO_PORT} 失败；确认中转到新机器的 SSH 可达"
+  [[ "${new_fp}" != "${MIGRATE_OLD_EXIT_HOSTKEY_FINGERPRINT}" ]] || die 2 "新出口机 ${MIGRATE_TO} 的主机指纹与当前出口机相同：是同一台机器，换 IP 用 rehost-exit"
+  MIGRATE_NEW_EXIT_HOSTKEY_FINGERPRINT="${new_fp}"
+  EXIT_HOSTKEY_FINGERPRINT="${new_fp}"
+  remote_platform_preflight
+  check_remote_shared_binary_or_absent exit || die 3 '新出口机共享 binary / 目录与固定版本不一致'
+  for path in "${REMOTE_CONFIG_DIR}/${CHAIN_ID}.owner.env" "${REMOTE_CONFIG_DIR}/${CHAIN_ID}.exit.json" \
+    "/etc/systemd/system/ownexit-chain-exit-${CHAIN_ID}.service" \
+    "/etc/systemd/system/multi-user.target.wants/ownexit-chain-exit-${CHAIN_ID}.service"; do
+    require_remote_path_absent exit "${path}" "新出口机上已有本链的文件：${path}；配置未改动"
+  done
+  require_remote_unit_absent exit "ownexit-chain-exit-${CHAIN_ID}.service" "新出口机上已有本链的 unit；配置未改动"
+  # 出口 IP 是 verify 的唯一允许值：在新机器上直接问 ipinfo.io，终端里要人确认。
+  exit_ip="$(ssh_exit 'curl -4 -fsS -m 15 ipinfo.io/ip' 2>/dev/null | tr -d '[:space:]' || true)"
+  is_ipv4 "${exit_ip}" || die 3 "无法在新出口机上取得公网 IPv4（需要 curl 能访问 ipinfo.io）；读到：${exit_ip:-空}"
+  log_info "[migrate] 新出口机公网 IP：${exit_ip}"
+  if [[ -t 0 ]]; then
+    read -r -p "确认迁移后客户端经这条链出去的 IP 应当是 ${exit_ip}？[y/N] " answer
+    [[ "${answer}" == y || "${answer}" == Y ]] || die 2 '未确认出口 IP，配置与 state 未改动'
+  fi
+  MIGRATE_NEW_EXPECTED_EXIT_IPV4="${exit_ip}"
+  # 新配置摘要：四个出口键换成新值，其余与 parse_config 同一算法。
+  EXIT_HOST="${MIGRATE_OLD_EXIT_HOST}"; EXIT_SSH_PORT="${MIGRATE_OLD_EXIT_SSH_PORT}"; EXIT_SSH_KEY="${MIGRATE_OLD_EXIT_SSH_KEY}"; EXPECTED_EXIT_IPV4="${MIGRATE_OLD_EXPECTED_EXIT_IPV4}"
+  (
+    EXIT_HOST="${MIGRATE_NEW_EXIT_HOST}"; EXIT_SSH_PORT="${MIGRATE_NEW_EXIT_SSH_PORT}"; EXIT_SSH_KEY="${MIGRATE_NEW_EXIT_SSH_KEY}"; EXPECTED_EXIT_IPV4="${MIGRATE_NEW_EXPECTED_EXIT_IPV4}"
+    normalized_config | sha256_text
+  ) > "${OP_TMP}/migrate-new-config-sha256" || die 1 '新配置摘要计算失败'
+  MIGRATE_NEW_CONFIG_SHA256="$(cat "${OP_TMP}/migrate-new-config-sha256")"
+  MIGRATE_BINARY_STAGE_PATH="${REMOTE_BASE}/.stage-binary-${MIGRATE_MIGRATE_ID}"
+  MIGRATE_BINARY_STAGE_OWNER_TEMP_PATH="${REMOTE_BASE}/.owner-exit-binary-${MIGRATE_MIGRATE_ID}"
+  MIGRATE_CONFIG_STAGE_PATH="${REMOTE_CONFIG_DIR}/.stage-exit-${MIGRATE_MIGRATE_ID}"
+  MIGRATE_CONFIG_STAGE_OWNER_TEMP_PATH="${REMOTE_CONFIG_DIR}/.owner-exit-${MIGRATE_MIGRATE_ID}"
+  MIGRATE_PHASE=recorded
+  migrate_write_record
+  log_info "[migrate] phase=prepare recorded chain=${CHAIN_ID} old=${MIGRATE_OLD_EXIT_HOST} new=${MIGRATE_NEW_EXIT_HOST} new_exit_ip=${MIGRATE_NEW_EXPECTED_EXIT_IPV4}"
+  migrate_test_stop record
+  migrate_rewrite_config
+  migrate_test_stop config
+}
+
+# 清掉一个暂存（目录存在才核 stage-owner 后删除）与它的 owner 临时文件；kind=BINARY|CONFIG。
+migrate_cleanup_stage() {
+  local kind path hash temp rc
+  kind="$1"
+  eval "path=\"\${MIGRATE_${kind}_STAGE_PATH}\"; hash=\"\${MIGRATE_${kind}_STAGE_OWNER_SHA256:-ABSENT}\"; temp=\"\${MIGRATE_${kind}_STAGE_OWNER_TEMP_PATH}\""
+  [[ -n "${hash}" ]] || hash=ABSENT
+  if cleanup_remote_residue exit "${path}" "${hash}" "${temp}"; then rc=0; else rc="$?"; fi
+  [[ "${rc}" -ne 255 ]] || die 3 "新出口机暂存清理时 SSH 不可达：${path}"
+  [[ "${rc}" -eq 0 ]] || die 1 "新出口机暂存清理失败（rc=${rc}）：${path}；请人工核对"
+}
+
+migrate_install_binary() {
+  local owner_file
+  migrate_cleanup_stage BINARY
+  owner_file="${OP_TMP}/migrate-binary-owner.env"
+  render_owner_file "${owner_file}" exit-binary-stage "${MIGRATE_NEW_EXIT_HOSTKEY_FINGERPRINT}"
+  # 哈希先入记录再建暂存：建到一半中断时，下一次进程才有删除授权。
+  MIGRATE_BINARY_STAGE_OWNER_SHA256="$(sha256_file "${owner_file}")"
+  migrate_write_record
+  install_remote_binary exit "${MIGRATE_BINARY_STAGE_PATH}" "${MIGRATE_BINARY_STAGE_OWNER_SHA256}" "${owner_file}" "${MIGRATE_BINARY_STAGE_OWNER_TEMP_PATH}"
+  cleanup_remote_stage exit "${MIGRATE_BINARY_STAGE_PATH}" "${MIGRATE_BINARY_STAGE_OWNER_SHA256}" || die 1 '新出口机 binary 暂存清理失败'
+  MIGRATE_BINARY_STAGE_OWNER_SHA256=''
+  migrate_write_record
+  log_info '[migrate] binary done'
+  migrate_test_stop binary
+}
+
+# 新出口机上本链文件的发布情况：none（都不存在）/ partial（部分存在且哈希都对）/ full（全部存在且哈希都对）；
+# 任一存在的文件身份或哈希不符（或记录里还没有哈希）退出 61。
+write_migrate_published_script() {
+  local output
+  output="$1"
+  cat > "${output}" <<'MIGRATE_PUBLISHED'
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+export LC_ALL=C
+chain_id="$1"
+owner_hash="$2"
+config_hash="$3"
+unit_hash="$4"
+link_target="$5"
+present=0
+check() {
+  local path mode hash
+  path="$1"; mode="$2"; hash="$3"
+  [[ -e "$path" || -L "$path" ]] || return 0
+  present=$((present + 1))
+  [[ "$hash" != - && -f "$path" && ! -L "$path" && "$(stat -c %u:%g:%a "$path")" == "0:0:$mode" ]] || exit 61
+  [[ "$(sha256sum "$path" | awk '{print $1}')" == "$hash" ]] || exit 61
+}
+check "/etc/ownexit-chain/$chain_id.owner.env" 600 "$owner_hash"
+check "/etc/ownexit-chain/$chain_id.exit.json" 600 "$config_hash"
+check "/etc/systemd/system/ownexit-chain-exit-$chain_id.service" 644 "$unit_hash"
+link="/etc/systemd/system/multi-user.target.wants/ownexit-chain-exit-$chain_id.service"
+if [[ -e "$link" || -L "$link" ]]; then
+  present=$((present + 1))
+  [[ -L "$link" && "$(readlink "$link")" == "$link_target" ]] || exit 61
+fi
+case "$present" in
+  0) printf 'PUBLISHED=none\n' ;;
+  4) printf 'PUBLISHED=full\n' ;;
+  *) printf 'PUBLISHED=partial\n' ;;
+esac
+MIGRATE_PUBLISHED
+  chmod 600 "${output}"
+}
+
+migrate_published_state() {
+  local script output rc
+  script="${OP_TMP}/migrate-published.sh"
+  write_migrate_published_script "${script}"
+  if output="$(ssh_exit_stdin bash -s -- "${CHAIN_ID}" "${MIGRATE_NEW_EXIT_OWNER_SHA256:--}" "${MIGRATE_NEW_EXIT_EXIT_SHA256:--}" "${MIGRATE_NEW_EXIT_SERVICE_SHA256:--}" "${EXIT_ENABLE_LINK_TARGET}" < "${script}")"; then rc=0; else rc="$?"; fi
+  [[ "${rc}" -ne 255 ]] || die 3 '检查新出口机发布情况时 SSH 不可达'
+  [[ "${rc}" -ne 61 ]] || die 1 '新出口机上本链的文件与迁移记录不符（外部改动），不覆盖；请人工核对新出口机 /etc/ownexit-chain'
+  [[ "${rc}" -eq 0 ]] || die 1 "检查新出口机发布情况失败（rc=${rc}）"
+  output="$(printf '%s\n' "${output}" | awk -F= '$1 == "PUBLISHED" {print $2}')"
+  [[ "${output}" =~ ^(none|partial|full)$ ]] || die 1 '新出口机发布情况输出格式异常'
+  printf '%s' "${output}"
+}
+
+# 选新出口机的 Reality 端口：优先沿用旧端口（客户端看不到这个端口，但少一处变化便于排障）；被占用就另选。
+# 记录里已有端口且尚未发布时再确认一次空闲（准备与发布之间可能被别的服务占用）。
+migrate_choose_port() {
+  local script state candidate
+  script="${OP_TMP}/port-check.sh"
+  write_port_check_script "${script}"
+  candidate="${MIGRATE_NEW_EXIT_REALITY_PORT:-${MIGRATE_OLD_EXIT_REALITY_PORT}}"
+  state="$(ssh_exit_stdin bash -s -- "${candidate}" < "${script}")" || die 3 '新出口机端口检查失败'
+  if [[ "${state}" != free ]]; then
+    candidate="$(choose_remote_port exit)" || die 3 '无法在新出口机选择 Reality 端口'
+    log_info "[migrate] 新出口机上端口 ${MIGRATE_NEW_EXIT_REALITY_PORT:-${MIGRATE_OLD_EXIT_REALITY_PORT}} 已被占用，改用 ${candidate}"
+  fi
+  MIGRATE_NEW_EXIT_REALITY_PORT="${candidate}"
+  MIGRATE_NEW_RELAY_TARGET="${MIGRATE_NEW_EXIT_HOST}:${candidate}"
+  EXIT_REALITY_PORT="${candidate}"
+  migrate_write_record
+}
+
+# 从旧出口机读出 exit.json（含私钥）写进新出口机的配置暂存。全程只经本机 bash 变量与管道：
+# 旧机侧核哈希后输出 base64 单行，新机侧经 stdin 解码写入，再核一次哈希。
+migrate_transfer_exit_config() {
+  local script b64 rc target remote_hash
+  script="${OP_TMP}/migrate-read-config.sh"
+  cat > "${script}" <<'MIGRATE_READ_CONFIG'
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+file="/etc/ownexit-chain/$1.exit.json"
+[[ -f "$file" && ! -L "$file" && "$(stat -c %u:%g:%a "$file")" == 0:0:600 ]] || exit 61
+[[ "$(sha256sum "$file" | awk '{print $1}')" == "$2" ]] || exit 62
+base64 -w0 "$file"
+MIGRATE_READ_CONFIG
+  chmod 600 "${script}"
+  migrate_use_exit old
+  if b64="$(ssh_exit_stdin bash -s -- "${CHAIN_ID}" "${MIGRATE_OLD_EXIT_EXIT_SHA256}" < "${script}")"; then rc=0; else rc="$?"; fi
+  case "${rc}" in
+    0) ;;
+    255) die 3 '读取旧出口机配置时 SSH 不可达；旧出口机恢复后重跑，或 --abort 放弃迁移' ;;
+    61|62) die 1 '旧出口机上本链的配置身份或哈希与 state 不符，拒绝搬运；请人工核对' ;;
+    *) die 1 "读取旧出口机配置失败（rc=${rc}）" ;;
+  esac
+  [[ "${b64}" =~ ^[A-Za-z0-9+/]+=*$ ]] || die 1 '旧出口机返回的配置编码异常'
+  migrate_use_exit new
+  target="${MIGRATE_CONFIG_STAGE_PATH}/${CHAIN_ID}.exit.json"
+  # 进程替换是管道，不落本机临时文件（bash 3.2 的 here-string 会写临时文件，不能用）。
+  if ssh_exit_stdin "set -C; umask 077; base64 -d > '${target}' && chown root:root '${target}' && chmod 600 '${target}'" < <(printf '%s\n' "${b64}"); then rc=0; else rc="$?"; fi
+  b64=''
+  [[ "${rc}" -eq 0 ]] || die 1 "写入新出口机配置暂存失败（rc=${rc}）"
+  remote_hash="$(ssh_exit sha256sum "${target}" | awk '{print $1}')" || die 3 '新出口机配置哈希读取失败'
+  [[ "${remote_hash}" == "${MIGRATE_OLD_EXIT_EXIT_SHA256}" ]] || die 1 '新出口机上的配置哈希与旧出口机不一致'
+  log_info "[migrate] exit config transferred sha256=${remote_hash:0:12}"
+  if [[ "${MIGRATE_NEW_EXIT_REALITY_PORT}" != "${MIGRATE_OLD_EXIT_REALITY_PORT}" ]]; then
+    # 与 rotate 的 apply_break_port 同一精确匹配：listen_port 行必须恰好 1 行，否则不改。
+    if ssh_exit "awk -v from='    \"listen_port\": ${MIGRATE_OLD_EXIT_REALITY_PORT},' -v to='    \"listen_port\": ${MIGRATE_NEW_EXIT_REALITY_PORT},' '{ if (\$0 == from) { print to; n++ } else print } END { exit n == 1 ? 0 : 3 }' '${target}' > '${target}.port' && chown root:root '${target}.port' && chmod 600 '${target}.port' && mv -f '${target}.port' '${target}'"; then rc=0; else rc="$?"; fi
+    [[ "${rc}" -eq 0 ]] || die 1 "新出口机配置的 listen_port 改写失败（rc=${rc}）"
+    log_info "[migrate] listen_port ${MIGRATE_OLD_EXIT_REALITY_PORT} -> ${MIGRATE_NEW_EXIT_REALITY_PORT}"
+  fi
+}
+
+# 新机器上建配置暂存、搬运 exit.json、渲染 owner 与 unit，三个哈希写入记录。
+migrate_stage_config() {
+  local owner_file stage_owner owner_b64 relay_source script output
+  migrate_cleanup_stage CONFIG
+  stage_owner="${OP_TMP}/migrate-config-stage-owner.env"
+  render_owner_file "${stage_owner}" exit-stage "${MIGRATE_NEW_EXIT_HOSTKEY_FINGERPRINT}"
+  MIGRATE_CONFIG_STAGE_OWNER_SHA256="$(sha256_file "${stage_owner}")"
+  MIGRATE_NEW_EXIT_OWNER_SHA256=''
+  MIGRATE_NEW_EXIT_EXIT_SHA256=''
+  MIGRATE_NEW_EXIT_SERVICE_SHA256=''
+  migrate_write_record
+  create_remote_stage exit "${MIGRATE_CONFIG_STAGE_PATH}" "${MIGRATE_CONFIG_STAGE_OWNER_TEMP_PATH}" "${stage_owner}" "${MIGRATE_CONFIG_STAGE_OWNER_SHA256}" || die 1 '新出口机配置暂存创建失败'
+  migrate_transfer_exit_config
+  # owner 里是新主机指纹、新配置摘要与原部署 ID（CONFIG_SHA256 此时已是新值）。
+  owner_file="${OP_TMP}/migrate-exit-owner.env"
+  render_owner_file "${owner_file}" exit "${MIGRATE_NEW_EXIT_HOSTKEY_FINGERPRINT}"
+  owner_b64="$(openssl base64 -A -in "${owner_file}")"
+  relay_source='-'
+  if [[ "${EXIT_SOURCE_FILTER}" == managed ]]; then
+    relay_source="$(detect_relay_source_ip)"
+    [[ "${EXIT_NFT_PATH}" == /* ]] || die 1 '没有取得新出口机 nft 路径，无法配置 managed 白名单'
+    log_info "[migrate] 新出口机白名单放行来源=${relay_source}（EXIT_SOURCE_FILTER=managed）"
+  fi
+  script="${OP_TMP}/prepare-exit.sh"
+  write_prepare_exit_script "${script}"
+  output="$(ssh_exit_stdin bash -s -- "${MIGRATE_CONFIG_STAGE_PATH}" "${MIGRATE_CONFIG_STAGE_OWNER_SHA256}" "${REMOTE_BIN}" "${CHAIN_ID}" "${MIGRATE_NEW_EXIT_REALITY_PORT}" "${REALITY_SERVER_NAME}" "${owner_b64}" "${EXIT_SOURCE_FILTER}" "${EXIT_NFT_PATH:--}" "${relay_source}" reuse < "${script}")" || die 1 '新出口机 owner / unit 暂存失败'
+  MIGRATE_NEW_EXIT_OWNER_SHA256="$(printf '%s\n' "${output}" | awk -F= '$1 == "EXIT_OWNER_SHA256" {print $2}')"
+  MIGRATE_NEW_EXIT_EXIT_SHA256="$(printf '%s\n' "${output}" | awk -F= '$1 == "EXIT_EXIT_SHA256" {print $2}')"
+  MIGRATE_NEW_EXIT_SERVICE_SHA256="$(printf '%s\n' "${output}" | awk -F= '$1 == "EXIT_SERVICE_SHA256" {print $2}')"
+  [[ "${MIGRATE_NEW_EXIT_OWNER_SHA256}" =~ ^[0-9a-f]{64}$ && "${MIGRATE_NEW_EXIT_EXIT_SHA256}" =~ ^[0-9a-f]{64}$ && "${MIGRATE_NEW_EXIT_SERVICE_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die 1 '新出口机暂存哈希不完整'
+  migrate_write_record
+  migrate_use_exit new
+  log_info "[migrate] stage done exit_sha256=${MIGRATE_NEW_EXIT_EXIT_SHA256:0:12}"
+  migrate_test_stop stage
+}
+
+# 从暂存把缺失的本链文件 link 到正式路径（已存在的必须哈希一致）；顺序同 deploy 的 promote：owner 最先，
+# 因为拆除脚本要求“有其它文件就必须有 owner”。test_link1=link1 时在第一个 link 后退出 99（构造部分发布）。
+write_migrate_promote_script() {
+  local output
+  output="$1"
+  cat > "${output}" <<'MIGRATE_PROMOTE'
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+stage="$1"
+stage_owner_hash="$2"
+chain_id="$3"
+owner_hash="$4"
+config_hash="$5"
+unit_hash="$6"
+link_target="$7"
+test_stop="$8"
+[[ -d "$stage" && ! -L "$stage" && "$(stat -c %u:%g:%a "$stage")" == 0:0:700 ]] || exit 90
+[[ "$(sha256sum "$stage/stage-owner.env" | awk '{print $1}')" == "$stage_owner_hash" ]] || exit 91
+wants=/etc/systemd/system/multi-user.target.wants
+[[ -d "$wants" && ! -L "$wants" && "$(stat -c %u "$wants")" == 0 ]] || exit 95
+mode="$(stat -c %a "$wants")"
+(( (8#$mode & 8#022) == 0 )) || exit 96
+linked=0
+publish() {
+  local src dst hash
+  src="$1"; dst="$2"; hash="$3"
+  if [[ -e "$dst" || -L "$dst" ]]; then
+    [[ -f "$dst" && ! -L "$dst" && "$(sha256sum "$dst" | awk '{print $1}')" == "$hash" ]] || exit 97
+    return 0
+  fi
+  [[ "$(sha256sum "$src" | awk '{print $1}')" == "$hash" ]] || exit 92
+  link "$src" "$dst"
+  linked=$((linked + 1))
+  if [[ "$test_stop" == link1 && "$linked" == 1 ]]; then exit 99; fi
+}
+publish "$stage/$chain_id.owner.env" "/etc/ownexit-chain/$chain_id.owner.env" "$owner_hash"
+publish "$stage/$chain_id.exit.json" "/etc/ownexit-chain/$chain_id.exit.json" "$config_hash"
+publish "$stage/ownexit-chain-exit-$chain_id.service" "/etc/systemd/system/ownexit-chain-exit-$chain_id.service" "$unit_hash"
+link_dst="$wants/ownexit-chain-exit-$chain_id.service"
+if [[ -e "$link_dst" || -L "$link_dst" ]]; then
+  [[ -L "$link_dst" && "$(readlink "$link_dst")" == "$link_target" ]] || exit 98
+else
+  ln --symbolic --no-target-directory "$link_target" "$link_dst"
+  [[ "$(readlink "$link_dst")" == "$link_target" ]] || exit 98
+fi
+MIGRATE_PROMOTE
+  chmod 600 "${output}"
+}
+
+migrate_promote() {
+  local script test_stop rc
+  script="${OP_TMP}/migrate-promote.sh"
+  write_migrate_promote_script "${script}"
+  test_stop='-'
+  [[ "${OWNEXIT_TEST_MIGRATE_STOP_AFTER:-}" != link1 ]] || test_stop=link1
+  if ssh_exit_stdin bash -s -- "${MIGRATE_CONFIG_STAGE_PATH}" "${MIGRATE_CONFIG_STAGE_OWNER_SHA256}" "${CHAIN_ID}" "${MIGRATE_NEW_EXIT_OWNER_SHA256}" "${MIGRATE_NEW_EXIT_EXIT_SHA256}" "${MIGRATE_NEW_EXIT_SERVICE_SHA256}" "${EXIT_ENABLE_LINK_TARGET}" "${test_stop}" < "${script}"; then rc=0; else rc="$?"; fi
+  if [[ "${rc}" -eq 99 && "${test_stop}" == link1 ]]; then
+    log_warn '测试钩子：migrate-exit 在 link1 之后停止'
+    exit 99
+  fi
+  [[ "${rc}" -eq 0 ]] || die 1 "新出口机本链文件发布失败（rc=${rc}）"
+}
+
+# 发布新出口机上的本链文件并启动服务。只做 daemon-reload 与 start（同 activate_exit_exit）：启用链接已由 promote 创建。
+migrate_publish() {
+  local published unit
+  published="$(migrate_published_state)"
+  case "${published}" in
+    none)
+      migrate_stage_config
+      migrate_promote
+      ;;
+    partial)
+      # 暂存只在发布与启动全部完成后才清理；暂存不在而文件不全，只可能是外部改动。
+      remote_path_absent exit "${MIGRATE_CONFIG_STAGE_PATH}" && die 1 '新出口机上本链文件部分发布但暂存已不在；请 --abort 后重新迁移'
+      migrate_promote
+      ;;
+    full) ;;
+  esac
+  unit="ownexit-chain-exit-${CHAIN_ID}.service"
+  ssh_exit systemctl daemon-reload || die 1 '新出口机 daemon-reload 失败'
+  ssh_exit systemctl start "${unit}" || die 1 '新出口机 service 启动失败'
+  [[ "$(ssh_exit systemctl is-active "${unit}")" == active ]] || die 1 '新出口机 service 未进入 active'
+  [[ "$(ssh_exit systemctl is-enabled "${unit}")" == enabled ]] || die 1 '新出口机 service 未按预期 enabled'
+  ssh_exit "ss -H -ltnp | grep -q ':${MIGRATE_NEW_EXIT_REALITY_PORT} '" || die 1 '新出口机 Reality 端口未监听'
+  migrate_cleanup_stage CONFIG
+  log_info "[migrate] publish done exit=${MIGRATE_NEW_EXIT_HOST}:${MIGRATE_NEW_EXIT_REALITY_PORT}"
+  migrate_test_stop publish
+}
+
+# 中转切换（或在已切换时再核一次）：复用 rehost 远端脚本，state 值必须用迁移前 state 里的哈希。
+# 已迁移的 owner / service 按 already 放行；运行中的 relay 若仍指向旧目标就重启。输出的新哈希赋给全局，
+# 后面的核验与 state 提交都按新哈希走。
+migrate_switch_relay() {
+  local script output rc owner_result owner_hash service_result service_hash restarted
+  script="${OP_TMP}/rehost-remote.sh"
+  write_rehost_remote_script "${script}"
+  if output="$(ssh_relay_stdin bash -s -- relay "${CHAIN_ID}" "${MIGRATE_STATE_RELAY_OWNER_SHA256}" "${MIGRATE_OLD_CONFIG_SHA256}" "${MIGRATE_NEW_CONFIG_SHA256}" "${MIGRATE_STATE_RELAY_SERVICE_SHA256}" "${MIGRATE_OLD_RELAY_TARGET}" "${MIGRATE_NEW_RELAY_TARGET}" < "${script}")"; then rc=0; else rc="$?"; fi
+  [[ "${rc}" -eq 0 ]] || die 1 "中转切换失败：$(rehost_remote_reason "${rc}")"
+  owner_result="$(rehost_output_value "${output}" OWNER)"
+  owner_hash="$(rehost_output_value "${output}" OWNER_SHA256)"
+  service_result="$(rehost_output_value "${output}" SERVICE)"
+  service_hash="$(rehost_output_value "${output}" SERVICE_SHA256)"
+  restarted="$(rehost_output_value "${output}" RESTARTED)"
+  [[ "${owner_result}" =~ ^(changed|already)$ && "${owner_hash}" =~ ^[0-9a-f]{64}$ ]] || die 1 '中转 owner 切换输出格式异常'
+  [[ "${service_result}" =~ ^(changed|already)$ && "${service_hash}" =~ ^[0-9a-f]{64}$ ]] || die 1 '中转 service 切换输出格式异常'
+  [[ "${restarted}" =~ ^(yes|no|inactive)$ ]] || die 1 '中转 service 重启结果格式异常'
+  RELAY_OWNER_SHA256="${owner_hash}"
+  RELAY_SERVICE_SHA256="${service_hash}"
+  log_info "[migrate] relay owner=${owner_result} service=${service_result} restarted=${restarted} target=${MIGRATE_NEW_RELAY_TARGET}"
+}
+
+# 提交 state：出口相关字段与两个中转哈希取新值，其余字段（部署 ID、凭据、中转端口、基线、资产哈希）原样沿用。
+migrate_commit_state() {
+  local audit payload
+  ensure_private_dir "${CHAIN_STATE_DIR}/audit" || die 1 'migrate audit 父目录不安全'
+  audit="${CHAIN_STATE_DIR}/audit/migrated.${DEPLOYMENT_ID}.${OPERATION_ID}"
+  [[ ! -e "${audit}" && ! -L "${audit}" ]] || die 1 "migrate audit 目录碰撞：${audit}"
+  mkdir "${audit}" || die 1 'migrate audit 目录创建失败'
+  chmod 700 "${audit}" || die 1 'migrate audit 目录权限设置失败'
+  # 直接写最终文件名：audit 下以 . 开头的 *.tmp 会被残留检查判 drift。
+  cp "${STATE_FILE}" "${audit}/state.env" || die 1 'migrate 旧 state 归档失败'
+  chmod 600 "${audit}/state.env" || die 1 'migrate 旧 state 归档权限设置失败'
+  [[ "$(sha256_file "${audit}/state.env")" == "$(sha256_file "${STATE_FILE}")" ]] || die 1 'migrate 旧 state 归档复核失败'
+  # migrate_use_exit new 已把出口字段设为新值；这里再显式确认配置摘要，防止前面的探针改写过全局变量。
+  migrate_use_exit new
+  CONFIG_SHA256="${MIGRATE_NEW_CONFIG_SHA256}"
+  payload="${OP_TMP}/state-payload"
+  render_state_payload "${payload}" || die 1 'migrate state payload 生成失败'
+  write_checksummed_file "${STATE_FILE}" replace "${payload}"
+  migrate_test_stop state-nophase
+  if probe_state_file "${STATE_FILE}"; then :; else die 1 "migrate 后 state 与新配置绑定失败：${STATE_PROBE_REASON}"; fi
+  MIGRATE_PHASE=committed
+  migrate_write_record
+  log_info "[migrate] state committed audit=${audit}"
+  migrate_test_stop state
+}
+
+# 执行阶段：装 binary、发布、切换前探针、切中转、提交前核验、提交 state。
+# 进入时 state 绑定迁移前配置（全局变量是旧出口机的 state 值），配置已是新值。
+migrate_execute() {
+  local rc published
+  migrate_use_exit new
+  migrate_check_binding
+  # 每个进程都要在新上下文跑一次：EXIT_NFT_PATH、SOCKET_PROXYD_PATH 只由它赋值。
+  remote_platform_preflight
+  log_info "[migrate] phase=execute stage=${MIGRATE_STAGE} chain=${CHAIN_ID}"
+  if [[ "${MIGRATE_STAGE}" != switched ]]; then
+    migrate_install_binary
+    published=none
+    [[ -z "${MIGRATE_NEW_EXIT_SERVICE_SHA256}" ]] || published="$(migrate_published_state)"
+    if [[ "${published}" != none ]]; then
+      # 已经发布过：端口沿用记录值，不再检查空闲（自己的服务正占着它）。
+      EXIT_REALITY_PORT="${MIGRATE_NEW_EXIT_REALITY_PORT}"
+    else
+      migrate_choose_port
+    fi
+    migrate_publish
+    migrate_use_exit new
+    probe_exit_tls
+    probe_exit_exit
+    smoke_from_relay "${EXIT_HOST}" "${EXIT_REALITY_PORT}" exit-direct
+    probe_mac_reality_rejection
+    log_info '[migrate] probes done'
+    migrate_test_stop probes
+  fi
+  migrate_switch_relay
+  migrate_test_stop relay-nophase
+  if [[ "${MIGRATE_PHASE}" != relay-switched ]]; then
+    MIGRATE_PHASE='relay-switched'
+    migrate_write_record
+  fi
+  migrate_test_stop relay
+  # 提交前核验：新出口机与中转都按新哈希健康，并经中转端口真实走一次代理。
+  if probe_remote_resources yes; then rc=0; else rc="$?"; fi
+  [[ "${rc}" -eq 0 ]] || die 1 "提交前核验失败（rc=${rc}）：新出口机或中转的文件、unit、进程、listener 与预期不符；修好后重跑"
+  smoke_from_relay 127.0.0.1 "${RELAY_PORT}" relay-full
+  migrate_commit_state
+}
+
+# 删除旧出口机上本链的 rotate 辅助文件与暂存（stage-owner 的 CHAIN_ID 必须是本链）。准备阶段已拒绝带辅助文件的旧链，
+# 这里只是兜底。
+write_migrate_old_leftover_script() {
+  local output
+  output="$1"
+  cat > "${output}" <<'MIGRATE_OLD_LEFTOVER'
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+export LC_ALL=C
+chain_id="$1"
+for leftover in "/etc/ownexit-chain/$chain_id".rotate.*; do
+  [[ -e "$leftover" || -L "$leftover" ]] || continue
+  [[ -f "$leftover" && ! -L "$leftover" && "$(stat -c %u "$leftover")" == 0 ]] || exit 221
+  rm -f "$leftover"
+done
+for parent in /etc/ownexit-chain /opt/ownexit-chain; do
+  [[ -d "$parent" && ! -L "$parent" ]] || continue
+  while IFS= read -r stage; do
+    owner="$stage/stage-owner.env"
+    [[ -f "$owner" && ! -L "$owner" ]] || continue
+    grep -qx "CHAIN_ID=$chain_id" "$owner" || continue
+    [[ "$(stat -c %u:%g:%a "$stage")" == 0:0:700 ]] || exit 222
+    find "$stage" -depth -mindepth 1 ! -path "$owner" -delete
+    rm -f "$owner"
+    rmdir "$stage"
+  done < <(find "$parent" -maxdepth 1 -type d -name '.stage-*' -print)
+done
+MIGRATE_OLD_LEFTOVER
+  chmod 600 "${output}"
+}
+
+# 清理阶段：新链健康才拆旧机。旧机 SSH 不可达时保留记录（pending），重跑补做；哈希不符等漂移直接失败，不静默跳过。
+migrate_cleanup() {
+  local rc script step
+  migrate_use_exit new
+  migrate_check_binding
+  remote_platform_preflight
+  if probe_remote_resources yes; then rc=0; else rc="$?"; fi
+  [[ "${rc}" -eq 0 ]] || die 1 "新链不健康（rc=${rc}），暂不清理旧出口机；先运行 verify 查明"
+  log_info "[migrate] phase=cleanup old=${MIGRATE_OLD_EXIT_HOST}"
+  if [[ "${OWNEXIT_TEST_MIGRATE_SKIP_CLEANUP:-}" == 1 ]]; then
+    log_warn '测试钩子：跳过旧出口机清理'
+    MIGRATE_CLEANUP_RESULT=pending
+    return 0
+  fi
+  migrate_use_exit old
+  script="${OP_TMP}/migrate-old-leftover.sh"
+  write_migrate_old_leftover_script "${script}"
+  # 四步依次执行；任一步 SSH 不可达（255）都按 pending 处理，其余非 0 视为漂移直接失败。每一步都可重跑。
+  for step in stop remove verify leftover; do
+    case "${step}" in
+      stop) if stop_chain_role exit; then rc=0; else rc="$?"; fi ;;
+      remove) if remove_chain_role_files exit; then rc=0; else rc="$?"; fi ;;
+      verify) if verify_removed_chain_role exit; then rc=0; else rc="$?"; fi ;;
+      leftover) if ssh_exit_stdin bash -s -- "${CHAIN_ID}" < "${script}"; then rc=0; else rc="$?"; fi ;;
+    esac
+    if [[ "${rc}" -eq 255 ]]; then
+      log_warn "[migrate] old exit cleanup pending: ssh unreachable（${MIGRATE_OLD_EXIT_HOST}，step=${step}）；旧机器恢复后重跑 migrate-exit 补做，永久失联用 --abandon-cleanup"
+      MIGRATE_CLEANUP_RESULT=pending
+      migrate_use_exit new
+      return 0
+    fi
+    [[ "${rc}" -eq 0 ]] || die 1 "旧出口机清理失败（step=${step} rc=${rc}）：文件身份或哈希与迁移记录不符；请人工核对 ${MIGRATE_OLD_EXIT_HOST}"
+  done
+  rm -f "${MIGRATE_FILE}" || die 1 '迁移记录删除失败'
+  MIGRATE_CLEANUP_RESULT='done'
+  log_info "[migrate] old exit cleanup done（${MIGRATE_OLD_EXIT_HOST}）"
+  migrate_use_exit new
+}
+
+# --abort：只在中转确实没有切换、state 未提交时允许。拆掉新机器上已发布的本链文件，恢复配置，删除记录。
+migrate_abort() {
+  local rc key
+  case "${MIGRATE_STAGE}" in
+    recorded|executing) ;;
+    *) die 2 '中转已切换或 state 已提交，不能 --abort；重跑 migrate-exit 完成迁移' ;;
+  esac
+  if [[ "${MIGRATE_STAGE}" == executing ]]; then
+    migrate_check_binding
+    remote_platform_preflight
+    migrate_cleanup_stage BINARY
+    migrate_cleanup_stage CONFIG
+    # 拆除脚本按记录的新哈希核对；部分发布时缺失的文件自动跳过，stop 的 ExecStopPost 删除 nft 表。
+    EXIT_REALITY_PORT="${MIGRATE_NEW_EXIT_REALITY_PORT:--}"
+    EXIT_OWNER_SHA256="${MIGRATE_NEW_EXIT_OWNER_SHA256:--}"
+    EXIT_EXIT_SHA256="${MIGRATE_NEW_EXIT_EXIT_SHA256:--}"
+    EXIT_SERVICE_SHA256="${MIGRATE_NEW_EXIT_SERVICE_SHA256:--}"
+    if stop_chain_role exit; then rc=0; else rc="$?"; fi
+    [[ "${rc}" -ne 255 ]] || die 3 '新出口机 SSH 不可达；恢复后重跑 --abort'
+    [[ "${rc}" -eq 0 ]] || die 1 "新出口机上本链的文件与迁移记录不符（rc=${rc}），不拆除；请人工核对"
+    remove_chain_role_files exit || die 1 '新出口机删除本链文件失败'
+    verify_removed_chain_role exit || die 1 '新出口机本链文件删除后复核失败'
+    [[ -n "${MIGRATE_CONFIG_BACKUP}" ]] || die 1 '迁移记录缺少配置备份路径'
+    require_secure_user_file "${MIGRATE_CONFIG_BACKUP}" 600 || die 1 "配置备份身份或权限异常：${MIGRATE_CONFIG_BACKUP}"
+    for key in EXIT_HOST:OLD_EXIT_HOST EXIT_SSH_PORT:OLD_EXIT_SSH_PORT EXIT_SSH_KEY:OLD_EXIT_SSH_KEY EXPECTED_EXIT_IPV4:OLD_EXPECTED_EXIT_IPV4; do
+      eval "[[ \"\$(kv_get \"\${MIGRATE_CONFIG_BACKUP}\" ${key%%:*})\" == \"\${MIGRATE_${key#*:}}\" ]]" || die 1 "配置备份里的 ${key%%:*} 与迁移前的值不符，不恢复；请人工核对 ${MIGRATE_CONFIG_BACKUP}"
+    done
+    cp "${MIGRATE_CONFIG_BACKUP}" "$(dirname "${CONFIG_PATH}")/.$(basename "${CONFIG_PATH}").abort.$$.tmp" || die 1 '配置恢复失败'
+    chmod 600 "$(dirname "${CONFIG_PATH}")/.$(basename "${CONFIG_PATH}").abort.$$.tmp" || die 1 '配置恢复失败'
+    mv -f "$(dirname "${CONFIG_PATH}")/.$(basename "${CONFIG_PATH}").abort.$$.tmp" "${CONFIG_PATH}" || die 1 '配置恢复失败'
+    log_info "[migrate] config restored from ${MIGRATE_CONFIG_BACKUP}"
+  fi
+  rm -f "${MIGRATE_FILE}" || die 1 '迁移记录删除失败'
+  printf 'migrate=aborted chain=%s\n' "${CHAIN_ID}"
+  log_info "migrate-exit 已中止；chain=${CHAIN_ID} 仍使用出口机 ${MIGRATE_OLD_EXIT_HOST}；elapsed=$(elapsed_seconds)s"
+}
+
+migrate_exit_chain() {
+  local rc leftover
+  acquire_global_lock
+  if acquire_chain_lock 1; then rc=0; else rc="$?"; fi
+  case "${rc}" in
+    0) ;;
+    10) die 5 '同一 chain 有活动锁（busy）；稍后重试' ;;
+    11) die 5 '存在 stale lock；先运行 verify 或其它 mutating 命令归档' ;;
+    *) die 5 '无法安全取得 chain lock' ;;
+  esac
+  require_local_dependencies
+  [[ ! -e "${JOURNAL_FILE}" && ! -L "${JOURNAL_FILE}" ]] || die 5 '存在 incomplete transaction，migrate-exit 拒绝'
+  MIGRATE_FILE="${CHAIN_STATE_DIR}/migrate-exit.env"
+  # 上次进程在写记录时中断留下的临时文件：身份正常才删。
+  for leftover in "${CHAIN_STATE_DIR}"/.migrate-exit.env.*.tmp; do
+    [[ -e "${leftover}" || -L "${leftover}" ]] || continue
+    require_secure_user_file "${leftover}" 600 || die 5 "迁移记录临时文件身份异常：${leftover}"
+    rm -f "${leftover}" || die 5 "迁移记录临时文件删除失败：${leftover}"
+  done
+  if [[ ! -e "${MIGRATE_FILE}" && ! -L "${MIGRATE_FILE}" ]]; then
+    [[ "${MIGRATE_MODE}" == run ]] || die 2 "链 ${CHAIN_ID} 没有进行中的出口机迁移"
+    [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 'chain 尚未部署'
+    migrate_prepare
+  else
+    [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 "迁移记录存在但链没有 state；请人工确认后删除 ${CHAIN_STATE_DIR}/migrate-exit.env"
+    migrate_load_record
+    if [[ "${MIGRATE_MODE}" == run ]]; then
+      [[ "${MIGRATE_TO}" == "${MIGRATE_NEW_EXIT_HOST}" && "${MIGRATE_TO_PORT}" == "${MIGRATE_NEW_EXIT_SSH_PORT}" ]] \
+        || die 2 "进行中的迁移目标是 ${MIGRATE_NEW_EXIT_HOST}:${MIGRATE_NEW_EXIT_SSH_PORT}；重跑时 --to / --to-port 必须一致（或先 --abort）"
+    fi
+  fi
+  migrate_derive_stage
+  log_info "[migrate] chain=${CHAIN_ID} phase=${MIGRATE_PHASE} stage=${MIGRATE_STAGE}"
+  case "${MIGRATE_MODE}" in
+    abort)
+      migrate_abort
+      return 0
+      ;;
+    abandon)
+      [[ "${MIGRATE_STAGE}" == cleanup ]] || die 2 '迁移尚未提交，不能 --abandon-cleanup；重跑 migrate-exit 或 --abort'
+      log_warn "[migrate] old exit cleanup abandoned; private key remains on ${MIGRATE_OLD_EXIT_HOST}：旧出口机上本链的配置（含私钥）未删除，请自行处理或销毁该机器"
+      rm -f "${MIGRATE_FILE}" || die 1 '迁移记录删除失败'
+      return 0
+      ;;
+  esac
+  if [[ "${MIGRATE_STAGE}" == recorded ]]; then
+    migrate_rewrite_config
+    migrate_derive_stage
+  fi
+  if [[ "${MIGRATE_STAGE}" != cleanup ]]; then
+    migrate_execute
+  fi
+  migrate_cleanup
+  ensure_local_assets_match_state
+  full_verify
+  printf 'migrate=done chain=%s exit=%s:%s old_exit_cleanup=%s\n' "${CHAIN_ID}" "${EXIT_HOST}" "${EXIT_REALITY_PORT}" "${MIGRATE_CLEANUP_RESULT}"
+  log_info "migrate-exit 通过；chain=${CHAIN_ID} exit=${EXIT_HOST}:${EXIT_REALITY_PORT} old_exit_cleanup=${MIGRATE_CLEANUP_RESULT} elapsed=$(elapsed_seconds)s"
+}
+
 status_chain() {
   local rc
   if [[ -e "${JOURNAL_FILE}" || -L "${JOURNAL_FILE}" ]]; then
@@ -7368,6 +8391,11 @@ status_chain() {
     else
       printf 'status=drifted reason=transaction-corrupt next=inspect-transaction\n'
     fi
+    return 5
+  fi
+  # 迁移进行中：state 与配置处在中间状态，其余检查都没有意义；提示重跑 migrate-exit（含 --abort / --abandon-cleanup）。
+  if [[ -e "${CHAIN_STATE_DIR}/migrate-exit.env" || -L "${CHAIN_STATE_DIR}/migrate-exit.env" ]]; then
+    printf 'status=drifted reason=exit-migration-pending next=rerun-interrupted-command\n'
     return 5
   fi
   if ! render_ssh_config; then
@@ -7853,6 +8881,9 @@ main() {
       ;;
     list-devices)
       list_devices_chain
+      ;;
+    migrate-exit)
+      migrate_exit_chain
       ;;
   esac
 }
