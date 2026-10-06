@@ -184,7 +184,7 @@ doc_h4 "${CMDS}" "ownexit chain" "status 取值" > "${TMP}/b"
 compare "chain status 取值" "${TMP}/a" "${TMP}/b"
 
 # 8. chain 其它命令输出行（printf 字面值的行首键=值或首词）
-grep -oE "printf '(rotate|device|rehost|rebaseline|banlist)=[a-z-]+|printf '(kicked|banned|already-covered|unbanned) " chain/setup_chain.sh \
+grep -oE "printf '(rotate|device|rehost|rebaseline|banlist|migrate)=[a-z-]+|printf '(kicked|banned|already-covered|unbanned) " chain/setup_chain.sh \
   | sed -E "s/^printf '//; s/ $//" > "${TMP}/a"
 doc_h4 "${CMDS}" "ownexit chain" "其它命令输出" > "${TMP}/b"
 compare "chain 其它命令输出" "${TMP}/a" "${TMP}/b"

@@ -7,7 +7,7 @@
 1.x 内下列接口只做向后兼容的新增，不删除、不改名、不改变已有项的含义：
 
 - 命令：`ownexit` 的子命令，各子命令的参数与子命令名，参数的互斥规则，退出码及其含义。
-- 机器可读输出：链式 `status` 行的 `status=` / `health=` / `role=` / `reason=` / `next=` 取值，其它命令的输出行（`rotate=` `device=` `rehost=` `rebaseline=` `banlist=` `kicked` `banned` `already-covered` `unbanned`），`ownexit connect` 失败时的 `reason=` 行，`ownexit multi` 带前缀的 verify / render 行，`ownexit doctor` 的行前缀与末行格式。
+- 机器可读输出：链式 `status` 行的 `status=` / `health=` / `role=` / `reason=` / `next=` 取值，其它命令的输出行（`rotate=` `device=` `rehost=` `rebaseline=` `banlist=` `migrate=` `kicked` `banned` `already-covered` `unbanned`），`ownexit connect` 失败时的 `reason=` 行，`ownexit multi` 带前缀的 verify / render 行，`ownexit doctor` 的行前缀与末行格式。
 - 文件：本机配置 / 状态 / 订阅 / 设备文件的路径、键与格式；服务器上的配置文件、systemd 单元名、订阅路径；节点名与组名。
 - 环境变量：`OWNEXIT_SSH_PASSWORD`、XDG 变量的取值规则、`TMPDIR` 的用途。
 
@@ -42,7 +42,7 @@
 - 1.y 必须能读取 1.x 写下的全部持久文件（包括第 4 节的内部文件）并继续管理已有部署：已部署的直连、链、设备在升级后不需要重新部署，订阅地址与客户端不需要重新导入。
 - 链式 `state.env` 带 `SCHEMA_VERSION`。1.x 内若要新增 state 键，必须提升 SCHEMA_VERSION，且新版本继续能读旧 schema；旧版本读到新 schema 时按现有逻辑拒绝（降级不保证）。
 - sing-box 版本：链式 state 记录了部署时的 sing-box 版本，服务器上的二进制路径也带版本号。1.x 内升级 sing-box 只有在同一版本提供已有部署的原地迁移（不换凭据、不需要 rollback）时才发布；做不到就放到 2.0。
-- 升级前先收敛未完成的操作：链式有 `transaction.env`（`status=incomplete`）时先重跑 deploy / rollback；出口机有未清理的辅助文件（`status=drifted reason=exit-op-pending`）时先重跑中断的 rotate-keys / add-device / remove-device。
+- 升级前先收敛未完成的操作：链式有 `transaction.env`（`status=incomplete`）时先重跑 deploy / rollback；出口机有未清理的辅助文件（`status=drifted reason=exit-op-pending`）时先重跑中断的 rotate-keys / add-device / remove-device。有出口机迁移记录（`status=drifted reason=exit-migration-pending`）时先重跑 migrate-exit 完成（或 `--abort` / `--abandon-cleanup`）。
 - 不保证降级。特别是：直连 VPS 加过设备后，不要用 0.7.0 之前的版本操作它（旧版本改参数时只渲染 default，会丢掉设备）。
 
 ## 6. 如何守住这些承诺

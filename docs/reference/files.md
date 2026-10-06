@@ -32,12 +32,14 @@
 | `<状态目录>/chains/<id>/devices/devices.env` | 额外设备表，每行 `名字=UUID`（不含 default）；是出口机配置的本机缓存 |
 | `<状态目录>/chains/<id>/devices/node-<名字>.txt` | 额外设备的节点：单行 vless URI，片段为 `#Exit-via-Relay-<id>_<名字>` |
 | `<状态目录>/chains/<id>/blacklist.txt` | 中转黑名单的本地权威副本 |
+| `<状态目录>/chains/<id>/migrate-exit.env` | 出口机迁移记录（1.1.0 起），只在 `migrate-exit` 进行中或旧出口机待清理时存在；KEY=VALUE、600，空值写 `-`；存在时 status 输出 `reason=exit-migration-pending` |
+| `<配置目录>/chains/<id>.env.bak.<时间>` | `migrate-exit` 改写配置前的备份（600，迁移后不自动删除） |
 | `<状态目录>/multi-chain-client/<名>/nodes.txt` | `ownexit multi render`：每链一行 vless URI |
 | `<状态目录>/multi-chain-client/<名>/clash-snippet.yaml` | `ownexit multi render`：proxies 与自动组片段 |
 | `${TMPDIR:-/tmp}/multi-chain-client-qr.*/qr-<n>-<节点名>.png` | `ownexit multi render` 的二维码（`--qr-out` 可指定目录；含明文凭据，扫完即删） |
 | `<缓存目录>/chains/<id>/downloads/` | 固定版本 sing-box 官方包缓存 |
 
-内部文件（不属于公开接口，但 1.y 必须能读 1.x 写下的版本）：`<状态目录>/chains/<id>/` 下的 `transaction.env`、`baseline/`、`audit/`、`operation.lock`、`active-child.env`、`local-process.env`、各类以 `.` 开头的临时文件，`<状态目录>/` 下的 `shared.lock`。
+内部文件（不属于公开接口，但 1.y 必须能读 1.x 写下的版本）：`<状态目录>/chains/<id>/` 下的 `transaction.env`、`baseline/`、`audit/`、`operation.lock`、`active-child.env`、`local-process.env`、各类以 `.` 开头的临时文件（含 `.migrate-exit.env.*.tmp`），`<状态目录>/` 下的 `shared.lock`。
 
 ### 链配置键
 

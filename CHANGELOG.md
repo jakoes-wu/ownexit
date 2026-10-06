@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-06
+
+### 新增
+
+- 链式 `migrate-exit --to <新出口机 IPv4> [--to-port <n>]`：出口机换一台机器。旧出口机的配置（含 Reality 私钥）经本机内存搬到新机器，UUID、密钥、short id、全部设备、中转地址与端口都不变，客户端不用重新导入；中转转发目标切过去后自动删除旧出口机上本链的服务与文件。中途中断重跑同一条命令即可收敛；中转切换前可用 `--abort` 放弃，旧机器永久失联时可用 `--abandon-cleanup` 放弃清理。
+- 链式 `status` 新增 `reason=exit-migration-pending`；新增输出行 `migrate=done` / `migrate=aborted`；新增本机文件 `chains/<id>/migrate-exit.env`（迁移进行中才存在）。
+
+### 变更
+
+- 出口机迁移进行中时，deploy、rollback、rehost-exit、rebaseline、rotate-keys、add-device、remove-device 拒绝执行并提示先完成迁移。没有迁移记录时行为与 1.0.0 相同。
+
 ## [1.0.0] - 2026-10-06
 
 ### 新增

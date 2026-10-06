@@ -89,6 +89,8 @@ chain/multi_chain_client.sh --chains main,backup render
 
 同一台出口机被服务商换了公网 IP 时，不要 rollback 再 deploy（那样会重新生成凭据，所有客户端都要重新导入），用 `rehost-exit` 原地迁移，客户端不用动。步骤见 [`chain/README.md` 的“出口机换 IP”](../../chain/README.md#出口机换-ip同一台机器)。
 
+出口机要换成另一台机器时，用 `migrate-exit --to <新机器 IP>`：配置（含私钥）从旧机器原样搬到新机器，中转切过去，旧机器上本链的服务与文件自动删除，客户端同样不用动。旧机器必须还能登录。步骤与中断处理见 [`chain/README.md` 的“出口机换一台机器”](../../chain/README.md#出口机换一台机器)。
+
 ## 8. 常见问题
 
 | 问题 | 解决办法 |
