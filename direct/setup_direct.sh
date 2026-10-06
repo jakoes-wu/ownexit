@@ -39,6 +39,11 @@ ROTATE_TOKEN=0
 ROTATE_KEYS=0
 # 本次运行中已经完成过一次凭据轮换（来自恢复的未完成操作）；为 1 时不再轮换，避免用户重跑时凭据被换两次。
 ROTATED=0
+# --add-device / --remove-device 的设备名（docs/feature/feature-devices-sni-scan.md §5.1.1）；default 指现有 UUID，保留。
+WANT_ADD_DEVICE=""
+WANT_REMOVE_DEVICE=""
+# 本次运行（含恢复的未完成操作）改动了设备表：其它设备不必重新导入，但同机链需要 rebaseline。
+CHANGED_DEVICES=0
 DO_MIGRATE=0
 DO_UNINSTALL=0
 WANT_SNI=""
@@ -80,6 +85,9 @@ SSH 端口不是 22 时:
 怀疑节点凭据泄露，换一套新的 UUID / Reality 密钥 / short id（所有设备都要重新导入订阅）:
   $(basename "$0") --rotate-keys
   $(basename "$0") --rotate-keys --rotate-token
+给一台新设备单独一套凭据和订阅地址 / 吊销一台设备（其它设备不受影响；列出设备用 ownexit subctl devices）:
+  $(basename "$0") --add-device phone
+  $(basename "$0") --remove-device phone
 
 选项:
   --host <ip/host>            出口 VPS 地址；不给时用上次记住的 VPS，没有则交互提问
@@ -91,11 +99,13 @@ SSH 端口不是 22 时:
   --migrate                   把 233boy 旧版迁移为本项目的服务（一次性）
   --uninstall                 卸载直连服务与订阅服务
   --rotate-token              重新生成 TOKEN 和 SUB_PORT，并清理 VPS 上旧 TOKEN 目录
-  --rotate-keys               重新生成 UUID / Reality 密钥 / short id；失败时自动恢复原配置
+  --rotate-keys               重新生成全部设备的 UUID 与 Reality 密钥 / short id；失败时自动恢复原配置
+  --add-device <名字>         新增一台设备（名字 [a-z0-9-]，最多 32 个字符，不能是 default；每台 VPS 最多 32 台，含 default）
+  --remove-device <名字>      吊销一台设备，它的订阅地址同时删除
   -h, --help                  显示帮助
 
 --migrate、--uninstall、--rotate-token 三者互斥；--rotate-keys 不能与 --migrate / --uninstall 同用；
---sni / --proxy-port 不能与 --uninstall 同用。
+--add-device 与 --remove-device 互斥，且不能与 --migrate / --uninstall 同用；--sni / --proxy-port 不能与 --uninstall 同用。
 
 退出码: 0 全部通过；1 部署失败或有验证项未通过；2 参数错误、缺参数（非终端运行时）或服务器是旧版需要 --migrate。
 EOF
@@ -126,6 +136,10 @@ while [[ $# -gt 0 ]]; do
     --uninstall)      DO_UNINSTALL=1; shift ;;
     --rotate-token)   ROTATE_TOKEN=1; shift ;;
     --rotate-keys)    ROTATE_KEYS=1; shift ;;
+    --add-device)     WANT_ADD_DEVICE="${2:?--add-device 需要一个设备名}"; shift 2 ;;
+    --add-device=*)   WANT_ADD_DEVICE="${1#*=}"; shift ;;
+    --remove-device)  WANT_REMOVE_DEVICE="${2:?--remove-device 需要一个设备名}"; shift 2 ;;
+    --remove-device=*) WANT_REMOVE_DEVICE="${1#*=}"; shift ;;
     -h|--help)        usage; exit 0 ;;
     *)                die_usage "未知参数: $1（用 --help 查看用法）" ;;
   esac
@@ -134,6 +148,13 @@ done
 (( DO_MIGRATE + DO_UNINSTALL + ROTATE_TOKEN <= 1 )) || die_usage "--migrate、--uninstall、--rotate-token 只能选一个"
 # 迁移承诺“沿用旧凭据”，与轮换矛盾；卸载后无凭据可换。要换旧版的凭据：先 --migrate，再 --rotate-keys。
 (( DO_MIGRATE + DO_UNINSTALL + ROTATE_KEYS <= 1 )) || die_usage "--rotate-keys 不能与 --migrate / --uninstall 同用（旧版先 --migrate 再 --rotate-keys）"
+if [[ -n "${WANT_ADD_DEVICE}" || -n "${WANT_REMOVE_DEVICE}" ]]; then
+  [[ -z "${WANT_ADD_DEVICE}" || -z "${WANT_REMOVE_DEVICE}" ]] || die_usage "--add-device 与 --remove-device 一次只能用一个"
+  (( DO_MIGRATE + DO_UNINSTALL == 0 )) || die_usage "--add-device / --remove-device 不能与 --migrate / --uninstall 同用"
+  DEVICE_ARG="${WANT_ADD_DEVICE}${WANT_REMOVE_DEVICE}"
+  [[ "${DEVICE_ARG}" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die_usage "设备名只允许小写字母、数字和 -，最多 32 个字符：${DEVICE_ARG}"
+  [[ "${DEVICE_ARG}" != default ]] || die_usage "default 指现有的那套凭据，不能新增或吊销；要整体换凭据用 --rotate-keys"
+fi
 if [[ "${DO_UNINSTALL}" == 1 && ( -n "${WANT_SNI}" || -n "${WANT_PROXY_PORT}" ) ]]; then
   die_usage "--uninstall 不能与 --sni / --proxy-port 同用"
 fi
@@ -449,6 +470,9 @@ echo "[*] 服务器状态：STATE=${STATE} ARCH=${REMOTE_ARCH}"
 if [[ "${STATE}" == in_progress ]]; then
   echo "[*] 恢复上次未完成的操作：OP=$(kv_get "${PROBE}" TXN_OP) STEP=$(kv_get "${PROBE}" TXN_STEP)"
   RECOVERED_ROTATE="$(kv_get "${PROBE}" TXN_ROTATE)"
+  RECOVERED_DEVICE_ADD="$(kv_get "${PROBE}" TXN_DEVICE_ADD)"
+  RECOVERED_DEVICE_REMOVE="$(kv_get "${PROBE}" TXN_DEVICE_REMOVE)"
+  RECOVERED_PARAMS="$(kv_get "${PROBE}" TXN_PARAMS)"
   run_op_to_end
   if ! op_ok && [[ "$(kv_get "${OP_RESULT}" REASON)" != rolled-back ]]; then
     die "上次未完成的操作恢复失败（REASON=$(kv_get "${OP_RESULT}" REASON)），本次请求未执行；详见上方 [vps] 日志与 ownexit subctl log"
@@ -456,8 +480,22 @@ if [[ "${STATE}" == in_progress ]]; then
   # 恢复完成的是一次改参数：节点参数已变，后面要提示重新导入与同机链的 rebaseline。
   # 只有结果 ok 才算凭据已换；rolled-back 表示回到了旧凭据，本次 --rotate-keys 仍要照常执行。
   if [[ "$(kv_get "${OP_RESULT}" OP)" == reparam ]] && op_ok; then
-    CHANGED_PARAMS_RECOVERED=1
+    # 纯设备操作（没有 SNI / 端口 / 轮换变化）不要求其它设备重新导入，只记设备变动。
+    # TXN_PARAMS 为空是 v0.6.0 及更早留下的操作：按改参数处理。
+    [[ "${RECOVERED_PARAMS}" == 0 ]] || CHANGED_PARAMS_RECOVERED=1
     [[ "${RECOVERED_ROTATE}" != 1 ]] || ROTATED=1
+    if [[ -n "${RECOVERED_DEVICE_ADD}${RECOVERED_DEVICE_REMOVE}" ]]; then
+      CHANGED_DEVICES=1
+      # 恢复完成的正是本次要做的设备操作：不再重复提交（否则会报 device-exists / device-missing）。
+      if [[ -n "${WANT_ADD_DEVICE}" && "${WANT_ADD_DEVICE}" == "${RECOVERED_DEVICE_ADD}" ]]; then
+        echo "[*] 刚恢复完成的操作已经新增了设备 ${WANT_ADD_DEVICE}，本次不再重复"
+        WANT_ADD_DEVICE=""
+      fi
+      if [[ -n "${WANT_REMOVE_DEVICE}" && "${WANT_REMOVE_DEVICE}" == "${RECOVERED_DEVICE_REMOVE}" ]]; then
+        echo "[*] 刚恢复完成的操作已经吊销了设备 ${WANT_REMOVE_DEVICE}，本次不再重复"
+        WANT_REMOVE_DEVICE=""
+      fi
+    fi
   fi
   probe_server
   echo "[*] 恢复后的服务器状态：STATE=${STATE}"
@@ -512,6 +550,7 @@ case "${STATE}" in
   none)
     [[ "${DO_MIGRATE}" == 0 ]] || { echo "[!] 服务器上没有可迁移的 233boy 旧版" >&2; exit 2; }
     [[ "${ROTATE_KEYS}" == 0 ]] || echo "[*] 新装本来就会生成全新凭据，忽略 --rotate-keys"
+    [[ -z "${WANT_ADD_DEVICE}${WANT_REMOVE_DEVICE}" ]] || die_usage "服务器上还没有部署：先运行 $(basename "$0") 完成部署，再新增 / 吊销设备"
     ensure_sub_params
     if [[ -n "${WANT_PROXY_PORT}" ]]; then
       [[ "${WANT_PROXY_PORT}" != "${SUB_PORT}" ]] || die_usage "--proxy-port 与订阅端口 ${SUB_PORT} 相同，请换一个"
@@ -543,7 +582,7 @@ case "${STATE}" in
     elif [[ "${ROTATE_KEYS}" == 1 ]]; then
       DO_ROTATE=1
     fi
-    if [[ -n "${NEW_SNI}" || -n "${NEW_PORT}" || "${DO_ROTATE}" == 1 ]]; then
+    if [[ -n "${NEW_SNI}" || -n "${NEW_PORT}" || "${DO_ROTATE}" == 1 || -n "${WANT_ADD_DEVICE}${WANT_REMOVE_DEVICE}" ]]; then
       if [[ -n "${NEW_PORT}" ]]; then
         [[ "${NEW_PORT}" != "${SUB_PORT}" ]] || die_usage "--proxy-port 与订阅端口 ${SUB_PORT} 相同，请换一个"
         ! server_port_in_use "${NEW_PORT}" || die_usage "VPS 上端口 ${NEW_PORT} 已被占用"
@@ -553,10 +592,23 @@ case "${STATE}" in
       else
         CRED_NOTE="UUID 与密钥不变"
       fi
-      echo "[*] 改参数：sni ${CUR_SNI} -> ${NEW_SNI:-不变}，port ${CUR_PORT} -> ${NEW_PORT:-不变}（${CRED_NOTE}）"
-      start_op reparam "NEW_SNI=${NEW_SNI}" "NEW_PORT=${NEW_PORT}" "ROTATE=${DO_ROTATE}"
-      op_ok || die "改参数失败（REASON=$(kv_get "${OP_RESULT}" REASON)），VPS 已恢复原配置"
-      CHANGED_PARAMS=1
+      DEVICE_NOTE=""
+      [[ -z "${WANT_ADD_DEVICE}" ]] || DEVICE_NOTE="，设备=新增 ${WANT_ADD_DEVICE}"
+      [[ -z "${WANT_REMOVE_DEVICE}" ]] || DEVICE_NOTE="，设备=吊销 ${WANT_REMOVE_DEVICE}"
+      echo "[*] 改参数：sni ${CUR_SNI} -> ${NEW_SNI:-不变}，port ${CUR_PORT} -> ${NEW_PORT:-不变}（${CRED_NOTE}${DEVICE_NOTE}）"
+      start_op reparam "NEW_SNI=${NEW_SNI}" "NEW_PORT=${NEW_PORT}" "ROTATE=${DO_ROTATE}" \
+        "DEVICE_ADD=${WANT_ADD_DEVICE}" "DEVICE_REMOVE=${WANT_REMOVE_DEVICE}"
+      if ! op_ok; then
+        case "$(kv_get "${OP_RESULT}" REASON)" in
+          *device-exists) die_usage "设备 ${WANT_ADD_DEVICE} 已存在（ownexit subctl devices 查看现有设备），VPS 未改动" ;;
+          *device-missing) die_usage "没有名为 ${WANT_REMOVE_DEVICE} 的设备（ownexit subctl devices 查看现有设备），VPS 未改动" ;;
+          *device-limit) die_usage "设备数已达上限 32（含 default），VPS 未改动" ;;
+        esac
+        die "改参数失败（REASON=$(kv_get "${OP_RESULT}" REASON)），VPS 已恢复原配置"
+      fi
+      # 只有 SNI / 端口 / 凭据变化才要求已导入的设备重新拉订阅；纯设备增删不影响其它设备。
+      [[ -z "${NEW_SNI}${NEW_PORT}" && "${DO_ROTATE}" == 0 ]] || CHANGED_PARAMS=1
+      [[ -z "${WANT_ADD_DEVICE}${WANT_REMOVE_DEVICE}" ]] || CHANGED_DEVICES=1
       [[ "${DO_ROTATE}" == 0 ]] || ROTATED=1
     else
       BIN_OK="$(vssh "test -f /opt/ownexit-direct/bin/sing-box-${SING_BOX_VERSION} && sha256sum /opt/ownexit-direct/bin/sing-box-${SING_BOX_VERSION} | awk '{print \$1}'" 2>/dev/null || true)"
@@ -594,6 +646,8 @@ esac
 # ---------- 5. 读回节点参数 ----------
 
 read_client_env
+# 设备表（名字=UUID，不含 default）：服务器是唯一权威源，本机只记每台设备的订阅 TOKEN。
+DEVICES_ENV="$(vssh "cat /etc/ownexit-direct/devices.env 2>/dev/null || true")" || die "无法读取 VPS 上的设备表"
 PROXY_PORT="$(kv_get "${CLIENT_ENV}" PORT)"
 PROXY_UUID="$(kv_get "${CLIENT_ENV}" UUID)"
 PROXY_PBK="$(kv_get "${CLIENT_ENV}" PUBLIC_KEY)"
@@ -610,7 +664,12 @@ pass "节点参数：server=${PROXY_SERVER} port=${PROXY_PORT} sni=${PROXY_SNI} 
 # 节点链接字段顺序与链式一致（chain/setup_chain.sh:4116）；FLOW 为空时省略 flow=。
 FLOW_PARAM=""
 [[ -z "${PROXY_FLOW}" ]] || FLOW_PARAM="&flow=${PROXY_FLOW}"
-SR_LINK="vless://${PROXY_UUID}@${PROXY_SERVER}:${PROXY_PORT}?encryption=none${FLOW_PARAM}&security=reality&sni=${PROXY_SNI}&fp=chrome&pbk=${PROXY_PBK}&sid=${PROXY_SID}&type=tcp#${NODE_NAME}"
+# 参数：UUID、节点名。各设备只有这两项不同。
+make_sr_link() {
+  printf 'vless://%s@%s:%s?encryption=none%s&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp#%s' \
+    "$1" "${PROXY_SERVER}" "${PROXY_PORT}" "${FLOW_PARAM}" "${PROXY_SNI}" "${PROXY_PBK}" "${PROXY_SID}" "$2"
+}
+SR_LINK="$(make_sr_link "${PROXY_UUID}" "${NODE_NAME}")"
 
 # ---------- 6. 本地渲染订阅产物 ----------
 
@@ -641,6 +700,11 @@ echo "[*] 本地渲染订阅产物：${STAGING}"
 rm -rf "${STAGING}"
 mkdir -p "${STAGING}/${TOKEN}"
 
+# 把一套客户端订阅（clash.yaml / shadowrocket.txt / node.txt / sing-box.json）渲染进 RENDER_DIR。
+# 输入是全局变量：RENDER_DIR、PROXY_UUID、NODE_NAME、SR_LINK 因设备而异，其余节点参数各设备相同。
+# default 与每台设备各调用一次（docs/feature/feature-devices-sni-scan.md §5.1.1）。
+render_subscription_dir() {
+mkdir -p "${RENDER_DIR}"
 # clash.yaml：完整可加载配置（mihomo -d 可直接使用），不是 merge 片段
 {
   cat <<EOF
@@ -682,14 +746,14 @@ rules:
   - GEOIP,CN,DIRECT
   - MATCH,PROXY
 EOF
-} > "${STAGING}/${TOKEN}/clash.yaml"
+} > "${RENDER_DIR}/clash.yaml"
 
 # Shadowrocket 订阅：base64 编码的节点链接列表
-printf '%s\n' "${SR_LINK}" | base64 | tr -d '\n' > "${STAGING}/${TOKEN}/shadowrocket.txt"
-printf '\n' >> "${STAGING}/${TOKEN}/shadowrocket.txt"
+printf '%s\n' "${SR_LINK}" | base64 | tr -d '\n' > "${RENDER_DIR}/shadowrocket.txt"
+printf '\n' >> "${RENDER_DIR}/shadowrocket.txt"
 
 # 备用节点链接（明文）
-printf '%s\n' "${SR_LINK}" > "${STAGING}/${TOKEN}/node.txt"
+printf '%s\n' "${SR_LINK}" > "${RENDER_DIR}/node.txt"
 
 # sing-box.json：sing-box 官方客户端（SFI / SFA / SFM，1.12 及以上）可直接导入的完整配置。
 # 路由意图同 clash.yaml：国内域名与国内 IP 目标直连，其余走出口；规则集经代理下载（GitHub raw 在国内常不可达）。
@@ -697,7 +761,7 @@ printf '%s\n' "${SR_LINK}" > "${STAGING}/${TOKEN}/node.txt"
 # route.default_domain_resolver 不能删：1.12 起没有它 check 直接报 FATAL。
 SB_FLOW_FIELD=""
 [[ -z "${PROXY_FLOW}" ]] || SB_FLOW_FIELD="\"flow\": \"${PROXY_FLOW}\", "
-cat > "${STAGING}/${TOKEN}/sing-box.json" <<EOF
+cat > "${RENDER_DIR}/sing-box.json" <<EOF
 {
   "log": { "level": "warn" },
   "dns": {
@@ -742,6 +806,55 @@ cat > "${STAGING}/${TOKEN}/sing-box.json" <<EOF
   }
 }
 EOF
+}
+
+RENDER_DIR="${STAGING}/${TOKEN}"
+render_subscription_dir
+
+# ---------- 设备订阅（docs/feature/feature-devices-sni-scan.md §5.1.1） ----------
+# 本机设备 TOKEN 文件：每行 名字=TOKEN；以 ! 开头的行是“待在 VPS 上删除的旧 TOKEN”（吊销的设备、
+# --rotate-token 换下的旧 TOKEN），VPS 删除成功后才从文件去掉，同步中断时下次仍能找到它们。
+DEVICE_TOKENS_FILE="${STATE_DIR}/devices.env"
+device_token_of() {
+  [[ -f "${DEVICE_TOKENS_FILE}" ]] || return 0
+  awk -F= -v n="$1" '$1 == n {print $2; exit}' "${DEVICE_TOKENS_FILE}"
+}
+NEW_DEVICE_TOKENS=""
+PENDING_DELETE=""
+if [[ -f "${DEVICE_TOKENS_FILE}" ]]; then
+  PENDING_DELETE="$(awk '/^!/' "${DEVICE_TOKENS_FILE}")"
+fi
+while IFS='=' read -r dev_name dev_uuid; do
+  [[ -n "${dev_name}" ]] || continue
+  dev_token="$(device_token_of "${dev_name}")"
+  if [[ "${ROTATE_TOKEN}" == 1 && -n "${dev_token}" ]]; then
+    PENDING_DELETE="${PENDING_DELETE}${PENDING_DELETE:+$'\n'}!${dev_name}=${dev_token}"
+    dev_token=""
+  fi
+  [[ "${dev_token}" =~ ^[0-9a-f]{32}$ ]] || dev_token="$(openssl rand -hex 16)"
+  NEW_DEVICE_TOKENS="${NEW_DEVICE_TOKENS}${dev_name}=${dev_token}"$'\n'
+  RENDER_DIR="${STAGING}/${dev_token}"
+  PROXY_UUID="${dev_uuid}"
+  NODE_NAME="ownexit-direct-${dev_name}"
+  SR_LINK="$(make_sr_link "${PROXY_UUID}" "${NODE_NAME}")"
+  render_subscription_dir
+done <<< "${DEVICES_ENV}"
+# 本机有记录、服务器上已没有的设备：它的订阅目录待删除。
+if [[ -f "${DEVICE_TOKENS_FILE}" ]]; then
+  while IFS='=' read -r dev_name dev_token; do
+    [[ -n "${dev_name}" && "${dev_name}" != '!'* ]] || continue
+    printf '%s\n' "${DEVICES_ENV}" | awk -F= -v n="${dev_name}" '$1 == n {f=1} END {exit f ? 0 : 1}' \
+      || PENDING_DELETE="${PENDING_DELETE}${PENDING_DELETE:+$'\n'}!${dev_name}=${dev_token}"
+  done < "${DEVICE_TOKENS_FILE}"
+fi
+{ printf '%s' "${NEW_DEVICE_TOKENS}"; [[ -z "${PENDING_DELETE}" ]] || printf '%s\n' "${PENDING_DELETE}"; } > "${DEVICE_TOKENS_FILE}.tmp"
+chmod 600 "${DEVICE_TOKENS_FILE}.tmp"
+mv -f "${DEVICE_TOKENS_FILE}.tmp" "${DEVICE_TOKENS_FILE}"
+[[ -s "${DEVICE_TOKENS_FILE}" ]] || rm -f "${DEVICE_TOKENS_FILE}"
+# 汇总与校验仍按 default 设备。
+PROXY_UUID="$(kv_get "${CLIENT_ENV}" UUID)"
+NODE_NAME="ownexit-direct"
+SR_LINK="$(make_sr_link "${PROXY_UUID}" "${NODE_NAME}")"
 
 # 空 index.html：python3 http.server 对无 index.html 的根目录会返回目录列表，
 # 把所有 TOKEN 目录名暴露出来，随机 token 形同虚设
@@ -793,6 +906,23 @@ bash "${SCRIPT_DIR}/sync_to_vps.sh" --host "${HOST}" --user "${SSH_USER}" --port
 if [[ -n "${OLD_TOKEN}" && "${OLD_TOKEN}" != "${TOKEN}" && "${OLD_TOKEN}" =~ ^[0-9a-f]{32}$ ]]; then
   echo "[*] 清理旧 TOKEN 目录：${SUB_BASE_DIR}/${OLD_TOKEN}"
   vssh "rm -rf '${SUB_BASE_DIR}/${OLD_TOKEN}'" || true
+fi
+# 吊销设备与换下的设备 TOKEN：只删本机记录过的目录，不删本机不认识的（可能是另一台电脑生成的订阅）。
+if [[ -n "${PENDING_DELETE}" ]]; then
+  DELETE_FAILED=0
+  while IFS='=' read -r dev_name dev_token; do
+    [[ -n "${dev_token}" && "${dev_token}" =~ ^[0-9a-f]{32}$ ]] || continue
+    echo "[*] 清理设备 ${dev_name#!} 的旧订阅目录"
+    vssh "rm -rf '${SUB_BASE_DIR}/${dev_token}'" || DELETE_FAILED=1
+  done <<< "${PENDING_DELETE}"
+  if [[ "${DELETE_FAILED}" == 0 && -f "${DEVICE_TOKENS_FILE}" ]]; then
+    awk '!/^!/' "${DEVICE_TOKENS_FILE}" > "${DEVICE_TOKENS_FILE}.tmp"
+    chmod 600 "${DEVICE_TOKENS_FILE}.tmp"
+    mv -f "${DEVICE_TOKENS_FILE}.tmp" "${DEVICE_TOKENS_FILE}"
+    [[ -s "${DEVICE_TOKENS_FILE}" ]] || rm -f "${DEVICE_TOKENS_FILE}"
+  elif [[ "${DELETE_FAILED}" == 1 ]]; then
+    echo "[!] 有设备的旧订阅目录没删掉，下次运行会再试"
+  fi
 fi
 
 echo "[*] 启用订阅服务 ${SUB_SERVICE}"
@@ -891,6 +1021,20 @@ vless 节点链接（仅故障排查/备份用）:
   - 怀疑订阅泄露时运行：$(basename "$0") --rotate-token
   - 怀疑节点凭据泄露时运行：$(basename "$0") --rotate-keys（所有设备都要重新导入）
 EOF
+if [[ -n "${NEW_DEVICE_TOKENS}" ]]; then
+  echo
+  echo "设备订阅（每台设备只导入自己那一组；default 就是上面的链接）:"
+  while IFS='=' read -r dev_name dev_token; do
+    [[ -n "${dev_name}" ]] || continue
+    mark=""
+    [[ "${dev_name}" != "${WANT_ADD_DEVICE:-}" || -z "${WANT_ADD_DEVICE:-}" ]] || mark="  ← 新增：只把这一组发给新设备"
+    echo "  设备 ${dev_name}${mark}"
+    echo "    Clash Verge / mihomo : http://${HOST}:${SUB_PORT}/${dev_token}/clash.yaml"
+    echo "    Shadowrocket / v2rayN: http://${HOST}:${SUB_PORT}/${dev_token}/shadowrocket.txt"
+    echo "    sing-box             : http://${HOST}:${SUB_PORT}/${dev_token}/sing-box.json"
+  done <<< "${NEW_DEVICE_TOKENS}"
+fi
+[[ -z "${WANT_REMOVE_DEVICE}" ]] || echo "  - 设备 ${WANT_REMOVE_DEVICE} 已吊销：它的凭据与订阅地址都已失效"
 if [[ "${ROTATED}" == 1 ]]; then
   echo "  - 已更换节点凭据：所有设备都要重新拉取订阅，旧节点已失效"
 elif [[ "${CHANGED_PARAMS}" == 1 && "${STATE}" != legacy ]]; then
@@ -906,7 +1050,7 @@ else
   echo "[*] 想在终端显示节点二维码：安装 qrencode（macOS: brew install qrencode）后运行 ownexit subctl qr"
 fi
 
-if [[ "${STATE}" != ownexit || "${CHANGED_PARAMS}" == 1 ]]; then
+if [[ "${STATE}" != ownexit || "${CHANGED_PARAMS}" == 1 || "${CHANGED_DEVICES}" == 1 ]]; then
   print_chain_hints
 fi
 

@@ -28,6 +28,7 @@ subctl —— 直连出口 VPS 的免密登录、订阅服务开关、日志与�
   status       查看代理服务与订阅服务状态
   log [行数]   查看代理服务最近的日志，默认 100 行
   qr           在终端显示节点二维码（需要 qrencode；读本机订阅，不连 VPS）
+  devices      列出 VPS 上的设备与本机记录的各设备订阅地址（只读）
   help         显示本帮助（同 -h / --help）
 
 示例:
@@ -35,6 +36,7 @@ subctl —— 直连出口 VPS 的免密登录、订阅服务开关、日志与�
   subctl start
   subctl log 300
   subctl qr
+  subctl devices
   subctl --host 203.0.113.7 stop        # 记住了多台 VPS 时指定其中一台
 
 退出码: 0 成功；1 远端操作失败或缺少密钥；2 参数错误或无法确定目标。
@@ -58,14 +60,14 @@ while [[ $# -gt 0 ]]; do
     --user)    SSH_USER="${2:?--user 需要一个参数}"; shift 2 ;;
     --user=*)  SSH_USER="${1#*=}"; shift ;;
     help|-h|--help) usage; exit 0 ;;
-    login|start|stop|status|qr)
+    login|start|stop|status|qr|devices)
       [[ -z "${CMD}" ]] || die_usage "只能给一个子命令（已有 ${CMD}）"
       CMD="$1"; shift ;;
     log)
       [[ -z "${CMD}" ]] || die_usage "只能给一个子命令（已有 ${CMD}）"
       CMD=log; shift
       if [[ $# -gt 0 && "$1" =~ ^[0-9]+$ ]]; then LOG_LINES="$1"; shift; fi ;;
-    *) die_usage "未知参数或子命令: $1（可用: login / start / stop / status / log / qr / help）" ;;
+    *) die_usage "未知参数或子命令: $1（可用: login / start / stop / status / log / qr / devices / help）" ;;
   esac
 done
 CMD="${CMD:-login}"
@@ -128,5 +130,22 @@ REMOTE
   log)
     # 旧版 233boy 的服务名是 sing-box；迁移后是 ownexit-direct。
     rcmd "if [ -e /etc/systemd/system/ownexit-direct.service ]; then u=ownexit-direct; else u=sing-box; fi; journalctl -u \"\$u\" -n ${LOG_LINES} --no-pager"
+    ;;
+  devices)
+    # 只读：服务器的设备表是权威源（只取名字，不取 UUID）；订阅地址来自本机记录的 TOKEN。
+    names="$(rcmd "awk -F= 'NF {print \$1}' /etc/ownexit-direct/devices.env 2>/dev/null || true")" || die "无法读取 VPS 上的设备表"
+    STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/ownexit/direct/${SAFE_NAME}"
+    SUB_PORT="$(awk -F= '$1 == "SUB_PORT" {print $2; exit}' "${STATE_DIR}/state.env" 2>/dev/null || true)"
+    TOKEN="$(awk -F= '$1 == "TOKEN" {print $2; exit}' "${STATE_DIR}/state.env" 2>/dev/null || true)"
+    echo "default : http://${HOST}:${SUB_PORT:-?}/${TOKEN:-?}/clash.yaml（及同目录 shadowrocket.txt / sing-box.json / node.txt）"
+    while IFS= read -r name; do
+      [[ -n "${name}" ]] || continue
+      tok="$(awk -F= -v n="${name}" '$1 == n {print $2; exit}' "${STATE_DIR}/devices.env" 2>/dev/null || true)"
+      if [[ -n "${tok}" ]]; then
+        echo "${name} : http://${HOST}:${SUB_PORT:-?}/${tok}/clash.yaml（及同目录其它格式）"
+      else
+        echo "${name} : 本机没有它的订阅（换过电脑？），重跑 ownexit direct --host ${HOST} 生成"
+      fi
+    done <<< "${names}"
     ;;
 esac

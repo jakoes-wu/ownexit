@@ -172,6 +172,9 @@ usage() {
   $(basename "${SCRIPT_PATH}") --config <绝对路径> rehost-exit
   $(basename "${SCRIPT_PATH}") --config <绝对路径> rebaseline
   $(basename "${SCRIPT_PATH}") --config <绝对路径> rotate-keys
+  $(basename "${SCRIPT_PATH}") --config <绝对路径> add-device <名字>
+  $(basename "${SCRIPT_PATH}") --config <绝对路径> remove-device <名字>
+  $(basename "${SCRIPT_PATH}") --config <绝对路径> list-devices
   $(basename "${SCRIPT_PATH}") -h | --help
 
 作用:
@@ -193,9 +196,13 @@ usage() {
              一致（同一台机）；UUID、密钥、端口、客户端订阅都不变；中途失败可重跑，已迁移时输出 noop。
   rebaseline   中转机上的既有 sing-box 合法变化后（233boy 迁移为 ownexit-direct、直连改参数 / 新装 / 卸载），
                按现场重新判定 RELAY_COHOSTS_SINGBOX 并重新登记基线；凭据、端口、node.txt 不变
-  rotate-keys  在出口机上重新生成 UUID / Reality 密钥 / short id，重启出口机 sing-box，更新 node.txt 与 state，
-               最后自动完整 verify；中转、端口、部署 ID 不变。所有客户端都要重新导入 node.txt
+  rotate-keys  在出口机上重新生成全部设备的 UUID 与 Reality 密钥 / short id，重启出口机 sing-box，更新节点文件
+               与 state，最后自动完整 verify；中转、端口、部署 ID 不变。所有客户端都要重新导入
                （多链聚合需重新 render）。中途失败直接重跑同一条命令收敛。
+  add-device   新增一台设备（独立 UUID），节点文件在 <状态目录>/devices/node-<名字>.txt；其它设备不受影响。
+               设备名 [a-z0-9][a-z0-9-]{0,31}，default 保留，每条链最多 32 台（含 default）。
+  remove-device 吊销一台设备，它立即连不上；其它设备不受影响。两者中途失败都可重跑同一条命令收敛。
+  list-devices 只读列出出口机上的设备与本机节点文件路径。
 
 参数:
   --config <路径>       仓库外 600 regular file，格式见 chain.example.env（init 会自动生成）。
@@ -573,8 +580,14 @@ parse_args() {
   COMMAND="$3"
   shift 3
   case "${COMMAND}" in
-    preflight|deploy|status|rollback|conns|banlist|rehost-exit|rebaseline|rotate-keys)
+    preflight|deploy|status|rollback|conns|banlist|rehost-exit|rebaseline|rotate-keys|list-devices)
       [[ "$#" -eq 0 ]] || die 2 "${COMMAND} 不接受额外参数"
+      ;;
+    add-device|remove-device)
+      [[ "$#" -eq 1 ]] || die 2 "${COMMAND} 需要且只需要一个设备名"
+      [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die 2 '设备名只允许 [a-z0-9][a-z0-9-]{0,31}'
+      [[ "$1" != default ]] || die 2 'default 指部署时的那套凭据，不能新增或吊销；要整体换凭据用 rotate-keys'
+      DEVICE_NAME="$1"
       ;;
     verify)
       if [[ "$#" -eq 1 && "$1" == '--with-fail-closed' ]]; then
@@ -3491,7 +3504,7 @@ cat > "$config" <<EOF
     "tag": "exit-in",
     "listen": "0.0.0.0",
     "listen_port": $port,
-    "users": [{ "uuid": "$uuid", "flow": "xtls-rprx-vision" }],
+    "users": [{ "name": "default", "uuid": "$uuid", "flow": "xtls-rprx-vision" }],
     "tls": {
       "enabled": true,
       "server_name": "$server_name",
@@ -4285,6 +4298,7 @@ local_deployment_residue_absent() {
     "${CHAIN_STATE_DIR}"/.state.env.*.tmp \
     "${CHAIN_STATE_DIR}"/.transaction.env.*.tmp \
     "${CHAIN_STATE_DIR}"/.node.txt.rotate.*.tmp \
+    "${CHAIN_STATE_DIR}"/devices/.*.tmp \
     "${CHAIN_STATE_DIR}"/.lock.*.chain.tmp; do
     [[ ! -e "${candidate}" && ! -L "${candidate}" ]] || return 1
   done
@@ -4436,7 +4450,7 @@ pid="$(systemctl show "$unit_name" -p MainPID --value)"
 [[ "$pid" =~ ^[1-9][0-9]*$ && "$(readlink -f "/proc/$pid/exe")" == "$binary" ]] || exit 146
 ss -H -ltnp | awk -v suffix=":$port" -v pid="pid=$pid," 'substr($4, length($4)-length(suffix)+1) == suffix && index($0, pid) {found=1} END {exit found ? 0 : 1}' || exit 147
 # rotate-keys 的辅助文件（待切换配置 / 参数 / 旧配置备份 / 临时文件）只在命令中途存在；还在就说明轮换没收尾，
-# 必须先重跑 rotate-keys，否则 rollback 会把含私钥的辅助文件留在机器上。
+# 必须先重跑中断的那条命令（rotate-keys / add-device / remove-device），否则 rollback 会把含私钥的辅助文件留在机器上。
 for rotate_leftover in "/etc/ownexit-chain/$chain_id".rotate.*; do
   [[ ! -e "$rotate_leftover" && ! -L "$rotate_leftover" ]] || exit 150
 done
@@ -4575,7 +4589,7 @@ probe_remote_resources() {
   else
     rc="$?"
   fi
-  # 150 = 出口机上有未收尾的 rotate-keys 辅助文件；单独返回 33，让 status / verify / rollback 能提示重跑 rotate-keys。
+  # 150 = 出口机上有未收尾的凭据 / 设备操作辅助文件；单独返回 33，让 status / verify / rollback 能提示重跑中断的命令。
   [[ "${rc}" -ne 150 ]] || return 33
   [[ "${rc}" -eq 0 ]] || { [[ "${rc}" -eq 255 ]] && return 22; return 32; }
   [[ "${output}" == VERIFY_EXIT=ok ]] || return 32
@@ -4622,7 +4636,7 @@ full_verify() {
   probe_exit_tls
   probe_exit_exit
   if probe_remote_resources yes; then rc=0; else rc="$?"; fi
-  [[ "${rc}" -ne 33 ]] || die 5 '出口机上有未完成的 rotate-keys（辅助文件未清理）；重跑 rotate-keys 收敛'
+  [[ "${rc}" -ne 33 ]] || die 5 '出口机上有未完成的凭据或设备操作（辅助文件未清理）；重跑中断的那条命令（rotate-keys / add-device / remove-device）收敛'
   [[ "${rc}" -eq 0 ]] || die 5 '远端文件、unit、进程、listener 或 binary 发生 drift'
   verify_local_artifacts || die 5 '本地 state 配套产物发生 drift'
   verify_relay_baseline || die 5 '中转既有 sing-box 零回归基线发生变化'
@@ -5385,6 +5399,16 @@ remove_active_local_artifacts() {
     require_secure_user_file "${file}" 600 || die 1 "rotate-keys 残留删除前身份异常：${file}"
     rm -f "${file}" || die 1 "rotate-keys 残留删除失败：${file}"
   done
+  # 额外设备的本机缓存（设备表、节点文件、临时文件）随链一起退役：出口机已拆，这些凭据不再有效。
+  if [[ -e "${CHAIN_STATE_DIR}/devices" || -L "${CHAIN_STATE_DIR}/devices" ]]; then
+    private_dir_is_safe "${CHAIN_STATE_DIR}/devices" || die 1 'devices 目录删除前身份异常'
+    for file in "${CHAIN_STATE_DIR}/devices"/devices.env "${CHAIN_STATE_DIR}/devices"/node-*.txt "${CHAIN_STATE_DIR}/devices"/.*.tmp; do
+      [[ -e "${file}" || -L "${file}" ]] || continue
+      require_secure_user_file "${file}" 600 || die 1 "设备文件删除前身份异常：${file}"
+      rm -f "${file}" || die 1 "设备文件删除失败：${file}"
+    done
+    rmdir "${CHAIN_STATE_DIR}/devices" || die 1 'devices 目录删除失败（里面有不认识的文件）'
+  fi
   for file in relay-config-manifest.txt relay-unit-manifest.txt relay-binary-manifest.txt relay-listeners.txt; do
     if [[ -e "${CHAIN_STATE_DIR}/baseline/${file}" || -L "${CHAIN_STATE_DIR}/baseline/${file}" ]]; then
       require_secure_user_file "${CHAIN_STATE_DIR}/baseline/${file}" 600 || die 1 "baseline 删除前身份异常：${file}"
@@ -5508,7 +5532,7 @@ rollback_chain() {
   ensure_local_assets_match_state
   remote_platform_preflight
   if probe_remote_resources no; then rc=0; else rc="$?"; fi
-  [[ "${rc}" -ne 33 ]] || die 6 'rollback 预校验发现出口机上有未完成的 rotate-keys；先重跑 rotate-keys 收敛再 rollback'
+  [[ "${rc}" -ne 33 ]] || die 6 'rollback 预校验发现出口机上有未完成的凭据或设备操作；先重跑中断的那条命令（rotate-keys / add-device / remove-device）收敛再 rollback'
   [[ "${rc}" -eq 0 ]] || die 6 'rollback 预校验发现远端 drift'
   verify_local_artifacts || die 6 'rollback 预校验发现本地产物 drift'
   verify_relay_baseline || die 6 'rollback 预校验发现既有 sing-box 基线变化'
@@ -5835,7 +5859,8 @@ configured_local_resources_absent() {
     "${CHAIN_STATE_DIR}"/.stage-owner.*.tmp \
     "${CHAIN_STATE_DIR}"/.state.env.*.tmp \
     "${CHAIN_STATE_DIR}"/.transaction.env.*.tmp \
-    "${CHAIN_STATE_DIR}"/.node.txt.rotate.*.tmp; do
+    "${CHAIN_STATE_DIR}"/.node.txt.rotate.*.tmp \
+    "${CHAIN_STATE_DIR}/devices"; do
     [[ ! -e "${candidate}" && ! -L "${candidate}" ]] || return 1
   done
 }
@@ -6754,28 +6779,33 @@ rebaseline_chain() {
   log_info "rebaseline 通过；chain=${CHAIN_ID} kind=${REBASELINE_LIVE_COHOST} elapsed=$(elapsed_seconds)s"
 }
 
-# ---------- 出口机凭据轮换：rotate-keys（docs/feature/feature-formats-key-rotation.md §5.1.3） ----------
+# ---------- 出口机凭据与设备操作：rotate-keys / add-device / remove-device ----------
+# （docs/feature/feature-formats-key-rotation.md §5.1.3、docs/feature/feature-devices-sni-scan.md §5.1.2）
 #
-# 只换出口机 sing-box 的 UUID / Reality 密钥对 / short id；中转、端口、部署 ID、owner、配置摘要都不变。
-# 不走事务（同 rehost-exit）：中间状态放在出口机的三个辅助文件里，本地 state 最后提交，任一步中断后
-# 重跑同一条命令都能按现场收敛。私钥只在出口机上生成和保存，不经过本机。
-#   <id>.rotate.json      待切换的新配置（含新私钥）
-#   <id>.rotate.env       新配置的哈希与客户端参数（无私钥）
+# 三个命令共用一套“出口机凭据操作”：只改出口机 sing-box 配置（users 行，rotate 时另换私钥与 short id），
+# 中转、端口、部署 ID、owner、配置摘要都不变。不走事务（同 rehost-exit）：中间状态放在出口机的辅助文件里，
+# 本地 state 最后提交，任一步中断后重跑同一条命令都能按现场收敛。私钥与 UUID 只在出口机上生成。
+#   <id>.rotate.json      待切换的新配置（rotate 时含新私钥）
+#   <id>.rotate.env       MODE（本次操作）、新配置哈希、目标设备全表（DEVICE_<名字>=UUID）、rotate 时的公钥与 short id
 #   <id>.rotate.bak.json  切换前的旧配置，新配置起不来时用它恢复
-# 辅助文件存在期间 verify / status / rollback 都会拒绝（出口机核验脚本 exit 150），提示重跑 rotate-keys。
+# 设备清单的权威是出口机生效配置的 users 行：远端按操作从它推导新表，本机文件只是缓存，每次都用远端输出覆盖。
+# 辅助文件存在期间 verify / status / rollback 都会拒绝（出口机核验脚本 exit 150），提示重跑中断的那条命令。
 
-ROTATE_RESULT=''
+EXIT_OP_RESULT=''
+EXIT_OP_DEVICES=''
 ROTATE_NEW_EXIT_SHA256=''
+DEVICE_NAME=''
 
 # 测试钩子：在本机侧的指定阶段后以退出码 99 结束（stage / swap 两个阶段在远端脚本内实现）；正常使用不要设置。
+# 对 rotate-keys / add-device / remove-device 都生效。
 rotate_test_stop() {
   if [[ "${OWNEXIT_TEST_ROTATE_STOP_AFTER:-}" == "$1" ]]; then
-    log_warn "测试钩子：rotate-keys 在 $1 之后停止"
+    log_warn "测试钩子：${COMMAND} 在 $1 之后停止"
     exit 99
   fi
 }
 
-# 出口机上执行的轮换脚本。mode=apply 按判定表生成 / 切换 / 恢复；mode=cleanup 只在线上已是新配置时删除辅助文件。
+# 出口机上执行的凭据 / 设备操作脚本。mode=apply 按判定表生成 / 切换 / 恢复；mode=cleanup 只在线上已是新配置时删除辅助文件。
 write_rotate_remote_script() {
   local output
   output="$1"
@@ -6811,11 +6841,13 @@ if [[ "$mode" == cleanup ]]; then
   exit 0
 fi
 
-port="$3"
-state_hash="$4"
-binary="$5"
-test_stop="$6"
-break_port="$7"
+op="$3"
+port="$4"
+state_hash="$5"
+binary="$6"
+test_stop="$7"
+break_port="$8"
+case "$op" in rotate|add:*|remove:*) ;; *) exit 200 ;; esac
 [[ -f "$binary" && ! -L "$binary" && -x "$binary" ]] || exit 198
 
 check_config() {
@@ -6851,7 +6883,7 @@ apply_break_port() {
   mv -f "$tmp" "$file"
 }
 
-# 新配置起不来：放回旧配置并重启。恢复成功 195（线上回到轮换前），恢复后仍起不来 196（需人工处理）。
+# 新配置起不来：放回旧配置并重启。恢复成功 195（线上回到操作前），恢复后仍起不来 196（需人工处理）。
 restore_old() {
   mv -f "$bak" "$live"
   rm -f /etc/ownexit-chain/"$chain_id".rotate.json /etc/ownexit-chain/"$chain_id".rotate.env
@@ -6860,38 +6892,105 @@ restore_old() {
   exit 196
 }
 
-# 生成待切换配置：在线上配置基础上只替换 UUID、私钥、short id 三行（行格式由 deploy 模板固定），
-# 不重新渲染整份模板，避免与 write_prepare_exit_script 的模板分叉。先写 env 再写 json，
-# 两者都在时以 env 里的哈希核对 json，半写状态只会被判成“残缺”而重新生成。
+# 从生效配置解析设备表，每行“名字 UUID”。users 行由 deploy 模板固定为单行数组；
+# 旧部署（v0.6.0 及更早）的唯一一项没有 name 字段，视为 default。不是这两种形态时 exit 192。
+parse_users() {
+  awk '
+    { t = $0; sub(/^[ ]+/, "", t); if (index(t, "\"users\": [") == 1) { n++; line = t } }
+    END {
+      if (n != 1) exit 3
+      count = 0
+      while (match(line, /\{[^}]*\}/)) {
+        obj = substr(line, RSTART, RLENGTH); line = substr(line, RSTART + RLENGTH)
+        name = ""; uuid = ""
+        if (match(obj, /"name": "[^"]*"/)) name = substr(obj, RSTART + 9, RLENGTH - 10)
+        if (match(obj, /"uuid": "[^"]*"/)) uuid = substr(obj, RSTART + 9, RLENGTH - 10)
+        count++; names[count] = name; uuids[count] = uuid
+      }
+      if (count == 0) exit 3
+      for (i = 1; i <= count; i++) {
+        if (names[i] == "") { if (count != 1) exit 3; names[i] = "default" }
+        print names[i], uuids[i]
+      }
+    }' "$live"
+}
+
+# 把“名字 UUID”列表渲染成 users 整行（4 个空格缩进，与 deploy 模板一致）。
+render_users_line() {
+  awk 'BEGIN { printf "    \"users\": [" } { printf "%s{ \"name\": \"%s\", \"uuid\": \"%s\", \"flow\": \"xtls-rprx-vision\" }", (NR > 1 ? ", " : ""), $1, $2 } END { print "]," }'
+}
+
+# 生成待切换配置：按操作从生效配置推导新设备表，整行替换 users；rotate 时另替换私钥与 short id 两行。
+# 先写 env 再写 json，两者都在时以 env 里的哈希核对 json，半写状态只会被判成“残缺”而重新生成。
 generate_pending() {
-  local keypair private_key public_key uuid short_id tmp_json tmp_env new_hash
+  local current target name new_uuid count keypair private_key public_key short_id tmp_json tmp_env new_hash users_line line
   remove_helpers
-  keypair="$("$binary" generate reality-keypair)"
-  private_key="$(printf '%s\n' "$keypair" | awk -F': ' '$1 == "PrivateKey" {print $2}')"
-  public_key="$(printf '%s\n' "$keypair" | awk -F': ' '$1 == "PublicKey" {print $2}')"
-  uuid="$("$binary" generate uuid)"
-  short_id="$("$binary" generate rand --hex 8)"
-  [[ "$private_key" =~ ^[A-Za-z0-9_-]+$ && "$public_key" =~ ^[A-Za-z0-9_-]+$ ]] || exit 194
-  [[ "$uuid" =~ ^[0-9a-f-]{36}$ && "$short_id" =~ ^[0-9a-f]{16}$ ]] || exit 194
+  current="$(parse_users)" || exit 192
+  # mawk 不一定支持 {m,n} 重复，长度用 length() 判断。
+  printf '%s\n' "$current" | awk '$1 !~ /^[a-z0-9][a-z0-9-]*$/ || length($1) > 32 || $2 !~ /^[0-9a-f-]+$/ || length($2) != 36 {bad=1} END {exit bad ? 1 : 0}' || exit 192
+  [[ "$(printf '%s\n' "$current" | head -n 1 | awk '{print $1}')" == default ]] || exit 192
+  private_key=''
+  case "$op" in
+    add:*)
+      name="${op#add:}"
+      [[ "$name" =~ ^[a-z0-9][a-z0-9-]{0,31}$ && "$name" != default ]] || exit 200
+      if printf '%s\n' "$current" | awk -v n="$name" '$1 == n {f=1} END {exit f ? 0 : 1}'; then exit 201; fi
+      count="$(printf '%s\n' "$current" | awk 'NF {c++} END {print c + 0}')"
+      (( count < 32 )) || exit 202
+      new_uuid="$("$binary" generate uuid)"
+      [[ "$new_uuid" =~ ^[0-9a-f-]{36}$ ]] || exit 194
+      target="$(printf '%s\n%s %s\n' "$current" "$name" "$new_uuid")"
+      ;;
+    remove:*)
+      name="${op#remove:}"
+      [[ "$name" != default ]] || exit 204
+      printf '%s\n' "$current" | awk -v n="$name" '$1 == n {f=1} END {exit f ? 0 : 1}' || exit 203
+      target="$(printf '%s\n' "$current" | awk -v n="$name" '$1 != n')"
+      ;;
+    rotate)
+      # 轮换：每台设备（含 default）都换新 UUID，再换 Reality 密钥对与 short id；所有客户端都要重新导入。
+      target=''
+      while IFS=' ' read -r name _; do
+        [[ -n "$name" ]] || continue
+        new_uuid="$("$binary" generate uuid)"
+        [[ "$new_uuid" =~ ^[0-9a-f-]{36}$ ]] || exit 194
+        target="${target}${target:+$'\n'}${name} ${new_uuid}"
+      done <<< "$current"
+      keypair="$("$binary" generate reality-keypair)"
+      private_key="$(printf '%s\n' "$keypair" | awk -F': ' '$1 == "PrivateKey" {print $2}')"
+      public_key="$(printf '%s\n' "$keypair" | awk -F': ' '$1 == "PublicKey" {print $2}')"
+      short_id="$("$binary" generate rand --hex 8)"
+      [[ "$private_key" =~ ^[A-Za-z0-9_-]+$ && "$public_key" =~ ^[A-Za-z0-9_-]+$ && "$short_id" =~ ^[0-9a-f]{16}$ ]] || exit 194
+      ;;
+  esac
+  users_line="$(printf '%s\n' "$target" | render_users_line)"
   tmp_json="/etc/ownexit-chain/$chain_id.rotate.json.$$.tmp"
   tmp_env="/etc/ownexit-chain/$chain_id.rotate.env.$$.tmp"
-  awk -v u="$uuid" -v k="$private_key" -v s="$short_id" '
+  awk -v u="$users_line" -v k="$private_key" -v s="${short_id:-}" '
     {
       t = $0
       sub(/^[ ]+/, "", t)
-      if (index(t, "\"users\": [{ \"uuid\": \"") == 1) { print "    \"users\": [{ \"uuid\": \"" u "\", \"flow\": \"xtls-rprx-vision\" }],"; nu++; next }
-      if (index(t, "\"private_key\": \"") == 1) { print "        \"private_key\": \"" k "\","; nk++; next }
-      if (index(t, "\"short_id\": [\"") == 1) { print "        \"short_id\": [\"" s "\"]"; ns++; next }
+      if (index(t, "\"users\": [") == 1) { print u; nu++; next }
+      if (k != "" && index(t, "\"private_key\": \"") == 1) { print "        \"private_key\": \"" k "\","; nk++; next }
+      if (k != "" && index(t, "\"short_id\": [\"") == 1) { print "        \"short_id\": [\"" s "\"]"; ns++; next }
       print
     }
-    END { exit (nu == 1 && nk == 1 && ns == 1) ? 0 : 3 }' "$live" > "$tmp_json" || exit 192
+    END { exit (nu == 1 && (k == "" || (nk == 1 && ns == 1))) ? 0 : 3 }' "$live" > "$tmp_json" || exit 192
   chown root:root "$tmp_json"
   chmod 600 "$tmp_json"
   apply_break_port "$tmp_json"
   check_config "$tmp_json" || exit 194
   new_hash="$(sha "$tmp_json")"
-  printf 'NEW_SHA256=%s\nVLESS_UUID=%s\nREALITY_PUBLIC_KEY=%s\nREALITY_SHORT_ID=%s\n' \
-    "$new_hash" "$uuid" "$public_key" "$short_id" > "$tmp_env"
+  {
+    printf 'MODE=%s\nNEW_SHA256=%s\n' "$op" "$new_hash"
+    while IFS=' ' read -r name new_uuid; do
+      [[ -n "$name" ]] || continue
+      printf 'DEVICE_%s=%s\n' "$name" "$new_uuid"
+    done <<< "$target"
+    if [[ -n "$private_key" ]]; then
+      printf 'REALITY_PUBLIC_KEY=%s\nREALITY_SHORT_ID=%s\n' "$public_key" "$short_id"
+    fi
+  } > "$tmp_env"
   chown root:root "$tmp_env"
   chmod 600 "$tmp_env"
   mv -f "$tmp_env" "$env_file"
@@ -6911,18 +7010,36 @@ do_swap() {
   wait_ready || restore_old
 }
 
+pending_other() {
+  printf 'PENDING_MODE=%s\n' "$env_mode"
+  exit 199
+}
+
 live_hash="$(sha "$live")"
 env_new=''
+env_mode=''
 if [[ -f "$env_file" && ! -L "$env_file" ]]; then
   env_new="$(env_get NEW_SHA256)"
+  # v0.5.0 留下的 env 没有 MODE：它只可能来自 rotate-keys。
+  env_mode="$(env_get MODE)"
+  [[ -n "$env_mode" ]] || env_mode=rotate
 fi
 
+# 判定表（先分流，按操作推导只在“全新”分支执行：add 在切换后中断、重跑时 live 已含新设备，提前校验会被 201 误拒）。
 if [[ "$live_hash" == "$state_hash" ]]; then
-  if [[ -n "$env_new" && "$env_new" == "$live_hash" ]]; then
-    # 上一次已经提交了 state、只差清理：不再轮换，交给本机核对参数后走 cleanup。
+  if [[ -n "$env_new" && "$env_new" == "$live_hash" && "$env_mode" == "$op" ]]; then
+    # 上一次同一操作已经提交了 state、只差清理：不再生成，交给本机核对后走 cleanup。
     result=resumed-after-commit
+  elif [[ -n "$env_new" && "$env_new" == "$live_hash" ]]; then
+    # 上一次另一操作已完成、只差清理：清掉后按全新处理本次操作。
+    remove_helpers
+    result=fresh
+    generate_pending
+    [[ "$test_stop" != stage ]] || exit 99
+    do_swap
   elif [[ -n "$env_new" && -f "$pending" && ! -L "$pending" && "$(sha "$pending")" == "$env_new" ]]; then
-    # 上一次在切换前中断：复用已生成的待切换配置。
+    # 上一次在切换前中断：同一操作就复用，否则要先把那条命令重跑完。
+    [[ "$env_mode" == "$op" ]] || pending_other
     result=resumed
     do_swap
   else
@@ -6932,6 +7049,7 @@ if [[ "$live_hash" == "$state_hash" ]]; then
     do_swap
   fi
 elif [[ -n "$env_new" && "$live_hash" == "$env_new" ]]; then
+  [[ "$env_mode" == "$op" ]] || pending_other
   # 已切换但本地还没提交：文件已是新配置，进程可能仍在跑旧配置（切换后、重启前中断），所以无条件重启一次。
   result=already
   [[ -f "$bak" && ! -L "$bak" ]] || exit 196
@@ -6944,9 +7062,17 @@ else
 fi
 [[ "$test_stop" != swap || "$result" == resumed-after-commit ]] || exit 99
 printf 'RESULT=%s\n' "$result"
-printf 'VLESS_UUID=%s\n' "$(env_get VLESS_UUID)"
-printf 'REALITY_PUBLIC_KEY=%s\n' "$(env_get REALITY_PUBLIC_KEY)"
-printf 'REALITY_SHORT_ID=%s\n' "$(env_get REALITY_SHORT_ID)"
+printf 'MODE=%s\n' "$op"
+if awk -F= '$1 ~ /^DEVICE_/ {f=1} END {exit f ? 0 : 1}' "$env_file"; then
+  awk -F= '$1 ~ /^DEVICE_/' "$env_file"
+else
+  # v0.5.0 的 env 只有 VLESS_UUID：它就是唯一的 default。
+  printf 'DEVICE_default=%s\n' "$(env_get VLESS_UUID)"
+fi
+if [[ -n "$(env_get REALITY_PUBLIC_KEY)" ]]; then
+  printf 'REALITY_PUBLIC_KEY=%s\n' "$(env_get REALITY_PUBLIC_KEY)"
+  printf 'REALITY_SHORT_ID=%s\n' "$(env_get REALITY_SHORT_ID)"
+fi
 printf 'EXIT_EXIT_SHA256=%s\n' "$(sha "$live")"
 ROTATE_REMOTE
   chmod 600 "${output}"
@@ -6956,78 +7082,164 @@ ROTATE_REMOTE
 rotate_remote_reason() {
   case "$1" in
     191) printf '191 出口机配置文件身份或权限异常（要求 root:root 600、非软链）' ;;
-    192) printf '192 出口机配置中 UUID / 私钥 / short id 行不是各恰好 1 行（不是 deploy 生成的形态）' ;;
+    192) printf '192 出口机配置的 users / 私钥 / short id 行不是 deploy 生成的形态' ;;
     193) printf '193 出口机配置与 state 记录的哈希不符，且不是本命令生成的新配置（外部改动）' ;;
     194) printf '194 新凭据生成失败或新配置 sing-box check 未通过（线上未改动）' ;;
-    195) printf '195 新配置启动失败，已恢复旧配置（线上仍是轮换前的凭据）' ;;
+    195) printf '195 新配置启动失败，已恢复旧配置（线上仍是操作前的状态）' ;;
     196) printf '196 新配置启动失败，恢复旧配置后仍未起来（需人工检查出口机）' ;;
     197) printf '197 清理时线上配置不是新配置，拒绝删除辅助文件' ;;
     198) printf '198 出口机固定 sing-box 二进制缺失' ;;
+    199) printf '199 出口机上有另一个未完成的操作' ;;
+    200) printf '200 操作参数不合法' ;;
+    201) printf '201 设备已存在' ;;
+    202) printf '202 设备数已达上限 32（含 default）' ;;
+    203) printf '203 没有这台设备' ;;
+    204) printf '204 default 不能吊销' ;;
     255) printf '255 SSH 不可达或会话中断' ;;
     *) printf '%s 远端脚本异常退出' "$1" ;;
   esac
 }
 
-# 执行远端 apply，结果写入 ROTATE_RESULT、VLESS_UUID / REALITY_PUBLIC_KEY / REALITY_SHORT_ID 与 ROTATE_NEW_EXIT_SHA256。
-rotate_exit_apply() {
-  local script output rc test_stop break_port
+# 远端操作字符串对应的本机命令，用于“另一操作未完成”时告诉用户先重跑哪条。
+exit_op_command_of() {
+  case "$1" in
+    rotate) printf 'rotate-keys' ;;
+    add:*) printf 'add-device %s' "${1#add:}" ;;
+    remove:*) printf 'remove-device %s' "${1#remove:}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# 执行远端 apply，结果写入 EXIT_OP_RESULT、EXIT_OP_DEVICES（每行 名字=UUID，含 default）、
+# rotate 时的 REALITY_PUBLIC_KEY / REALITY_SHORT_ID，以及 ROTATE_NEW_EXIT_SHA256。
+exit_op_apply() {
+  local op script output rc test_stop break_port pending pbk sid
+  op="$1"
   script="${OP_TMP}/rotate-remote.sh"
   write_rotate_remote_script "${script}"
   test_stop='-'
   case "${OWNEXIT_TEST_ROTATE_STOP_AFTER:-}" in stage|swap) test_stop="${OWNEXIT_TEST_ROTATE_STOP_AFTER}" ;; esac
   # ssh 会吞掉空参数，未设置时用 - 占位。
   break_port="${OWNEXIT_TEST_ROTATE_BREAK_PORT:--}"
-  if output="$(ssh_exit_stdin bash -s -- apply "${CHAIN_ID}" "${EXIT_REALITY_PORT}" "${EXIT_EXIT_SHA256}" "${REMOTE_BIN}" "${test_stop}" "${break_port}" < "${script}")"; then rc=0; else rc="$?"; fi
+  if output="$(ssh_exit_stdin bash -s -- apply "${CHAIN_ID}" "${op}" "${EXIT_REALITY_PORT}" "${EXIT_EXIT_SHA256}" "${REMOTE_BIN}" "${test_stop}" "${break_port}" < "${script}")"; then rc=0; else rc="$?"; fi
   if [[ "${rc}" -eq 99 && "${test_stop}" != - ]]; then
-    log_warn "测试钩子：rotate-keys 在远端 ${test_stop} 之后停止"
+    log_warn "测试钩子：${COMMAND} 在远端 ${test_stop} 之后停止"
     exit 99
   fi
-  [[ "${rc}" -ne 255 ]] || die 3 "出口机轮换失败：$(rotate_remote_reason 255)"
-  [[ "${rc}" -eq 0 ]] || die 1 "出口机轮换失败：$(rotate_remote_reason "${rc}")"
-  ROTATE_RESULT="$(rehost_output_value "${output}" RESULT)"
-  VLESS_UUID="$(rehost_output_value "${output}" VLESS_UUID)"
-  REALITY_PUBLIC_KEY="$(rehost_output_value "${output}" REALITY_PUBLIC_KEY)"
-  REALITY_SHORT_ID="$(rehost_output_value "${output}" REALITY_SHORT_ID)"
+  case "${rc}" in
+    0) ;;
+    255) die 3 "出口机操作失败：$(rotate_remote_reason 255)" ;;
+    199)
+      pending="$(rehost_output_value "${output}" PENDING_MODE)"
+      die 1 "出口机上有未完成的操作（$(exit_op_command_of "${pending}")）；先重跑 setup_chain.sh --id ${CHAIN_ID} $(exit_op_command_of "${pending}") 收敛，本次请求未执行"
+      ;;
+    201|202|203|204) die 2 "出口机操作被拒绝：$(rotate_remote_reason "${rc}")；出口机未改动" ;;
+    *) die 1 "出口机操作失败：$(rotate_remote_reason "${rc}")" ;;
+  esac
+  EXIT_OP_RESULT="$(rehost_output_value "${output}" RESULT)"
+  EXIT_OP_DEVICES="$(printf '%s\n' "${output}" | awk -F= '$1 ~ /^DEVICE_/ { sub(/^DEVICE_/, ""); print }')"
   ROTATE_NEW_EXIT_SHA256="$(rehost_output_value "${output}" EXIT_EXIT_SHA256)"
-  [[ "${ROTATE_RESULT}" =~ ^(fresh|resumed|already|resumed-after-commit)$ ]] || die 1 '出口机轮换输出格式异常（RESULT）'
-  [[ "${VLESS_UUID}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ && "${REALITY_PUBLIC_KEY}" =~ ^[A-Za-z0-9_-]+$ && "${REALITY_SHORT_ID}" =~ ^[0-9a-f]{16}$ ]] \
-    || die 1 '出口机未返回完整客户端参数'
-  [[ "${ROTATE_NEW_EXIT_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die 1 '出口机轮换输出格式异常（EXIT_EXIT_SHA256）'
-  log_info "[rotate] exit=${ROTATE_RESULT} new_exit_sha256=${ROTATE_NEW_EXIT_SHA256:0:12}"
+  [[ "${EXIT_OP_RESULT}" =~ ^(fresh|resumed|already|resumed-after-commit)$ ]] || die 1 '出口机操作输出格式异常（RESULT）'
+  [[ "${ROTATE_NEW_EXIT_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die 1 '出口机操作输出格式异常（EXIT_EXIT_SHA256）'
+  printf '%s\n' "${EXIT_OP_DEVICES}" | awk -F= '
+    $1 !~ /^[a-z0-9][a-z0-9-]*$/ || length($1) > 32 || $2 !~ /^[0-9a-f-]+$/ || length($2) != 36 {bad=1}
+    $1 == "default" {d++}
+    END {exit (bad || d != 1) ? 1 : 0}' || die 1 '出口机返回的设备表不完整'
+  VLESS_UUID="$(printf '%s\n' "${EXIT_OP_DEVICES}" | awk -F= '$1 == "default" {print $2; exit}')"
+  pbk="$(rehost_output_value "${output}" REALITY_PUBLIC_KEY)"
+  sid="$(rehost_output_value "${output}" REALITY_SHORT_ID)"
+  if [[ "${op}" == rotate ]]; then
+    [[ "${pbk}" =~ ^[A-Za-z0-9_-]+$ && "${sid}" =~ ^[0-9a-f]{16}$ ]] || die 1 '出口机未返回新的公钥与 short id'
+    REALITY_PUBLIC_KEY="${pbk}"
+    REALITY_SHORT_ID="${sid}"
+  fi
+  log_info "[exit-op] mode=${op} exit=${EXIT_OP_RESULT} devices=$(printf '%s\n' "${EXIT_OP_DEVICES}" | awk 'NF {c++} END {print c + 0}') new_exit_sha256=${ROTATE_NEW_EXIT_SHA256:0:12}"
 }
 
-# 发布新 node.txt：临时文件放在 state 目录（不放 client/，否则中断残留会让 rollback 的 rmdir client 失败），
-# 同一文件系统内 mv 原子替换。旧 node.txt 是 deploy 时的硬链接，替换不影响 audit 里的副本。
-publish_rotated_node() {
-  local tmp
+# 额外设备的节点链接：与 render_node_artifact 相同的格式，UUID 与节点名不同。
+# 节点名用 _ 连接（不在链名与设备名字符集里，避免与带连字符的链名重名；不用 @，部分客户端按最后一个 @ 拆用户信息）。
+render_device_node() {
+  local output name uuid
+  output="$1"
+  name="$2"
+  uuid="$3"
+  printf 'vless://%s@%s:%s?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp#Exit-via-Relay-%s_%s\n' \
+    "${uuid}" "${RELAY_HOST}" "${RELAY_PORT}" "${REALITY_SERVER_NAME}" \
+    "${REALITY_PUBLIC_KEY}" "${REALITY_SHORT_ID}" "${CHAIN_ID}" "${name}" > "${output}"
+  chmod 600 "${output}"
+}
+
+# 用远端输出覆盖本机产物：client/node.txt（default）与 devices/ 下的设备表和节点文件。
+# client/node.txt 的临时文件放在 state 目录（不放 client/，否则中断残留会让 rollback 的 rmdir client 失败）；
+# devices/ 下的文件用同目录 .<文件>.<操作ID>.tmp。都经 mv 原子替换。
+publish_exit_op_artifacts() {
+  local tmp devices_dir name uuid file keep
   tmp="${CHAIN_STATE_DIR}/.node.txt.rotate.${OPERATION_ID}.tmp"
   render_node_artifact "${tmp}"
   NODE_SHA256="$(sha256_file "${tmp}")"
   mv -f "${tmp}" "${CHAIN_STATE_DIR}/client/node.txt" || die 1 'node.txt 替换失败'
   require_secure_user_file "${CHAIN_STATE_DIR}/client/node.txt" 600 || die 1 'node.txt 替换后身份异常'
   [[ "$(sha256_file "${CHAIN_STATE_DIR}/client/node.txt")" == "${NODE_SHA256}" ]] || die 1 'node.txt 替换后 hash 不符'
-  log_info '[rotate] node published'
+  devices_dir="${CHAIN_STATE_DIR}/devices"
+  keep="$(printf '%s\n' "${EXIT_OP_DEVICES}" | awk -F= 'NF && $1 != "default"')"
+  if [[ -n "${keep}" ]]; then
+    if [[ ! -d "${devices_dir}" ]]; then
+      mkdir "${devices_dir}" || die 1 'devices 目录创建失败'
+      chmod 700 "${devices_dir}" || die 1 'devices 目录权限设置失败'
+    fi
+    private_dir_is_safe "${devices_dir}" || die 1 'devices 目录身份异常'
+    while IFS='=' read -r name uuid; do
+      [[ -n "${name}" ]] || continue
+      tmp="${devices_dir}/.node-${name}.txt.${OPERATION_ID}.tmp"
+      render_device_node "${tmp}" "${name}" "${uuid}"
+      mv -f "${tmp}" "${devices_dir}/node-${name}.txt" || die 1 "设备 ${name} 节点文件替换失败"
+    done <<< "${keep}"
+    tmp="${devices_dir}/.devices.env.${OPERATION_ID}.tmp"
+    printf '%s\n' "${keep}" > "${tmp}"
+    chmod 600 "${tmp}"
+    mv -f "${tmp}" "${devices_dir}/devices.env" || die 1 'devices.env 替换失败'
+  fi
+  if [[ -d "${devices_dir}" ]]; then
+    # 不在新表里的设备（吊销的）：删掉它的节点文件。
+    for file in "${devices_dir}"/node-*.txt; do
+      [[ -e "${file}" ]] || continue
+      name="$(basename "${file}" .txt)"
+      name="${name#node-}"
+      printf '%s\n' "${keep}" | awk -F= -v n="${name}" '$1 == n {f=1} END {exit f ? 0 : 1}' && continue
+      require_secure_user_file "${file}" 600 || die 1 "设备节点文件身份异常：${file}"
+      rm -f "${file}" || die 1 "设备节点文件删除失败：${file}"
+    done
+    if [[ -z "${keep}" ]]; then
+      if [[ -e "${devices_dir}/devices.env" ]]; then
+        require_secure_user_file "${devices_dir}/devices.env" 600 || die 1 'devices.env 身份异常'
+        rm -f "${devices_dir}/devices.env" || die 1 'devices.env 删除失败'
+      fi
+      rmdir "${devices_dir}" 2>/dev/null || true
+    fi
+  fi
+  log_info '[exit-op] node files published'
 }
 
 # 提交新 state（同 commit_rehost_state）：旧 state 先归档再替换；此时全局变量里凭据、EXIT_EXIT_SHA256、
-# NODE_SHA256 是新值，其余字段原样沿用 state。
-commit_rotate_state() {
-  local audit payload
-  ensure_private_dir "${CHAIN_STATE_DIR}/audit" || die 1 'rotate audit 父目录不安全'
-  audit="${CHAIN_STATE_DIR}/audit/rotated.${DEPLOYMENT_ID}.${OPERATION_ID}"
-  [[ ! -e "${audit}" && ! -L "${audit}" ]] || die 1 "rotate audit 目录碰撞：${audit}"
-  mkdir "${audit}" || die 1 'rotate audit 目录创建失败'
-  chmod 700 "${audit}" || die 1 'rotate audit 目录权限设置失败'
+# NODE_SHA256 是新值，其余字段原样沿用 state。$1 = audit 目录前缀（rotated / devices）。
+commit_exit_op_state() {
+  local prefix audit payload
+  prefix="$1"
+  ensure_private_dir "${CHAIN_STATE_DIR}/audit" || die 1 'audit 父目录不安全'
+  audit="${CHAIN_STATE_DIR}/audit/${prefix}.${DEPLOYMENT_ID}.${OPERATION_ID}"
+  [[ ! -e "${audit}" && ! -L "${audit}" ]] || die 1 "audit 目录碰撞：${audit}"
+  mkdir "${audit}" || die 1 'audit 目录创建失败'
+  chmod 700 "${audit}" || die 1 'audit 目录权限设置失败'
   # 直接写最终文件名：audit 下以 . 开头的 *.tmp 会被残留检查判 drift。
-  cp "${STATE_FILE}" "${audit}/state.env" || die 1 'rotate 旧 state 归档失败'
-  chmod 600 "${audit}/state.env" || die 1 'rotate 旧 state 归档权限设置失败'
-  [[ "$(sha256_file "${audit}/state.env")" == "$(sha256_file "${STATE_FILE}")" ]] || die 1 'rotate 旧 state 归档复核失败'
+  cp "${STATE_FILE}" "${audit}/state.env" || die 1 '旧 state 归档失败'
+  chmod 600 "${audit}/state.env" || die 1 '旧 state 归档权限设置失败'
+  [[ "$(sha256_file "${audit}/state.env")" == "$(sha256_file "${STATE_FILE}")" ]] || die 1 '旧 state 归档复核失败'
   EXIT_EXIT_SHA256="${ROTATE_NEW_EXIT_SHA256}"
   payload="${OP_TMP}/state-payload"
-  render_state_payload "${payload}" || die 1 'rotate state payload 生成失败'
+  render_state_payload "${payload}" || die 1 'state payload 生成失败'
   write_checksummed_file "${STATE_FILE}" replace "${payload}"
-  if probe_state_file "${STATE_FILE}"; then :; else die 1 "rotate 后 state 校验失败：${STATE_PROBE_REASON}"; fi
-  log_info "[rotate] state committed audit=${audit}"
+  if probe_state_file "${STATE_FILE}"; then :; else die 1 "提交后 state 校验失败：${STATE_PROBE_REASON}"; fi
+  log_info "[exit-op] state committed audit=${audit}"
 }
 
 rotate_cleanup_remote() {
@@ -7035,13 +7247,14 @@ rotate_cleanup_remote() {
   script="${OP_TMP}/rotate-remote.sh"
   write_rotate_remote_script "${script}"
   if ssh_exit_stdin bash -s -- cleanup "${CHAIN_ID}" "${EXIT_EXIT_SHA256}" < "${script}" >/dev/null; then rc=0; else rc="$?"; fi
-  [[ "${rc}" -ne 255 ]] || die 3 "出口机辅助文件清理失败：$(rotate_remote_reason 255)；重跑 rotate-keys 收敛"
+  [[ "${rc}" -ne 255 ]] || die 3 "出口机辅助文件清理失败：$(rotate_remote_reason 255)；重跑 ${COMMAND} 收敛"
   [[ "${rc}" -eq 0 ]] || die 1 "出口机辅助文件清理失败：$(rotate_remote_reason "${rc}")"
-  log_info '[rotate] remote cleanup done'
+  log_info '[exit-op] remote cleanup done'
 }
 
-rotate_keys_chain() {
-  local rc leftover old_uuid old_pbk old_sid
+# 加锁、核对 state 与主机绑定（rotate-keys / add-device / remove-device / list-devices 共用的前置步骤）。
+exit_op_prepare() {
+  local rc
   if acquire_chain_lock 1; then rc=0; else rc="$?"; fi
   case "${rc}" in
     0) ;;
@@ -7050,13 +7263,13 @@ rotate_keys_chain() {
     *) die 5 '无法安全取得 chain lock' ;;
   esac
   require_local_dependencies
-  [[ ! -e "${JOURNAL_FILE}" && ! -L "${JOURNAL_FILE}" ]] || die 5 '存在 incomplete transaction，rotate-keys 拒绝'
+  [[ ! -e "${JOURNAL_FILE}" && ! -L "${JOURNAL_FILE}" ]] || die 5 "存在 incomplete transaction，${COMMAND} 拒绝"
   [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 'chain 尚未部署'
   if probe_state_file "${STATE_FILE}"; then rc=0; else rc="$?"; fi
   case "${rc}" in
     0) ;;
-    # rc=12：schema 与 checksum 通过、只是配置与 state 绑定不一致；rotate-keys 不迁移任何配置键。
-    12) die 2 '配置与 state 不一致；rotate-keys 要求配置未改动（换出口 IP 用 rehost-exit，中转现状变化用 rebaseline）' ;;
+    # rc=12：schema 与 checksum 通过、只是配置与 state 绑定不一致；这些命令不迁移任何配置键。
+    12) die 2 "配置与 state 不一致；${COMMAND} 要求配置未改动（换出口 IP 用 rehost-exit，中转现状变化用 rebaseline）" ;;
     *) die 5 "state.env 校验失败：${STATE_PROBE_REASON}" ;;
   esac
   render_ssh_config
@@ -7071,32 +7284,80 @@ rotate_keys_chain() {
     32) die 3 '出口机实际协商 host-key 指纹漂移' ;;
     *) die 5 '主机/密钥绑定核验异常' ;;
   esac
-  # 上次中断留下的 node.txt 临时文件：与 rollback 侧同一口径，身份正常才删。
-  for leftover in "${CHAIN_STATE_DIR}"/.node.txt.rotate.*.tmp; do
+}
+
+# rotate-keys / add-device / remove-device 的共同流程。$1 = 远端操作（rotate / add:<名字> / remove:<名字>），
+# $2 = audit 目录前缀。
+exit_op_chain() {
+  local op prefix leftover old_uuid old_sha
+  op="$1"
+  prefix="$2"
+  exit_op_prepare
+  # 上次中断留下的本机临时文件：与 rollback 侧同一口径，身份正常才删。
+  for leftover in "${CHAIN_STATE_DIR}"/.node.txt.rotate.*.tmp "${CHAIN_STATE_DIR}"/devices/.*.tmp; do
     [[ -e "${leftover}" || -L "${leftover}" ]] || continue
-    require_secure_user_file "${leftover}" 600 || die 5 "rotate-keys 本机残留身份异常：${leftover}"
-    rm -f "${leftover}" || die 5 "rotate-keys 本机残留删除失败：${leftover}"
+    require_secure_user_file "${leftover}" 600 || die 5 "${COMMAND} 本机残留身份异常：${leftover}"
+    rm -f "${leftover}" || die 5 "${COMMAND} 本机残留删除失败：${leftover}"
   done
-  log_info "[rotate] start chain=${CHAIN_ID} deployment=${DEPLOYMENT_ID:0:12}"
-  old_uuid="${VLESS_UUID}"; old_pbk="${REALITY_PUBLIC_KEY}"; old_sid="${REALITY_SHORT_ID}"
-  rotate_exit_apply
-  if [[ "${ROTATE_RESULT}" == resumed-after-commit ]]; then
-    # state 已在上一次提交：出口机报告的参数必须与 state 一致，否则说明现场与记录对不上，不做清理。
-    [[ "${VLESS_UUID}" == "${old_uuid}" && "${REALITY_PUBLIC_KEY}" == "${old_pbk}" && "${REALITY_SHORT_ID}" == "${old_sid}" && "${ROTATE_NEW_EXIT_SHA256}" == "${EXIT_EXIT_SHA256}" ]] \
+  log_info "[exit-op] start chain=${CHAIN_ID} mode=${op} deployment=${DEPLOYMENT_ID:0:12}"
+  old_uuid="${VLESS_UUID}"
+  old_sha="${EXIT_EXIT_SHA256}"
+  exit_op_apply "${op}"
+  if [[ "${EXIT_OP_RESULT}" == resumed-after-commit ]]; then
+    # state 已在上一次提交：出口机报告的 default 与配置哈希必须与 state 一致，否则说明现场与记录对不上，不做清理。
+    [[ "${VLESS_UUID}" == "${old_uuid}" && "${ROTATE_NEW_EXIT_SHA256}" == "${old_sha}" ]] \
       || die 1 '出口机辅助文件中的参数与已提交的 state 不一致，拒绝清理；请人工核对出口机 /etc/ownexit-chain'
+    publish_exit_op_artifacts
+    [[ "${NODE_SHA256}" == "$(kv_get "${STATE_FILE}" NODE_SHA256)" ]] || die 1 '重建的 node.txt 与 state 记录不一致'
   else
-    publish_rotated_node
+    publish_exit_op_artifacts
     rotate_test_stop node
-    commit_rotate_state
+    commit_exit_op_state "${prefix}"
     rotate_test_stop state
   fi
   rotate_cleanup_remote
   rotate_test_stop cleanup
   ensure_local_assets_match_state
   full_verify
-  printf 'rotate=done chain=%s result=%s\n' "${CHAIN_ID}" "${ROTATE_RESULT}"
-  log_info "[rotate] 所有客户端需要重新导入 ${CHAIN_STATE_DIR}/client/node.txt（多链聚合需重新 render）"
-  log_info "rotate-keys 通过；chain=${CHAIN_ID} result=${ROTATE_RESULT} elapsed=$(elapsed_seconds)s"
+}
+
+rotate_keys_chain() {
+  exit_op_chain rotate rotated
+  printf 'rotate=done chain=%s result=%s\n' "${CHAIN_ID}" "${EXIT_OP_RESULT}"
+  log_info "[exit-op] 所有客户端需要重新导入 ${CHAIN_STATE_DIR}/client/node.txt 与 devices/ 下的设备节点（多链聚合需重新 render）"
+  log_info "rotate-keys 通过；chain=${CHAIN_ID} result=${EXIT_OP_RESULT} elapsed=$(elapsed_seconds)s"
+}
+
+device_op_chain() {
+  if [[ "${COMMAND}" == add-device ]]; then
+    exit_op_chain "add:${DEVICE_NAME}" devices
+    printf 'device=added chain=%s name=%s node=%s result=%s\n' "${CHAIN_ID}" "${DEVICE_NAME}" "${CHAIN_STATE_DIR}/devices/node-${DEVICE_NAME}.txt" "${EXIT_OP_RESULT}"
+    log_info "add-device 通过；chain=${CHAIN_ID} device=${DEVICE_NAME} elapsed=$(elapsed_seconds)s"
+  else
+    exit_op_chain "remove:${DEVICE_NAME}" devices
+    printf 'device=removed chain=%s name=%s result=%s\n' "${CHAIN_ID}" "${DEVICE_NAME}" "${EXIT_OP_RESULT}"
+    log_info "remove-device 通过；chain=${CHAIN_ID} device=${DEVICE_NAME} elapsed=$(elapsed_seconds)s"
+  fi
+}
+
+# 只读：读出口机生效配置 users 行里的设备名（不读 UUID），与本机节点文件对照。
+list_devices_chain() {
+  local names name node
+  exit_op_prepare
+  # name 字段只出现在 users 行；旧形态没有 name，grep 无匹配时远端用 || true 兜住，结果为空即只有 default。
+  names="$(ssh_exit "grep -o '\"name\": \"[^\"]*\"' /etc/ownexit-chain/${CHAIN_ID}.exit.json || true")" || die 3 '读取出口机配置失败'
+  names="$(printf '%s\n' "${names}" | sed -n 's/^"name": "\(.*\)"$/\1/p')"
+  [[ -n "${names}" ]] || names=default
+  while IFS= read -r name; do
+    [[ -n "${name}" ]] || continue
+    if [[ "${name}" == default ]]; then
+      node="${CHAIN_STATE_DIR}/client/node.txt"
+    else
+      node="${CHAIN_STATE_DIR}/devices/node-${name}.txt"
+    fi
+    [[ -f "${node}" ]] || node='missing（运行 rotate-keys 或任一设备命令可重建）'
+    printf 'device=%s node=%s\n' "${name}" "${node}"
+  done <<< "${names}"
 }
 
 status_chain() {
@@ -7211,7 +7472,7 @@ status_chain() {
     0) ;;
     21) printf 'status=unreachable role=relay reason=resource-probe next=retry-status\n'; return 5 ;;
     22) printf 'status=unreachable role=exit reason=resource-probe next=retry-status\n'; return 5 ;;
-    33) printf 'status=drifted reason=rotate-pending next=run-rotate-keys\n'; return 5 ;;
+    33) printf 'status=drifted reason=exit-op-pending next=rerun-interrupted-command\n'; return 5 ;;
     *) printf 'status=drifted reason=remote-resource-unit-process-or-listener next=run-verify\n'; return 5 ;;
   esac
   printf 'status=deployed health=healthy deployment=%s\n' "${DEPLOYMENT_ID:0:12}"
@@ -7528,7 +7789,7 @@ main() {
   trap 'cleanup_dispatcher 143 TERM' TERM
   init_operation_tmp
   case "${COMMAND}" in
-    status|conns|banlist) READONLY_SSH_RETRY=1 ;;
+    status|conns|banlist|list-devices) READONLY_SSH_RETRY=1 ;;
     verify) [[ "${WITH_FAIL_CLOSED}" == 1 ]] || READONLY_SSH_RETRY=1 ;;
   esac
 
@@ -7586,6 +7847,12 @@ main() {
       ;;
     rotate-keys)
       rotate_keys_chain
+      ;;
+    add-device|remove-device)
+      device_op_chain
+      ;;
+    list-devices)
+      list_devices_chain
       ;;
   esac
 }

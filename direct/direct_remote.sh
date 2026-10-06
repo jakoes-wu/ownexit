@@ -10,6 +10,9 @@
 #              进度写 txn.env、结果写 result.env；SSH 断开不影响它。
 #   - op.args 的可选键 ROTATE=1（OP=reparam）表示在服务器上重新生成 UUID / Reality 密钥 / short id
 #     （docs/feature/feature-formats-key-rotation.md §5.1.2）；没有这个键按 0 处理，旧版本留下的操作照常恢复。
+#   - op.args 的可选键 DEVICE_ADD=<名字> / DEVICE_REMOVE=<名字>（OP=reparam）新增或吊销一台设备；设备表在
+#     /etc/ownexit-direct/devices.env（每行 名字=UUID，不含 default），与 config.json 同一事务维护
+#     （docs/feature/feature-devices-sni-scan.md §5.1.1）。
 #   - 测试钩子只经环境变量传入（OWNEXIT_TEST_DIRECT_FAIL_AT / OWNEXIT_TEST_DIRECT_PAUSE_AT），不写进 op.args，
 #     所以服务器重启后的恢复执行不会再次触发。
 #
@@ -108,6 +111,9 @@ probe() {
     printf 'TXN_OP=%s\nTXN_STEP=%s\n' "$(txn_get OP)" "$(txn_get STEP)"
     # 本机据此判断“恢复完成的这次操作是否已经换过凭据”，避免用户带 --rotate-keys 重跑时再换一次。
     printf 'TXN_ROTATE=%s\n' "$( [[ -f "${ARGS}" && "$(arg ROTATE)" == 1 ]] && printf 1 || printf 0)"
+    # 恢复完成的若是同一个设备操作，本机跳过重复提交（否则会报 device-exists / device-missing）。
+    printf 'TXN_DEVICE_ADD=%s\nTXN_DEVICE_REMOVE=%s\n' "$(arg DEVICE_ADD)" "$(arg DEVICE_REMOVE)"
+    printf 'TXN_PARAMS=%s\n' "$( [[ -n "$(arg NEW_SNI)$(arg NEW_PORT)" || "$(arg ROTATE)" == 1 ]] && printf 1 || printf 0)"
   elif ownexit_installed && legacy_any && ! unit_active sing-box.service; then
     state=migrated_leftover
   elif ownexit_installed && ! legacy_any; then
@@ -131,6 +137,8 @@ probe() {
     [[ -e "${item}" || -L "${item}" ]] && seen="${seen}${seen:+,}${item}"
   done
   printf 'SEEN=%s\n' "${seen}"
+  # 只输出设备名，不输出 UUID（UUID 由本机读 devices.env 时取）。
+  printf 'DEVICES=%s\n' "$( [[ -f "${ETC}/devices.env" ]] && awk -F= 'NF {printf "%s%s", (n++ ? "," : ""), $1}' "${ETC}/devices.env")"
   printf 'SINGBOX_UNIT=%s\n' "$(unit_load_state sing-box.service)"
 }
 
@@ -238,8 +246,24 @@ binary_path() { printf '%s/bin/sing-box-%s' "${OPT}" "$(arg VERSION)"; }
 # ---------- 配置、客户端参数与单元（§5.1.1） ----------
 
 # 与链式出口机同构（chain/setup_chain.sh:3385-3412）；listen / short_id 由调用方给出（迁移时沿用旧值）。
+# 渲染 users 数组的内容（不含方括号，单行）：第一项是 default（client.env 里的 UUID），其后是设备文件的每一行。
+# 设备文件为空串或不存在表示没有额外设备。
+render_users() {
+  local uuid="$1" flow="$2" devices_file="$3" line name dev_uuid users
+  users="{ \"name\": \"default\", \"uuid\": \"${uuid}\", \"flow\": \"${flow}\" }"
+  if [[ -n "${devices_file}" && -f "${devices_file}" ]]; then
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      [[ -n "${line}" ]] || continue
+      name="${line%%=*}"; dev_uuid="${line#*=}"
+      users="${users}, { \"name\": \"${name}\", \"uuid\": \"${dev_uuid}\", \"flow\": \"${flow}\" }"
+    done < "${devices_file}"
+  fi
+  printf '%s' "${users}"
+}
+
 render_config() {
-  local out="$1" listen="$2" port="$3" uuid="$4" flow="$5" sni="$6" private_key="$7" short_id="$8"
+  local out="$1" listen="$2" port="$3" uuid="$4" flow="$5" sni="$6" private_key="$7" short_id="$8" devices_file="${9:-}" users
+  users="$(render_users "${uuid}" "${flow}" "${devices_file}")"
   cat > "${out}" <<EOF
 {
   "log": { "level": "info", "timestamp": true },
@@ -253,7 +277,7 @@ render_config() {
     "tag": "direct-in",
     "listen": "${listen}",
     "listen_port": ${port},
-    "users": [{ "uuid": "${uuid}", "flow": "${flow}" }],
+    "users": [${users}],
     "tls": {
       "enabled": true,
       "server_name": "${sni}",
@@ -385,7 +409,7 @@ op_fresh() {
       [[ "${private_key}" =~ ^[A-Za-z0-9_-]+$ && "${public_key}" =~ ^[A-Za-z0-9_-]+$ ]] || { CAUSE=keypair; false; }
       [[ "${uuid}" =~ ^[0-9a-f-]{36}$ && "${short_id}" =~ ^[0-9a-f]{16}$ ]] || { CAUSE=uuid; false; }
       sni="$(arg SNI)"
-      render_config "${ETC}/config.json" 0.0.0.0 "${port}" "${uuid}" xtls-rprx-vision "${sni}" "${private_key}" "${short_id}"
+      render_config "${ETC}/config.json" 0.0.0.0 "${port}" "${uuid}" xtls-rprx-vision "${sni}" "${private_key}" "${short_id}" ''
       render_client_env "${ETC}/client.env" "${port}" "${uuid}" "${public_key}" "${short_id}" "${sni}" xtls-rprx-vision 0.0.0.0 fresh
     fi
     check_config "${ETC}/config.json"
@@ -420,15 +444,60 @@ op_repair() {
 
 # ---------- OP=reparam（§5.1.5） ----------
 
+# 由现有设备表与 op.args 生成 devices.env.new（设备新增 / 吊销 / 轮换都在这里），线上文件不动。
+# 计数与过滤用 awk：grep 无匹配返回 1，会在 set -e 下误触发 ERR 撤销。
+build_devices_new() {
+  local cur="${ETC}/devices.env" out="${ETC}/devices.env.new" add del bin count tmp name
+  add="$(arg DEVICE_ADD)"; del="$(arg DEVICE_REMOVE)"
+  : > "${out}"
+  chmod 600 "${out}"
+  [[ ! -f "${cur}" ]] || awk 'NF' "${cur}" > "${out}"
+  if [[ -n "${add}" ]]; then
+    [[ "${add}" =~ ^[a-z0-9][a-z0-9-]{0,31}$ && "${add}" != default ]] || { CAUSE=device-name; false; }
+    [[ "$(awk -F= -v n="${add}" '$1 == n {c++} END {print c + 0}' "${out}")" == 0 ]] || { CAUSE=device-exists; false; }
+    count="$(awk 'NF {c++} END {print c + 0}' "${out}")"
+    (( count < 31 )) || { CAUSE=device-limit; false; }
+    bin="$(binary_path)"
+    printf '%s=%s\n' "${add}" "$("${bin}" generate uuid)" >> "${out}"
+    log "设备：新增 ${add}"
+  fi
+  if [[ -n "${del}" ]]; then
+    [[ "$(awk -F= -v n="${del}" '$1 == n {c++} END {print c + 0}' "${out}")" != 0 ]] || { CAUSE=device-missing; false; }
+    tmp="${out}.tmp"
+    awk -F= -v n="${del}" '$1 != n' "${out}" > "${tmp}"
+    mv -f "${tmp}" "${out}"
+    log "设备：吊销 ${del}"
+  fi
+  if [[ "$(arg ROTATE)" == 1 ]]; then
+    # 轮换时每台设备都换新 UUID（名字不变），被泄露的旧 UUID 一并失效。
+    bin="$(binary_path)"
+    tmp="${out}.tmp"
+    : > "${tmp}"
+    while IFS= read -r name || [[ -n "${name}" ]]; do
+      [[ -n "${name}" ]] || continue
+      printf '%s=%s\n' "${name%%=*}" "$("${bin}" generate uuid)" >> "${tmp}"
+    done < "${out}"
+    mv -f "${tmp}" "${out}"
+  fi
+  chown root:root "${out}"
+  chmod 600 "${out}"
+}
+
 reparam_rollback() {
-  local bak_config bak_client port
+  local bak_config bak_client bak_devices port
   # 经 enter_step 写入 STEP，测试钩子 PAUSE_AT=ROLLBACK 才能在回滚途中打断（验证回滚中断后的恢复）。
   enter_step ROLLBACK
   trap 'rollback_failed' ERR
-  bak_config="$(txn_get BACKUP_CONFIG)"; bak_client="$(txn_get BACKUP_CLIENT)"
+  bak_config="$(txn_get BACKUP_CONFIG)"; bak_client="$(txn_get BACKUP_CLIENT)"; bak_devices="$(txn_get BACKUP_DEVICES)"
   [[ -f "${bak_config}" ]] && cp -f "${bak_config}" "${ETC}/config.json"
   [[ -f "${bak_client}" ]] && cp -f "${bak_client}" "${ETC}/client.env"
-  rm -f "${ETC}/config.json.new" "${ETC}/client.env.new"
+  # BACKUP_DEVICES：备份路径 = 恢复；none = 操作前没有设备表，删除；空 = v0.6.0 及更早留下的操作，不碰设备表。
+  if [[ "${bak_devices}" == none ]]; then
+    rm -f "${ETC}/devices.env"
+  elif [[ -n "${bak_devices}" && -f "${bak_devices}" ]]; then
+    cp -f "${bak_devices}" "${ETC}/devices.env"
+  fi
+  rm -f "${ETC}/config.json.new" "${ETC}/client.env.new" "${ETC}/devices.env.new"
   port="$(kv_file_get "${ETC}/client.env" PORT)"
   systemctl restart "${UNIT_NAME}" >/dev/null 2>&1 || true
   if wait_active_and_port "${UNIT_NAME}" "${port}" 10; then
@@ -472,7 +541,8 @@ op_reparam() {
       short_id="$(kv_file_get "${ETC}/client.env" SHORT_ID)"
       private_key="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["inbounds"][0]["tls"]["reality"]["private_key"])' "${ETC}/config.json")"
     fi
-    render_config "${ETC}/config.json.new" "${listen}" "${new_port}" "${uuid}" "${flow}" "${new_sni}" "${private_key}" "${short_id}"
+    build_devices_new
+    render_config "${ETC}/config.json.new" "${listen}" "${new_port}" "${uuid}" "${flow}" "${new_sni}" "${private_key}" "${short_id}" "${ETC}/devices.env.new"
     render_client_env "${ETC}/client.env.new" "${new_port}" "${uuid}" "${public_key}" "${short_id}" "${new_sni}" "${flow}" "${listen}" "$(kv_file_get "${ETC}/client.env" SOURCE)"
     check_config "${ETC}/config.json.new"
     STEP=BACKUP
@@ -481,6 +551,13 @@ op_reparam() {
     enter_step BACKUP
     if [[ -z "$(txn_get BACKUP_CONFIG)" || ! -f "$(txn_get BACKUP_CONFIG)" ]]; then
       ts="$(date '+%Y%m%d_%H%M%S')"
+      # BACKUP_DEVICES 必须先于 BACKUP_CONFIG 写：BACKUP_CONFIG 是“备份已完成”的标记，反过来写时中断会漏掉设备备份。
+      if [[ -f "${ETC}/devices.env" ]]; then
+        cp -p "${ETC}/devices.env" "${ETC}/devices.env.bak.${ts}"
+        txn_set BACKUP_DEVICES "${ETC}/devices.env.bak.${ts}"
+      else
+        txn_set BACKUP_DEVICES none
+      fi
       cp -p "${ETC}/config.json" "${ETC}/config.json.bak.${ts}"
       cp -p "${ETC}/client.env" "${ETC}/client.env.bak.${ts}"
       txn_set BACKUP_CONFIG "${ETC}/config.json.bak.${ts}"
@@ -492,6 +569,14 @@ op_reparam() {
     enter_step REPLACE
     [[ ! -f "${ETC}/config.json.new" ]] || mv -f "${ETC}/config.json.new" "${ETC}/config.json"
     [[ ! -f "${ETC}/client.env.new" ]] || mv -f "${ETC}/client.env.new" "${ETC}/client.env"
+    # 设备表为空（吊销了最后一台）时删除文件，不留空文件。
+    if [[ -f "${ETC}/devices.env.new" ]]; then
+      if [[ -s "${ETC}/devices.env.new" ]]; then
+        mv -f "${ETC}/devices.env.new" "${ETC}/devices.env"
+      else
+        rm -f "${ETC}/devices.env.new" "${ETC}/devices.env"
+      fi
+    fi
     STEP=RESTART
   fi
   if [[ "${STEP}" == RESTART ]]; then
@@ -656,7 +741,7 @@ op_migrate() {
     params="$(legacy_params)" || { CAUSE='legacy-changed'; false; }
     get() { printf '%s\n' "${params}" | awk -F= -v k="$1" '$1==k{sub(/^[^=]*=/,""); print}'; }
     install -d -m 700 "${ETC}"
-    render_config "${ETC}/config.json" "$(get LISTEN)" "$(get PORT)" "$(get UUID)" xtls-rprx-vision "$(get SNI)" "$(get PRIVATE_KEY)" "$(get SHORT_ID)"
+    render_config "${ETC}/config.json" "$(get LISTEN)" "$(get PORT)" "$(get UUID)" xtls-rprx-vision "$(get SNI)" "$(get PRIVATE_KEY)" "$(get SHORT_ID)" ''
     render_client_env "${ETC}/client.env" "$(get PORT)" "$(get UUID)" "$(get PUBLIC_KEY)" "$(get SHORT_ID)" "$(get SNI)" xtls-rprx-vision "$(get LISTEN)" migrated
     check_config "${ETC}/config.json"
     write_unit
@@ -744,7 +829,7 @@ on_err() {
       ;;
     reparam)
       if [[ "${STEP}" == WRITE ]]; then
-        rm -f "${ETC}/config.json.new" "${ETC}/client.env.new"
+        rm -f "${ETC}/config.json.new" "${ETC}/client.env.new" "${ETC}/devices.env.new" "${ETC}/devices.env.new.tmp"
       else
         set -eE; reparam_rollback
       fi

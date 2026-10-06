@@ -120,7 +120,7 @@ When run from a clone, the chain scripts additionally refuse configuration files
    ownexit subctl stop
    ```
 
-The VPS is remembered, so later runs need no arguments: `ownexit direct` to redeploy, `ownexit subctl status|start|stop|log|qr`, `ownexit direct --uninstall` to remove it. `ownexit direct --rotate-keys` replaces the UUID, Reality key pair and short id on the server (every device must re-import the subscription).
+The VPS is remembered, so later runs need no arguments: `ownexit direct` to redeploy, `ownexit subctl status|start|stop|log|qr`, `ownexit direct --uninstall` to remove it. `ownexit direct --rotate-keys` replaces the UUIDs, Reality key pair and short id on the server (every device must re-import the subscription). `ownexit direct --add-device phone` gives one device its own UUID and subscription URLs; `--remove-device phone` revokes it without touching the others; `ownexit subctl devices` lists them.
 
 **Set up with the 233boy script by an earlier version?** Run `ownexit direct --migrate` once. It keeps the existing UUID, keys, port and SNI, switches to ownexit's own service and removes the 233boy files (backed up first) — your clients and subscription URLs keep working.
 
@@ -146,7 +146,7 @@ Step-by-step guide: [docs/manual/direct.md](https://github.com/jakoes-wu/ownexit
 
 3. **Import** the node from `~/.local/state/ownexit/chains/main/client/node.txt`, or run `ownexit multi --chains main render` for QR codes and a Clash snippet.
 
-Day to day: `ownexit chain --id main status | verify | conns | rollback`. `ownexit chain --id main rotate-keys` replaces the exit's UUID, Reality key pair and short id in place (relay, ports and deployment stay; re-import `node.txt` afterwards). If the relay also runs a direct exit and you migrate, reconfigure or uninstall that direct exit, run `ownexit chain --id main rebaseline` afterwards so the chain re-records what it protects (the direct script reminds you). Relay blocked? Deploy a second relay with `init --id backup …` and combine both with `multi_chain_client.sh` — clients switch automatically. Full reference: [chain/README.md](https://github.com/jakoes-wu/ownexit/blob/main/chain/README.md); guide: [docs/manual/chain.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/manual/chain.md) (both in Chinese).
+Day to day: `ownexit chain --id main status | verify | conns | rollback`. `ownexit chain --id main rotate-keys` replaces the exit's UUIDs, Reality key pair and short id in place (relay, ports and deployment stay; re-import afterwards). `add-device <name>` / `remove-device <name>` / `list-devices` manage per-device UUIDs. If the relay also runs a direct exit and you migrate, reconfigure or uninstall that direct exit, run `ownexit chain --id main rebaseline` afterwards so the chain re-records what it protects (the direct script reminds you). Relay blocked? Deploy a second relay with `init --id backup …` and combine both with `multi_chain_client.sh` — clients switch automatically. Full reference: [chain/README.md](https://github.com/jakoes-wu/ownexit/blob/main/chain/README.md); guide: [docs/manual/chain.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/manual/chain.md) (both in Chinese).
 
 ## Supported platforms
 
@@ -171,7 +171,7 @@ See [SECURITY.md](https://github.com/jakoes-wu/ownexit/blob/main/SECURITY.md) fo
 
 ## FAQ
 
-**Something isn't working. Where do I start?** Run `ownexit doctor`. It checks this computer (required commands, proxy variables, directory permissions, whether a proxy TUN captures the route to your servers), every remembered direct VPS and every chain, and prints a fix for each problem. `ownexit doctor --ip-check` also tests the exit IP from the server itself: owner and type, ChatGPT / Claude / Gemini, Netflix / YouTube Premium / Disney+, and common sites (indicative only). Chain checks run `status`, which holds that chain's lock for a few seconds.
+**Something isn't working. Where do I start?** Run `ownexit doctor`. It checks this computer (required commands, proxy variables, directory permissions, whether a proxy TUN captures the route to your servers), every remembered direct VPS and every chain, and prints a fix for each problem. `ownexit doctor --scan-sni` tests which Reality camouflage domains actually work from your exit server (a real Reality handshake on the server's loopback, not just a TLS 1.3 check). `ownexit doctor --ip-check` also tests the exit IP from the server itself: owner and type, ChatGPT / Claude / Gemini, Netflix / YouTube Premium / Disney+, and common sites (indicative only). Chain checks run `status`, which holds that chain's lock for a few seconds.
 
 **Can I change the SSH port or user?** Direct: `--port`, `--user`. Relay: `--relay-port`, `--exit-port`; the relay setup requires root.
 
