@@ -105,12 +105,13 @@ When run from a clone, the chain scripts additionally refuse configuration files
 
    It sets up key login, checks the system, enables BBR, has the server download a pinned official sing-box release and check its SHA-256, generates the Reality keys on the server, renders subscriptions, uploads them and verifies every layer. No questions asked. Pass `--sni <domain>` or `--proxy-port <port>` to choose them yourself; run it again with new values to change them later (the UUID and keys stay the same).
 
-2. **Import on your devices** — the script prints three URLs:
+2. **Import on your devices** — the script prints four URLs:
 
    | URL | For |
    | ---- | ---- |
    | `…/clash.yaml` | Clash Verge, mihomo, Clash Meta for Android |
-   | `…/shadowrocket.txt` | Shadowrocket on iPhone |
+   | `…/shadowrocket.txt` | Shadowrocket on iPhone, v2rayN / v2rayNG |
+   | `…/sing-box.json` | sing-box apps (SFI / SFA / SFM, 1.12 or later) |
    | `…/node.txt` | the plain `vless://` link, for anything else |
 
 3. **Check and close up** — open `https://ipinfo.io` on a device: it should show your VPS's IP. Then turn the subscription endpoint off until you need it again:
@@ -119,7 +120,7 @@ When run from a clone, the chain scripts additionally refuse configuration files
    ownexit subctl stop
    ```
 
-The VPS is remembered, so later runs need no arguments: `ownexit direct` to redeploy, `ownexit subctl status|start|stop|log|qr`, `ownexit direct --uninstall` to remove it.
+The VPS is remembered, so later runs need no arguments: `ownexit direct` to redeploy, `ownexit subctl status|start|stop|log|qr`, `ownexit direct --uninstall` to remove it. `ownexit direct --rotate-keys` replaces the UUID, Reality key pair and short id on the server (every device must re-import the subscription).
 
 **Set up with the 233boy script by an earlier version?** Run `ownexit direct --migrate` once. It keeps the existing UUID, keys, port and SNI, switches to ownexit's own service and removes the 233boy files (backed up first) — your clients and subscription URLs keep working.
 
@@ -145,7 +146,7 @@ Step-by-step guide: [docs/manual/direct.md](https://github.com/jakoes-wu/ownexit
 
 3. **Import** the node from `~/.local/state/ownexit/chains/main/client/node.txt`, or run `ownexit multi --chains main render` for QR codes and a Clash snippet.
 
-Day to day: `ownexit chain --id main status | verify | conns | rollback`. If the relay also runs a direct exit and you migrate, reconfigure or uninstall that direct exit, run `ownexit chain --id main rebaseline` afterwards so the chain re-records what it protects (the direct script reminds you). Relay blocked? Deploy a second relay with `init --id backup …` and combine both with `multi_chain_client.sh` — clients switch automatically. Full reference: [chain/README.md](https://github.com/jakoes-wu/ownexit/blob/main/chain/README.md); guide: [docs/manual/chain.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/manual/chain.md) (both in Chinese).
+Day to day: `ownexit chain --id main status | verify | conns | rollback`. `ownexit chain --id main rotate-keys` replaces the exit's UUID, Reality key pair and short id in place (relay, ports and deployment stay; re-import `node.txt` afterwards). If the relay also runs a direct exit and you migrate, reconfigure or uninstall that direct exit, run `ownexit chain --id main rebaseline` afterwards so the chain re-records what it protects (the direct script reminds you). Relay blocked? Deploy a second relay with `init --id backup …` and combine both with `multi_chain_client.sh` — clients switch automatically. Full reference: [chain/README.md](https://github.com/jakoes-wu/ownexit/blob/main/chain/README.md); guide: [docs/manual/chain.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/manual/chain.md) (both in Chinese).
 
 ## Supported platforms
 
@@ -154,7 +155,7 @@ Day to day: `ownexit chain --id main status | verify | conns | rollback`. If the
 | Control machine | macOS (tested); Linux (tested on Ubuntu 22.04); Windows not supported — try WSL at your own risk | macOS on Apple silicon (tested), macOS on Intel (untested), Linux amd64 (tested on Ubuntu 20.04), Linux arm64 and WSL (untested) |
 | Server OS | Debian, Ubuntu (systemd 240 or later) | Linux with systemd; the relay needs `systemd-socket-proxyd`; no nftables tables other than ownexit's own, UFW inactive |
 | Server CPU | amd64 (tested on cloud servers) or arm64 (tested on Ubuntu 22.04 arm64 virtual machines) | amd64 (tested on cloud servers) or arm64 (tested on Ubuntu 22.04 arm64 virtual machines); relay and exit must match |
-| Clients | Clash Verge, mihomo, Shadowrocket tested; any VLESS-Reality client via `vless://` | same |
+| Clients | Clash Verge, mihomo, Shadowrocket tested; sing-box and v2rayN subscriptions provided; any VLESS-Reality client via `vless://` | Clash Verge, mihomo, Shadowrocket tested; any VLESS-Reality client via `vless://` |
 
 If your computer runs a proxy in TUN mode (Clash and similar), SSH to the servers may be cut off halfway through a deploy. Turn TUN off, or route the relay and exit IPs directly, while running chain commands.
 
@@ -162,7 +163,7 @@ If your computer runs a proxy in TUN mode (Clash and similar), SSH to the server
 
 - No real IP, password or key ever goes into this repository. There is no "edit the IP at the top of the script" step and no `--password` option. Passwords are typed interactively (or passed via `OWNEXIT_SSH_PASSWORD` for non-interactive use), submitted once per try, and never written to disk.
 - A wrong password is retried at most 3 times, and each try is submitted to the server only once, so you are unlikely to trip fail2ban. Failures end with `reason=bad-password`, `reason=password-disabled` or `reason=unreachable`.
-- The direct subscription endpoint is plain HTTP protected by a random path. Keep it stopped (`ownexit subctl stop`) except while importing, and use `ownexit direct --rotate-token` if a URL leaks.
+- The direct subscription endpoint is plain HTTP protected by a random path. Keep it stopped (`ownexit subctl stop`) except while importing, and use `ownexit direct --rotate-token` if a URL leaks, `--rotate-keys` if the node credentials leak.
 - The relay only runs `systemd-socket-proxyd`; the Reality private key lives only on the exit server, in a mode-600 file. By default the exit's Reality port only accepts connections from the relay (an nftables table that starts and stops with the exit service).
 - Both setups download a pinned official sing-box release on each server and check the SHA-256 of both the archive and the binary; if a server cannot reach GitHub, your computer downloads and uploads it instead. Reality private keys are generated on the server and never leave it.
 

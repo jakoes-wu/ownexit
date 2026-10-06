@@ -96,6 +96,9 @@ chain/setup_chain.sh --id main rehost-exit
 
 # 中转机上的直连迁移 / 改参数 / 新装 / 卸载之后，重新登记要保护的既有 sing-box
 chain/setup_chain.sh --id main rebaseline
+
+# 更换出口机的 UUID / Reality 密钥 / short id（所有客户端需重新导入 node.txt）
+chain/setup_chain.sh --id main rotate-keys
 ```
 
 `--id <名字>` 是 `--config ~/.config/ownexit/chains/<名字>.env` 的简写，两者二选一。
@@ -210,6 +213,18 @@ chain/setup_chain.sh --id main rebaseline
 ```
 
 它在中转机上重新判定 `RELAY_COHOSTS_SINGBOX`（`yes` / `ownexit-direct` / `no`），重新采集基线，必要时只改写配置里这一行并同步两端 owner 文件，最后跑一遍完整 `verify`。凭据、端口、`client/node.txt` 都不变，中转服务不重启。现场与记录一致时输出 `rebaseline=noop`。中途断开时重跑同一条命令即可收敛。旧 state、旧基线和旧配置归档在 `audit/rebaselined.<部署ID>.<操作ID>/`。退出码：0 成功或 noop；2 配置里除 `RELAY_COHOSTS_SINGBOX` 外还有键被改动；3 中转不可达或中转机上的 sing-box 状态不完整；5 锁、状态损坏或有未完成事务；1 远端 owner 迁移或本地提交失败（远端码 180 owner 身份异常、181 owner 与 state 不符、182 owner 中的摘要不在合法取值内）。
+
+## 更换节点凭据（`rotate-keys`）
+
+```bash
+chain/setup_chain.sh --id main rotate-keys
+```
+
+在出口机上重新生成 UUID、Reality 密钥对和 short id，替换出口机配置里对应的三行并重启出口机的 sing-box（在途连接断开 1-3 秒），然后更新本机 `client/node.txt` 与 state，最后跑一遍完整 `verify`。中转机、两端端口、部署 ID、owner 和配置都不变；私钥只在出口机上生成，不经过本机。换完后所有客户端都要重新导入 `node.txt`，用了 `multi_chain_client.sh` 的要重新 `render`。
+
+这个命令不走事务。中间状态放在出口机 `/etc/ownexit-chain/<id>.rotate.json`（待切换配置）、`<id>.rotate.env`（新参数，无私钥）、`<id>.rotate.bak.json`（旧配置）三个辅助文件里，本地 state 最后提交。中途断开时重跑同一条命令即可：切换前中断会复用已生成的配置（`result=resumed`），切换后未提交会重启并补提交（`result=already`），已提交只差清理时只清理、不再换一次（`result=resumed-after-commit`）。新配置起不来时自动放回旧配置。辅助文件存在期间 `status` 输出 `status=drifted reason=rotate-pending next=run-rotate-keys`，`verify` / `rollback` 拒绝执行。旧 state 归档在 `audit/rotated.<部署ID>.<操作ID>/state.env`。
+
+退出码：0 成功；2 配置与 state 不一致（rotate-keys 要求配置未改动）；3 出口机不可达或主机指纹不符；5 锁、状态损坏、有未完成事务或收尾 verify 失败；1 远端轮换或本地提交失败（远端码 191 配置文件身份异常、192 配置不是 deploy 生成的形态、193 配置被外部改动、194 新配置校验失败、195 新配置起不来且已恢复旧配置、196 恢复后仍起不来、197 清理时线上不是新配置、198 出口机 sing-box 二进制缺失）。
 
 ## 出口机换 IP（同一台机器）
 

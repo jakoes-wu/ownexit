@@ -8,6 +8,8 @@
 #       probe：经 SSH 前台执行，只读，输出 KEY=VALUE（STATE、ARCH 等），不改服务器。
 #       run  ：由 systemd-run 临时单元 ownexit-direct-op 执行，参数取自 /var/lib/ownexit-direct/op.args，
 #              进度写 txn.env、结果写 result.env；SSH 断开不影响它。
+#   - op.args 的可选键 ROTATE=1（OP=reparam）表示在服务器上重新生成 UUID / Reality 密钥 / short id
+#     （docs/feature/feature-formats-key-rotation.md §5.1.2）；没有这个键按 0 处理，旧版本留下的操作照常恢复。
 #   - 测试钩子只经环境变量传入（OWNEXIT_TEST_DIRECT_FAIL_AT / OWNEXIT_TEST_DIRECT_PAUSE_AT），不写进 op.args，
 #     所以服务器重启后的恢复执行不会再次触发。
 #
@@ -104,6 +106,8 @@ probe() {
   if [[ -f "${TXN}" ]]; then
     state=in_progress
     printf 'TXN_OP=%s\nTXN_STEP=%s\n' "$(txn_get OP)" "$(txn_get STEP)"
+    # 本机据此判断“恢复完成的这次操作是否已经换过凭据”，避免用户带 --rotate-keys 重跑时再换一次。
+    printf 'TXN_ROTATE=%s\n' "$( [[ -f "${ARGS}" && "$(arg ROTATE)" == 1 ]] && printf 1 || printf 0)"
   elif ownexit_installed && legacy_any && ! unit_active sing-box.service; then
     state=migrated_leftover
   elif ownexit_installed && ! legacy_any; then
@@ -434,7 +438,7 @@ reparam_rollback() {
 }
 
 op_reparam() {
-  local new_sni new_port uuid public_key short_id flow listen private_key ts
+  local new_sni new_port uuid public_key short_id flow listen private_key ts bin keypair
   STEP="$(txn_get STEP)"
   [[ -n "${STEP}" ]] || STEP=WRITE
   case "${STEP}" in
@@ -445,14 +449,29 @@ op_reparam() {
   if [[ "${STEP}" == WRITE ]]; then
     enter_step WRITE
     new_sni="$(arg NEW_SNI)"; new_port="$(arg NEW_PORT)"
-    uuid="$(kv_file_get "${ETC}/client.env" UUID)"
-    public_key="$(kv_file_get "${ETC}/client.env" PUBLIC_KEY)"
-    short_id="$(kv_file_get "${ETC}/client.env" SHORT_ID)"
     flow="$(kv_file_get "${ETC}/client.env" FLOW)"
     listen="$(kv_file_get "${ETC}/client.env" LISTEN)"
     [[ -n "${new_sni}" ]] || new_sni="$(kv_file_get "${ETC}/client.env" SNI)"
     [[ -n "${new_port}" ]] || new_port="$(kv_file_get "${ETC}/client.env" PORT)"
-    private_key="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["inbounds"][0]["tls"]["reality"]["private_key"])' "${ETC}/config.json")"
+    if [[ "$(arg ROTATE)" == 1 ]]; then
+      # 轮换凭据：UUID、密钥对、short id 全部现场重新生成，旧客户端随之失效。
+      # 此时线上文件还没动，WRITE 步重入时重新生成只会覆盖 .new；进入 BACKUP 之后只用已写好的 .new，不再生成。
+      bin="$(binary_path)"
+      [[ -x "${bin}" ]] || { CAUSE=binary; false; }
+      keypair="$("${bin}" generate reality-keypair)"
+      private_key="$(printf '%s\n' "${keypair}" | awk -F': ' '$1 == "PrivateKey" {print $2}')"
+      public_key="$(printf '%s\n' "${keypair}" | awk -F': ' '$1 == "PublicKey" {print $2}')"
+      uuid="$("${bin}" generate uuid)"
+      short_id="$("${bin}" generate rand --hex 8)"
+      [[ "${private_key}" =~ ^[A-Za-z0-9_-]+$ && "${public_key}" =~ ^[A-Za-z0-9_-]+$ ]] || { CAUSE=keypair; false; }
+      [[ "${uuid}" =~ ^[0-9a-f-]{36}$ && "${short_id}" =~ ^[0-9a-f]{16}$ ]] || { CAUSE=uuid; false; }
+      log "轮换凭据：已生成新的 UUID / Reality 密钥 / short id"
+    else
+      uuid="$(kv_file_get "${ETC}/client.env" UUID)"
+      public_key="$(kv_file_get "${ETC}/client.env" PUBLIC_KEY)"
+      short_id="$(kv_file_get "${ETC}/client.env" SHORT_ID)"
+      private_key="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["inbounds"][0]["tls"]["reality"]["private_key"])' "${ETC}/config.json")"
+    fi
     render_config "${ETC}/config.json.new" "${listen}" "${new_port}" "${uuid}" "${flow}" "${new_sni}" "${private_key}" "${short_id}"
     render_client_env "${ETC}/client.env.new" "${new_port}" "${uuid}" "${public_key}" "${short_id}" "${new_sni}" "${flow}" "${listen}" "$(kv_file_get "${ETC}/client.env" SOURCE)"
     check_config "${ETC}/config.json.new"

@@ -54,14 +54,15 @@ SSH 端口不是 22 时加 `--port 2222`。本手册下文的命令按 git clone
 2. **检查系统并记住这台 VPS**：之后再运行 `setup_direct.sh` 或 `subctl` 不用再带 `--host`。
 3. **开启 BBR**，然后**安装 sing-box**：VPS 自己从 GitHub 下载固定版本的 sing-box 官方包并校验 SHA-256（VPS 访问不了 GitHub 时由你的电脑下载后上传），在 VPS 上生成 Reality 密钥、UUID 和 short id，写好 `ownexit-direct` 服务并启动。全程不用回答问题。伪装域名默认 `www.amazon.com`、代理端口默认在 20000～59999 随机，想自己指定加 `--sni <域名>`、`--proxy-port <端口>`。
    这一步由 VPS 上的一个 systemd 临时任务执行：中途网络断开不影响它，VPS 断电重启后再运行一次本命令会从中断处接着做完。
-4. **生成订阅并验证**：从 VPS 读回节点参数，在本地渲染三种订阅，上传到 VPS 并起一个只读订阅服务，然后逐项验证。本机装了 `qrencode` 时，最后还会在终端显示节点二维码。
+4. **生成订阅并验证**：从 VPS 读回节点参数，在本地渲染四种订阅，上传到 VPS 并起一个只读订阅服务，然后逐项验证。本机装了 `qrencode` 时，最后还会在终端显示节点二维码。
 
-结束时打印三条订阅链接：
+结束时打印四条订阅链接：
 
 | 链接 | 给谁用 |
 | ---- | ---- |
 | `.../clash.yaml` | Clash Verge、mihomo、Clash Meta for Android |
-| `.../shadowrocket.txt` | iPhone Shadowrocket |
+| `.../shadowrocket.txt` | iPhone Shadowrocket、v2rayN / v2rayNG（base64 节点列表） |
+| `.../sing-box.json` | sing-box 官方客户端（SFI / SFA / SFM，1.12 及以上） |
 | `.../node.txt` | 明文 `vless://` 节点链接，给其它客户端手工导入或备份 |
 
 ## 4. 导入客户端
@@ -75,7 +76,11 @@ SSH 端口不是 22 时加 `--port 2222`。本手册下文的命令按 git clone
 
 **iPhone Shadowrocket**：右上角 `+` → 类型选 Subscribe → 粘贴 Shadowrocket 订阅链接 → 保存并更新 → 选节点 → 连接，首次连接允许添加 VPN 配置。
 
-**安卓**：安装 Clash Meta for Android 或 sing-box 官方应用，新建配置时选“从 URL 导入”，粘贴 Clash 订阅链接；只支持节点链接的客户端就用 `node.txt` 里的 `vless://` 链接。
+**sing-box 官方客户端（iOS SFI / 安卓 SFA / macOS SFM，1.12 及以上）**：「配置」→ 新建 → 类型选「远程」→ 粘贴 sing-box 订阅链接 → 保存后启用。配置里带 tun 入站（图形客户端开 VPN 用）和 `127.0.0.1:7890` 的 mixed 入站；国内域名与国内 IP 目标直连，其余走出口，规则集经代理下载。
+
+**v2rayN（Windows）/ v2rayNG（安卓）**：「订阅分组」→ 添加 → 粘贴 Shadowrocket 那条订阅链接（同一份 base64 节点列表）→ 更新订阅 → 选节点。
+
+**安卓**：安装 Clash Meta for Android，新建配置时选“从 URL 导入”，粘贴 Clash 订阅链接；也可以用上面的 sing-box 或 v2rayNG。只支持节点链接的客户端就用 `node.txt` 里的 `vless://` 链接。
 
 **命令行 mihomo**：
 
@@ -112,12 +117,14 @@ curl -x http://127.0.0.1:7890 https://ipinfo.io   # 另开终端验证
 ./direct/subctl start       # 给新设备导入前临时打开，用完再 stop
 ./direct/subctl             # 免密登录这台 VPS
 ./direct/setup_direct.sh --rotate-token   # 怀疑订阅链接泄露时换一个新地址
+./direct/setup_direct.sh --rotate-keys    # 怀疑节点凭据泄露时换一套 UUID / Reality 密钥 / short id
 ./direct/setup_direct.sh --uninstall      # 卸载 VPS 上的代理服务和订阅服务
 ```
 
 - 订阅服务是明文 HTTP 的公网端口，平时保持关闭，只在导入时临时打开。
 - 换一台 VPS：对新机器运行 `setup_direct.sh --host <新IP>`，再到客户端更新订阅。记住了多台 VPS 时，`subctl` 和 `setup_direct.sh` 不带 `--host` 会列出可选目标并退出。
-- 改伪装域名或代理端口：`setup_direct.sh --sni <域名>` 或 `--proxy-port <端口>`，UUID 和密钥不变，改完客户端要重新拉一次订阅。正在通过这条隧道上网时改握手参数会把自己锁在外面：先切到别的网络，再改。
+- 改伪装域名或代理端口：`setup_direct.sh --sni <域名>` 或 `--proxy-port <端口>`，UUID 和密钥不变，改完客户端要重新拉一次订阅。不是每个 HTTPS 站点都能当伪装域名：实测 `www.amazon.com`（默认）、`www.apple.com` 可用，`www.microsoft.com` 不可用（客户端握手被服务器判为无效）；换域名后先用一台设备确认能连上，连不上就换回。正在通过这条隧道上网时改握手参数会把自己锁在外面：先切到别的网络，再改。
+- 换凭据：`setup_direct.sh --rotate-keys` 在 VPS 上重新生成 UUID、Reality 密钥对和 short id，端口、SNI、订阅地址不变；新配置起不来会自动恢复原配置。旧节点立刻失效，所有设备都要重新拉订阅。可以和 `--rotate-token` 一起用，同时换掉订阅地址；不能和 `--migrate` / `--uninstall` 同用（233boy 旧版先迁移再换）。中途断开时重跑同一条命令即可，已经换过的不会再换一次。
 - 卸载：`setup_direct.sh --uninstall` 删除 VPS 上的 `ownexit-direct` 服务、订阅服务和相关目录；保留 SSH 免密、记住的目标、BBR 设置和迁移备份。
 - 这台 VPS 同时是链式部署的中转机时，直连新装、迁移、改参数、卸载之后，按脚本提示运行 `ownexit chain --id <名字> rebaseline`。
 - 重要文件都在本机仓库外：密钥在 `~/.ssh/ownexit/`，目标配置在 `~/.config/ownexit/direct/`，订阅 TOKEN 在 `~/.local/state/ownexit/direct/`。

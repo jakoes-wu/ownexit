@@ -62,10 +62,13 @@ chain/setup_chain.sh --id main status     # 健康状态
 chain/setup_chain.sh --id main verify     # 完整验证出口
 chain/setup_chain.sh --id main conns      # 中转机上有哪些来源 IP 在连
 chain/setup_chain.sh --id main ban 203.0.113.7    # 拉黑陌生来源
+chain/setup_chain.sh --id main rotate-keys   # 更换出口机的 UUID / Reality 密钥 / short id
 chain/setup_chain.sh --id main rollback   # 拆除这条链，两台机器恢复到部署前
 ```
 
 中转端口没有鉴权，`conns` 里出现不认识的来源 IP 时先 `ban`。
+
+`rotate-keys` 只换出口机上的凭据并重启出口机的 sing-box（中断 1-3 秒），中转、端口和部署都不变；换完所有客户端要重新导入 `node.txt`，用了多链聚合的要重新 `render`。中途断开时重跑同一条命令收敛。
 
 ## 6. 中转机被墙了怎么办
 
@@ -95,4 +98,5 @@ chain/multi_chain_client.sh --chains main,backup render
 | 操作中途 SSH 断开、`verify` 报 drift | 本机 TUN 可能接管了到中转机的 SSH；关闭 TUN（或让中转机、出口机的 IP 走直连）后重跑 |
 | 报“配置目录身份或权限不安全” | 配置 / 状态目录的某一级上级目录可被同组或其他用户写入（如权限 775）；换到权限为 755 / 700 的目录下 |
 | 报“中转机与出口机的 CPU 架构必须相同” | 两台机器一台 amd64、一台 arm64，暂不支持 |
+| `status` 输出 `reason=rotate-pending`，或 `verify` / `rollback` 报“有未完成的 rotate-keys” | 上一次 `rotate-keys` 没跑完，出口机上留着辅助文件；重跑 `chain/setup_chain.sh --id <名字> rotate-keys` |
 | `verify` / `status` / `rollback` 报“角色声明预检失败”或“既有 sing-box 零回归基线发生变化”，且中转机上也跑着直连 | 直连刚迁移、改参数、新装或卸载过，运行 `chain/setup_chain.sh --id <名字> rebaseline` 重新登记（见 [`chain/README.md`](../../chain/README.md#中转机既有-sing-box-重新登记rebaseline)） |
