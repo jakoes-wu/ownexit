@@ -22,6 +22,12 @@ jobs:
           shellcheck -S warning direct/*.sh direct/subctl chain/*.sh scripts/*.sh
       - name: Privacy scan
         run: scripts/check_public.sh
+      - name: sing-box constants
+        # 直连与链式各写了一份 sing-box 版本与官方包摘要，必须逐字一致，防止升级时只改一边。
+        run: |
+          pattern='^readonly (SING_BOX_VERSION|ARCHIVE_SHA256_LINUX_(AMD64|ARM64)|BINARY_SHA256_LINUX_(AMD64|ARM64))='
+          diff <(grep -E "$pattern" chain/setup_chain.sh | sort) <(grep -E "$pattern" direct/setup_direct.sh | sort)
+          [ "$(grep -cE "$pattern" direct/setup_direct.sh)" -eq 5 ]
       - name: README links
         # README.md 同时是 PyPI 项目页的正文，PyPI 上相对链接会 404，所以只允许完整 URL 和页内锚点。
         run: |
@@ -31,7 +37,7 @@ jobs:
       - name: Help output
         # 每个入口的 --help 都要退出 0，未知参数都要非 0 退出。
         run: |
-          for f in direct/setup_direct.sh direct/connect_to.sh direct/sync_to_vps.sh direct/subctl \
+          for f in direct/setup_direct.sh direct/connect_to.sh direct/sync_to_vps.sh direct/subctl direct/direct_remote.sh \
                    chain/setup_chain.sh chain/multi_chain_client.sh scripts/check_public.sh; do
             "$f" --help > /dev/null
             if "$f" --no-such-option < /dev/null > /dev/null 2>&1; then echo "$f accepted an unknown option"; exit 1; fi

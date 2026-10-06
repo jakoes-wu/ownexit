@@ -4,6 +4,22 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-05
+
+### 新增
+
+- 直连改为原生安装：不再调用第三方脚本 233boy，VPS 自己下载固定版本的 sing-box 官方包并校验 SHA-256（下载失败时由本机下载上传），在 VPS 上生成 Reality 密钥，全程无交互；新增 `--sni`、`--proxy-port`，重跑即可改参数（UUID 与密钥不变）。
+- 直连一次性迁移 `--migrate`：把 233boy 安装换成 ownexit 的 `ownexit-direct` 服务，沿用原有 UUID、密钥、端口、SNI、short id，客户端与订阅链接不用动；迁移前打包备份，新服务起不来自动回到旧服务。
+- 直连卸载 `--uninstall`；`subctl log` 看服务日志、`subctl qr` 在终端显示节点二维码，部署结束时本机有 `qrencode` 直接显示二维码。
+- 直连改动服务器的操作由 VPS 上的 systemd 临时任务执行：SSH 断开不影响，VPS 断电重启后再运行一次即从中断处恢复。
+- 链式新增 `rebaseline`：中转机上的直连迁移 / 改参数 / 新装 / 卸载后，重新登记要保护的既有 sing-box；`RELAY_COHOSTS_SINGBOX` 新增取值 `ownexit-direct`，`init` 自动识别。
+- 直连已在 Linux 控制端（Ubuntu 22.04）验证。
+
+### 修复
+
+- 同一台电脑先用直连、后用链式时，链式报“无法安全取得 shared global lock”：直连创建的 `~/.local/state/ownexit` 等目录权限为 755，现在改为 700，并收紧旧版留下的目录。
+- 链式进程清理临时目录时改用进程启动时的配置摘要比对，避免改写配置的命令（`rebaseline`）结束后留下锁。
+
 ## [0.3.3] - 2026-10-05
 
 ### 变更

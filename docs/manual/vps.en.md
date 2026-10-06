@@ -122,7 +122,7 @@ A "security group" or "firewall" in the provider's console is an inbound rule se
 
 | Mode | Inbound TCP ports to allow |
 | ---- | ---- |
-| Direct | SSH; the sing-box port (picked at random by the 233boy installer, shown in the output); the subscription port (random between 20000 and 59999, shown in the output) |
+| Direct | SSH; the sing-box port (random between 20000 and 59999, or set with `--proxy-port`, shown in the output); the subscription port (random between 20000 and 59999, shown in the output) |
 | Relay: relay server | SSH; the relay port (random between 20000 and 59999, chosen at deploy) |
 | Relay: exit server | SSH (only you and the relay need it); the Reality port (random between 20000 and 59999), reachable at least from the relay |
 

@@ -51,9 +51,9 @@ ownexit direct --host 203.0.113.7   # 第一次会问一次 VPS 的 root 密码
 
 | | 直连 | 链式 |
 | ---- | ---- | ---- |
-| 操作系统 | macOS（Linux 未测试） | macOS 或 Linux（WSL 按 Linux 算） |
+| 操作系统 | macOS 或 Linux | macOS 或 Linux（WSL 按 Linux 算） |
 | 必需 | Python 3.8+ 与 `pipx`、`ssh`、`curl`、`openssl`、`expect` | 同左 |
-| 可选 | 无 | `qrencode`：`ownexit multi render` 输出二维码时用 |
+| 可选 | `qrencode`：在终端显示节点二维码时用 | `qrencode`：`ownexit multi render` 输出二维码时用 |
 
 缺什么装什么：
 
@@ -103,7 +103,7 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
    ownexit direct --host 203.0.113.7          # SSH 端口不是 22 时加 --port 2222
    ```
 
-   依次完成：配免密、检查系统、开启 BBR、安装 sing-box（经 SSH 交互运行第三方安装脚本 [233boy/sing-box](https://github.com/233boy/sing-box)，协议选 **VLESS-REALITY**，其余直接回车）、生成订阅、上传并逐层验证。
+   依次完成：配免密、检查系统、开启 BBR、由服务器自己下载固定版本的 sing-box 官方包并校验 SHA-256、在服务器上生成 Reality 密钥、生成订阅、上传并逐层验证，全程不用回答问题。想自己指定伪装域名或代理端口，加 `--sni <域名>` 或 `--proxy-port <端口>`；以后换参数也是带新值重跑一次（UUID 与密钥不变）。
 
 2. **导入设备**：脚本最后打印三条链接。
 
@@ -119,7 +119,11 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
    ownexit subctl stop
    ```
 
-脚本会记住这台 VPS，之后不带参数也能用：`ownexit direct` 重新部署，`ownexit subctl status|start|stop` 管理订阅服务。逐步说明见 [docs/manual/direct.md](docs/manual/direct.md)。
+脚本会记住这台 VPS，之后不带参数也能用：`ownexit direct` 重新部署，`ownexit subctl status|start|stop|log|qr` 管理订阅服务、看日志、显示二维码，`ownexit direct --uninstall` 卸载。
+
+**以前用旧版装过（233boy 脚本）？** 运行一次 `ownexit direct --migrate`：沿用原有 UUID、密钥、端口和 SNI，换成本项目自己的服务，并删除 233boy 的文件（先打包备份）；客户端和订阅链接都不用动。
+
+逐步说明见 [docs/manual/direct.md](docs/manual/direct.md)。
 
 ## 快速上手：链式
 
@@ -141,15 +145,15 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 
 3. **导入**：节点链接在 `~/.local/state/ownexit/chains/main/client/node.txt`；也可以运行 `ownexit multi --chains main render` 生成二维码和 Clash 配置片段。
 
-日常操作：`ownexit chain --id main status | verify | conns | rollback`。中转机被墙了？用 `init --id backup …` 再部署一台中转，再用 `multi_chain_client.sh` 把两条链合在一起，客户端会自动切换。完整参考见 [chain/README.md](chain/README.md)，逐步说明见 [docs/manual/chain.md](docs/manual/chain.md)。
+日常操作：`ownexit chain --id main status | verify | conns | rollback`。中转机上同时跑着直连、并且你迁移、改参数或卸载了这台的直连时，之后运行一次 `ownexit chain --id main rebaseline`，让链重新登记它要保护的服务（直连脚本会提醒你）。中转机被墙了？用 `init --id backup …` 再部署一台中转，再用 `multi_chain_client.sh` 把两条链合在一起，客户端会自动切换。完整参考见 [chain/README.md](chain/README.md)，逐步说明见 [docs/manual/chain.md](docs/manual/chain.md)。
 
 ## 支持的平台
 
 | | 直连 | 链式 |
 | ---- | ---- | ---- |
-| 控制端 | macOS（已测试）；Linux（未测试）；不支持 Windows，可自行尝试 WSL | Apple 芯片的 Mac（已测试）、Intel Mac（未测试）、Linux amd64（已在 Ubuntu 20.04 测试）、Linux arm64 与 WSL（未测试） |
-| 服务器系统 | Debian、Ubuntu | 带 systemd 的 Linux；中转机需要 `systemd-socket-proxyd`；除本项目自己的表外没有 nftables 表，UFW 未启用 |
-| 服务器 CPU | 取决于 233boy/sing-box（amd64、arm64） | amd64（已在云服务器上测试）或 arm64（已在 Ubuntu 22.04 arm64 虚拟机上测试），两台须相同 |
+| 控制端 | macOS（已测试）；Linux（已在 Ubuntu 22.04 测试）；不支持 Windows，可自行尝试 WSL | Apple 芯片的 Mac（已测试）、Intel Mac（未测试）、Linux amd64（已在 Ubuntu 20.04 测试）、Linux arm64 与 WSL（未测试） |
+| 服务器系统 | Debian、Ubuntu（systemd 240 及以上） | 带 systemd 的 Linux；中转机需要 `systemd-socket-proxyd`；除本项目自己的表外没有 nftables 表，UFW 未启用 |
+| 服务器 CPU | amd64（已在云服务器上测试）或 arm64（已在 Ubuntu 22.04 arm64 虚拟机上测试） | amd64（已在云服务器上测试）或 arm64（已在 Ubuntu 22.04 arm64 虚拟机上测试），两台须相同 |
 | 客户端 | 已测试 Clash Verge、mihomo、Shadowrocket；其它支持 VLESS-Reality 的客户端可用 `vless://` 导入 | 同左 |
 
 如果你的电脑开着代理的 TUN 模式（Clash 一类），部署途中到服务器的 SSH 可能被切断。运行链式命令时请关掉 TUN，或让中转机、出口机的 IP 走直连。
@@ -160,7 +164,7 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 - 密码输错最多可重试 3 次，每次只向服务器提交一次，不容易触发 fail2ban 一类的封禁。失败时最后一行是 `reason=bad-password`、`reason=password-disabled` 或 `reason=unreachable`。
 - 直连的订阅服务是明文 HTTP、靠随机路径保护。平时用 `ownexit subctl stop` 关闭，只在导入时打开；链接泄露时用 `ownexit direct --rotate-token` 换一个。
 - 中转机只运行 `systemd-socket-proxyd`；Reality 私钥只存在于出口机权限 600 的文件里。默认情况下，出口机的 Reality 端口只接受中转机的连接（一张随出口服务起停的 nftables 表）。
-- 直连通过第三方脚本 233boy/sing-box 安装 sing-box；链式由每台服务器下载固定版本的官方 sing-box 发布包，并校验归档和 binary 的 SHA-256。
+- 直连和链式都由每台服务器下载固定版本的官方 sing-box 发布包，并校验归档和 binary 的 SHA-256；服务器访问不了 GitHub 时改由你的电脑下载后上传。Reality 私钥在服务器上生成，不离开服务器。
 
 漏洞报告方式见 [SECURITY.md](SECURITY.md)。
 
@@ -170,7 +174,7 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 
 **我有好几台 VPS。** 用 `--host` 指定。不带 `--host` 时，`ownexit direct` 和 `ownexit subctl` 会列出记住的几台并退出。
 
-**怎么撤销？** 链式：`ownexit chain --id main rollback`。直连（0.1.0 还没有卸载命令）：在 VPS 上执行 `systemctl disable --now ownexit-subscription`，删除 `/opt/ownexit-subscription` 和 `/etc/systemd/system/ownexit-subscription.service`，再用安装脚本自带的 `sb` 工具卸载 sing-box。
+**怎么撤销？** 链式：`ownexit chain --id main rollback`。直连：`ownexit direct --uninstall`（保留 SSH 免密与迁移备份）。
 
 **文件都在哪？** 密钥：`~/.ssh/ownexit/`；配置：`~/.config/ownexit/`；状态和订阅：`~/.local/state/ownexit/`。
 

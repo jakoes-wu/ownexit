@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# subctl —— 直连出口 VPS 的免密登录与订阅服务开关（薄封装，复用 connect_to.sh 生成的专用密钥）。
+# subctl —— 直连出口 VPS 的免密登录、订阅服务开关、服务日志与节点二维码（薄封装，复用 connect_to.sh 生成的专用密钥）。
 #
 # 前置:
 #   - 已用 setup_direct.sh 部署过（它会配好免密并记住这台 VPS）；本脚本只用密钥、不碰密码。
 #   - 目标来源：--host 参数 > ${XDG_CONFIG_HOME:-~/.config}/ownexit/direct/ 下唯一的目标配置（见 target_lib.sh）。
+#   - qr 读本机 setup_direct.sh 渲染的订阅（${XDG_STATE_HOME:-~/.local/state}/ownexit/direct/<目标>/），需要 qrencode。
 #   - 不应被 source。
 
 set -euo pipefail
@@ -15,7 +16,7 @@ SUB_SERVICE="ownexit-subscription"
 
 usage() {
   cat <<'EOF'
-subctl —— 直连出口 VPS 的免密登录与订阅服务开关
+subctl —— 直连出口 VPS 的免密登录、订阅服务开关、日志与二维码
 
 用法:
   subctl [--host <ip>] [--port <port>] [--user <user>] [子命令]
@@ -24,12 +25,16 @@ subctl —— 直连出口 VPS 的免密登录与订阅服务开关
   login        免密登录 VPS（交互式 SSH，默认）
   start        启动订阅服务（给新设备导入订阅时临时打开；用完记得 stop）
   stop         停止订阅服务（平时应保持关闭，缩小公网暴露）
-  status       查看 sing-box 与订阅服务状态
+  status       查看代理服务与订阅服务状态
+  log [行数]   查看代理服务最近的日志，默认 100 行
+  qr           在终端显示节点二维码（需要 qrencode；读本机订阅，不连 VPS）
   help         显示本帮助（同 -h / --help）
 
 示例:
   subctl status                         # 使用上次 setup_direct.sh 记住的 VPS
   subctl start
+  subctl log 300
+  subctl qr
   subctl --host 203.0.113.7 stop        # 记住了多台 VPS 时指定其中一台
 
 退出码: 0 成功；1 远端操作失败或缺少密钥；2 参数错误或无法确定目标。
@@ -43,6 +48,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${SCRIPT_DIR}/target_lib.sh"
 
 CMD=""
+LOG_LINES=100
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --host)    HOST="${2:?--host 需要一个参数}"; shift 2 ;;
@@ -52,10 +58,14 @@ while [[ $# -gt 0 ]]; do
     --user)    SSH_USER="${2:?--user 需要一个参数}"; shift 2 ;;
     --user=*)  SSH_USER="${1#*=}"; shift ;;
     help|-h|--help) usage; exit 0 ;;
-    login|start|stop|status)
+    login|start|stop|status|qr)
       [[ -z "${CMD}" ]] || die_usage "只能给一个子命令（已有 ${CMD}）"
       CMD="$1"; shift ;;
-    *) die_usage "未知参数或子命令: $1（可用: login / start / stop / status / help）" ;;
+    log)
+      [[ -z "${CMD}" ]] || die_usage "只能给一个子命令（已有 ${CMD}）"
+      CMD=log; shift
+      if [[ $# -gt 0 && "$1" =~ ^[0-9]+$ ]]; then LOG_LINES="$1"; shift; fi ;;
+    *) die_usage "未知参数或子命令: $1（可用: login / start / stop / status / log / qr / help）" ;;
   esac
 done
 CMD="${CMD:-login}"
@@ -68,6 +78,17 @@ resolve_target
 # 密钥路径推导必须与 connect_to.sh / setup_direct.sh 完全一致
 SAFE_NAME="$(target_safe_name "${SSH_USER}" "${HOST}" "${SSH_PORT}")"
 KEY="${HOME}/.ssh/ownexit/id_ed25519_${SAFE_NAME}"
+
+# qr 只读本机订阅文件，不需要连 VPS：放在密钥检查之前处理。
+if [[ "${CMD}" == qr ]]; then
+  command -v qrencode >/dev/null 2>&1 || die "没有 qrencode：macOS 运行 brew install qrencode，Debian/Ubuntu 运行 sudo apt install qrencode"
+  STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/ownexit/direct/${SAFE_NAME}"
+  TOKEN="$(awk -F= '$1 == "TOKEN" {print $2; exit}' "${STATE_DIR}/state.env" 2>/dev/null || true)"
+  NODE_FILE="${STATE_DIR}/ownexit-subscription/${TOKEN}/node.txt"
+  [[ -n "${TOKEN}" && -f "${NODE_FILE}" ]] || die "本机没有这台 VPS 的订阅，先运行 ownexit direct --host ${HOST}"
+  qrencode -t ANSIUTF8 < "${NODE_FILE}"
+  exit 0
+fi
 [[ -f "${KEY}" ]] || die "未找到密钥 ${KEY}，请先运行 setup_direct.sh --host ${HOST} 完成部署"
 
 # SetEnv 强制给远端发 VPS 上存在的 locale，覆盖本机转发来的 zh_CN.UTF-8，
@@ -92,9 +113,20 @@ case "${CMD}" in
     ;;
   status)
     rcmd "bash -s" <<REMOTE
-echo -n 'sing-box 代理      : '; systemctl is-active sing-box 2>/dev/null || true
-echo -n '订阅服务（运行）    : '; systemctl is-active ${SUB_SERVICE} 2>/dev/null || true
-echo -n '订阅服务（开机自启）: '; systemctl is-enabled ${SUB_SERVICE} 2>/dev/null || true
+if [ -e /etc/systemd/system/ownexit-direct.service ]; then
+  echo -n '代理服务 ownexit-direct : '; systemctl is-active ownexit-direct 2>/dev/null || true
+elif [ -L /usr/local/bin/sb ]; then
+  echo -n '代理服务（旧版 233boy）  : '; systemctl is-active sing-box 2>/dev/null || true
+  echo '  建议运行 ownexit direct --migrate 换成本项目的服务（参数不变，客户端不用动）'
+else
+  echo '代理服务               : 未安装'
+fi
+echo -n '订阅服务（运行）        : '; systemctl is-active ${SUB_SERVICE} 2>/dev/null || true
+echo -n '订阅服务（开机自启）    : '; systemctl is-enabled ${SUB_SERVICE} 2>/dev/null || true
 REMOTE
+    ;;
+  log)
+    # 旧版 233boy 的服务名是 sing-box；迁移后是 ownexit-direct。
+    rcmd "if [ -e /etc/systemd/system/ownexit-direct.service ]; then u=ownexit-direct; else u=sing-box; fi; journalctl -u \"\$u\" -n ${LOG_LINES} --no-pager"
     ;;
 esac

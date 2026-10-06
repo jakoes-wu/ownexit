@@ -41,7 +41,7 @@ cat ~/.local/state/ownexit/chains/main/client/node.txt
 3. 出口机的云厂商安全组 / 防火墙允许中转机访问；脚本不调用任何云厂商 API。“只允许中转机连出口机的 Reality 端口”有三种做法，由 `EXIT_SOURCE_FILTER` 决定：默认 `managed`，部署时由本项目在出口机加一张只放行中转机出站地址的 nft 表；`provider`，由服务商在机器外的安全组负责；`none`，不限制（没有凭据仍无法使用）。`managed` 与 `provider` 部署时都会严格检查本机直连连不上。
 4. 两台机器除本项目的 `table inet ownexit_*` 白名单表外没有任何 nft 表；装了 UFW 的话须为 inactive；legacy iptables 不得有活动规则。
 5. 中转机已安装 `systemd-socket-proxyd`；两端具备 `preflight` 列出的系统工具。全新机器还要确认 `/etc/systemd/system/sockets.target.wants` 存在（root:root 755），缺失时 `preflight` 会给出创建命令，脚本不代建 systemd 标准目录。
-6. 中转机上已经在跑 sing-box 也可以：`init` 会自动识别并填 `RELAY_COHOSTS_SINGBOX=yes`，部署时保护既有 sing-box 不受影响；状态不完整（只有配置没有进程之类）时 `init` 会拒绝。
+6. 中转机上已经在跑 sing-box 也可以：`init` 会自动识别——233boy 装的填 `RELAY_COHOSTS_SINGBOX=yes`，ownexit 直连填 `ownexit-direct`，都没有填 `no`——部署时保护既有服务不受影响；状态不完整（只有配置没有进程、两者并存之类）时 `init` 会拒绝。
 
 ## 安全边界
 
@@ -67,7 +67,7 @@ cat ~/.local/state/ownexit/chains/main/client/node.txt
 | `EXIT_SSH_KEY` | 本机上出口机私钥的绝对路径，不会复制到中转机 | 同上规则 |
 | `EXPECTED_EXIT_IPV4` | 出口验证时唯一允许返回的 IPv4 | 在出口机上探测，终端里请你确认 |
 | `REALITY_SERVER_NAME` | Reality 伪装域名（ASCII FQDN），没有自动 fallback | `--sni`，默认 `www.amazon.com` |
-| `RELAY_COHOSTS_SINGBOX` | `yes` 保护中转机上既有的 sing-box；`no` 要求中转机上没有 sing-box | 登录中转机自动识别 |
+| `RELAY_COHOSTS_SINGBOX` | `yes` 保护 233boy 的 `sing-box.service`；`ownexit-direct` 保护 ownexit 直连的 `ownexit-direct.service`；`no` 要求中转机上没有任何 sing-box | 登录中转机自动识别；之后由 `rebaseline` 维护，不要手工改 |
 | `EXIT_SOURCE_FILTER` | `managed`：本项目在出口机加 nft 白名单；`provider`：服务商安全组只放行中转来源；两者部署 / verify 时本机能直连出口机 Reality 端口即失败。`none`：不限制，能直连只记 WARN | `--exit-source-filter`，默认 `managed` |
 
 配置文件必须由当前用户拥有、权限 600、不是符号链接，并且位于 git 工作区之外；私钥要求 group / other 没有任何权限。
@@ -93,6 +93,9 @@ chain/setup_chain.sh --id main banlist            # 对照本地黑名单与中�
 
 # 出口机同一台机器换了公网 IP（先改配置里的 EXIT_HOST / EXPECTED_EXIT_IPV4）
 chain/setup_chain.sh --id main rehost-exit
+
+# 中转机上的直连迁移 / 改参数 / 新装 / 卸载之后，重新登记要保护的既有 sing-box
+chain/setup_chain.sh --id main rebaseline
 ```
 
 `--id <名字>` 是 `--config ~/.config/ownexit/chains/<名字>.env` 的简写，两者二选一。
@@ -134,7 +137,7 @@ chain/setup_chain.sh --id main rehost-exit
 
 出口请求固定用 `api.ipify.org`、`icanhazip.com`、`ifconfig.me/ip`：至少两个成功，且所有有效响应都必须等于 `EXPECTED_EXIT_IPV4`；没有 direct fallback。
 
-当 `RELAY_COHOSTS_SINGBOX=yes` 时，零回归基线以正在运行的 `sing-box.service` 的 MainPID 为准：解析 `/proc/<pid>/cmdline` 的 `-c/-C` 和 `/proc/<pid>/cwd` 得到实际配置，记录 cmdline、cwd、ExecStart、unit 与 drop-in、可执行文件元数据和该进程的监听端口；不假定配置一定在 `/etc/sing-box`。`no` 时写四份 `none` 占位。
+当 `RELAY_COHOSTS_SINGBOX=yes`（或 `ownexit-direct`）时，零回归基线以正在运行的 `sing-box.service`（或 `ownexit-direct.service`）的 MainPID 为准：解析 `/proc/<pid>/cmdline` 的 `-c/-C` 和 `/proc/<pid>/cwd` 得到实际配置，记录 cmdline、cwd、ExecStart、unit 与 drop-in、可执行文件元数据和该进程的监听端口；不假定配置一定在 `/etc/sing-box`。`no` 时写四份 `none` 占位。
 
 ## 本机上的文件
 
@@ -197,6 +200,16 @@ chain/setup_chain.sh --id main rehost-exit
 控制端被 `kill -9` 或断电时，下一条修改类命令会读取 `transaction.env`：只有全量验证完成、且状态与远端一致时才补齐提交；其它 deploy 逆序清理，rollback 从最后完成的步骤继续。共享目录和固定 binary 不在单条链的回滚清单里。
 
 换一台中转机时，用新的 `--id` 跑 `init` 再部署，确认新链可用后再 rollback 旧链。
+
+## 中转机既有 sing-box 重新登记（`rebaseline`）
+
+中转机上同时跑着直连（`ownexit direct`）时，链会把那个服务记成“必须原样保护”的基线。直连迁移（233boy → ownexit-direct）、改参数、新装或卸载之后，链的 `verify` / `status` / `rollback` 会在预检或基线比对处失败（中转转发本身不受影响）。这时运行：
+
+```bash
+chain/setup_chain.sh --id main rebaseline
+```
+
+它在中转机上重新判定 `RELAY_COHOSTS_SINGBOX`（`yes` / `ownexit-direct` / `no`），重新采集基线，必要时只改写配置里这一行并同步两端 owner 文件，最后跑一遍完整 `verify`。凭据、端口、`client/node.txt` 都不变，中转服务不重启。现场与记录一致时输出 `rebaseline=noop`。中途断开时重跑同一条命令即可收敛。旧 state、旧基线和旧配置归档在 `audit/rebaselined.<部署ID>.<操作ID>/`。退出码：0 成功或 noop；2 配置里除 `RELAY_COHOSTS_SINGBOX` 外还有键被改动；3 中转不可达或中转机上的 sing-box 状态不完整；5 锁、状态损坏或有未完成事务；1 远端 owner 迁移或本地提交失败（远端码 180 owner 身份异常、181 owner 与 state 不符、182 owner 中的摘要不在合法取值内）。
 
 ## 出口机换 IP（同一台机器）
 

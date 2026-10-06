@@ -17,7 +17,7 @@ _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 # 脚本之间按相对路径互相调用（如 chain/setup_chain.sh 调 ../direct/connect_to.sh），不要改目录结构。
 COMMANDS = {
     "direct": (os.path.join("direct", "setup_direct.sh"), "deploy a VPS as your direct exit (setup_direct.sh)"),
-    "subctl": (os.path.join("direct", "subctl"), "start / stop / check the subscription service, or log in (subctl)"),
+    "subctl": (os.path.join("direct", "subctl"), "subscription service start / stop / status, service log, node QR code, or log in (subctl)"),
     "connect": (os.path.join("direct", "connect_to.sh"), "set up key-based SSH login to a server (connect_to.sh)"),
     "chain": (os.path.join("chain", "setup_chain.sh"), "relay + exit chain: init / deploy / verify / rollback ... (setup_chain.sh)"),
     "multi": (os.path.join("chain", "multi_chain_client.sh"), "combine several chains into one client config (multi_chain_client.sh)"),

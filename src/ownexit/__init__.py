@@ -4,4 +4,4 @@
 版本号唯一来源：发布时改这里，pypi.yml 会核对 wheel 版本与 tag 一致。
 """
 
-__version__ = "0.3.3"
+__version__ = "0.4.0"

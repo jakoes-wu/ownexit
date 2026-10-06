@@ -96,8 +96,9 @@ resolve_target() {
 # 原子写入目标配置：先写同目录临时文件并 chmod 600，再 mv 覆盖，避免中途失败留下半个文件。
 save_target() {
   local file tmp
-  mkdir -p "${OWNEXIT_DIRECT_TARGET_DIR}"
-  chmod 700 "${OWNEXIT_DIRECT_TARGET_DIR}"
+  # 与链式共用 ${XDG_CONFIG_HOME}/ownexit/：这一级也必须私有（链式的安全检查要求父目录不可被他人写）。
+  (umask 077; mkdir -p "${OWNEXIT_DIRECT_TARGET_DIR}")
+  chmod 700 "${OWNEXIT_DIRECT_TARGET_DIR}" "$(dirname "${OWNEXIT_DIRECT_TARGET_DIR}")"
   file="${OWNEXIT_DIRECT_TARGET_DIR}/$(target_safe_name "${SSH_USER}" "${HOST}" "${SSH_PORT}").env"
   tmp="$(mktemp "${OWNEXIT_DIRECT_TARGET_DIR}/.target.XXXXXX")"
   chmod 600 "${tmp}"
