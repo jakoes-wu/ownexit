@@ -7,6 +7,7 @@
 #   - 两台远端的依赖、防火墙与既有 sing-box 状态须通过 preflight；脚本不会自动安装软件包或改防火墙。
 #   - 连接治理命令（conns/kick/ban/unban/banlist）要求链已 deploy；kick 依赖中转内核支持 ss -K，
 #     ban 依赖中转 cgroup v2 + systemd IPAddressDeny=（BPF），二者实测于 Debian 12 / systemd 252。
+#   - rebaseline 要求链已 deploy；只允许配置里 RELAY_COHOSTS_SINGBOX 一键与 state 不同（由它自己改写）。
 #   - rehost-exit 要求链已 deploy、config 已改好新 EXIT_HOST / EXPECTED_EXIT_IPV4、known_hosts 已有新 IP 的
 #     ed25519 条目，且新 IP 与 state 的主机指纹一致（同一台出口机）。
 # 调用方：由维护者在本仓库或任意目录直接执行；不应被 source。
@@ -72,6 +73,8 @@ BLACKLIST_FILE=''
 # 中转受管 drop-in 文件名；verify/rollback 只放行这一个文件，其余 drop-in 一律判 drifted。
 readonly RELAY_BLACKLIST_DROPIN='50-ownexit-chain-blacklist.conf'
 CONFIG_SHA256=''
+# 进程启动时的配置摘要：临时目录 owner 与之绑定；rebaseline 会在进程中途改变 CONFIG_SHA256，清理时必须用这个值比对。
+OPERATION_CONFIG_SHA256=''
 CHAIN_ID=''
 RELAY_HOST=''
 RELAY_SSH_PORT=''
@@ -158,6 +161,7 @@ usage() {
   $(basename "${SCRIPT_PATH}") --config <绝对路径> unban <ipv4|ipv4/prefix>
   $(basename "${SCRIPT_PATH}") --config <绝对路径> banlist
   $(basename "${SCRIPT_PATH}") --config <绝对路径> rehost-exit
+  $(basename "${SCRIPT_PATH}") --config <绝对路径> rebaseline
   $(basename "${SCRIPT_PATH}") -h | --help
 
 作用:
@@ -175,6 +179,8 @@ usage() {
   unban      从黑名单移除；列表为空时删除中转 drop-in，恢复"无 drop-in"契约。
   banlist    只读对照本地黑名单与中转两个 unit 的 IPAddressDeny 回读值，不一致返回 5。
   rehost-exit  出口机同机换 IP：先在 config 改 EXIT_HOST / EXPECTED_EXIT_IPV4，再原地迁移
+  rebaseline   中转机上的既有 sing-box 合法变化后（233boy 迁移为 ownexit-direct、直连改参数 / 新装 / 卸载），
+               按现场重新判定 RELAY_COHOSTS_SINGBOX 并重新登记基线；凭据、端口、node.txt 不变
              中转转发目标与两端 owner、本地 state，最后自动完整 verify。要求新 IP 的主机指纹与 state
              一致（同一台机）；UUID、密钥、端口、客户端订阅都不变；中途失败可重跑，已迁移时输出 noop。
 
@@ -554,7 +560,7 @@ parse_args() {
   COMMAND="$3"
   shift 3
   case "${COMMAND}" in
-    preflight|deploy|status|rollback|conns|banlist|rehost-exit)
+    preflight|deploy|status|rollback|conns|banlist|rehost-exit|rebaseline)
       [[ "$#" -eq 0 ]] || die 2 "${COMMAND} 不接受额外参数"
       ;;
     verify)
@@ -633,7 +639,7 @@ validate_config_values() {
   [[ "${RELAY_SSH_KEY_FINGERPRINT}" == SHA256:* && "${EXIT_SSH_KEY_FINGERPRINT}" == SHA256:* ]] || die 2 'SSH 私钥指纹格式错误'
   [[ "${RELAY_SSH_KEY_FINGERPRINT}" != "${EXIT_SSH_KEY_FINGERPRINT}" ]] || die 2 '中转与出口机必须使用两把不同公钥指纹的私钥'
   [[ "${REALITY_SERVER_NAME}" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]] || die 2 'REALITY_SERVER_NAME 必须是 ASCII FQDN'
-  [[ "${RELAY_COHOSTS_SINGBOX}" == 'yes' || "${RELAY_COHOSTS_SINGBOX}" == 'no' ]] || die 2 'RELAY_COHOSTS_SINGBOX 只能是 yes 或 no'
+  [[ "${RELAY_COHOSTS_SINGBOX}" == 'yes' || "${RELAY_COHOSTS_SINGBOX}" == 'no' || "${RELAY_COHOSTS_SINGBOX}" == 'ownexit-direct' ]] || die 2 'RELAY_COHOSTS_SINGBOX 只能是 yes、no 或 ownexit-direct'
   [[ "${EXIT_SOURCE_FILTER}" == 'managed' || "${EXIT_SOURCE_FILTER}" == 'provider' || "${EXIT_SOURCE_FILTER}" == 'none' ]] || die 2 'EXIT_SOURCE_FILTER 只能是 managed、provider 或 none'
 }
 
@@ -736,6 +742,7 @@ init_operation_tmp() {
     printf 'PROCESS_COMMAND_SHA256=%s\n' "${command_hash}"
     printf 'CONFIG_SHA256=%s\n' "${CONFIG_SHA256}"
   } > "${owner_temp}"
+  OPERATION_CONFIG_SHA256="${CONFIG_SHA256}"
   chmod 600 "${owner_temp}"
   sync
   link "${owner_temp}" "${owner}" || return 1
@@ -1906,9 +1913,15 @@ if [[ "$role" == relay ]]; then
   proxyd="$(trusted_executable "$proxyd")"
   supports_option "$proxyd" '--connections-max' || fail 'systemd-socket-proxyd 不支持 --connections-max'
 
+  # co-host 判定表（docs/feature/feature-direct-native-install.md §5.1.10）：预检、init、rebaseline 共用同一组信号。
+  # U1/D1 = 233boy 的 sing-box.service 与 /etc/sing-box；U2/D2 = ownexit 直连的 ownexit-direct.service 与 /etc/ownexit-direct；
+  # P = 是否有可执行文件名为 sing-box / sing-box-* 的进程。三种取值互斥，现场与声明不符即失败。
   load_state="$(systemctl show sing-box.service -p LoadState --value 2>/dev/null || true)"
+  direct_load_state="$(systemctl show ownexit-direct.service -p LoadState --value 2>/dev/null || true)"
   config_seen=no
   [[ -e /etc/sing-box || -L /etc/sing-box ]] && config_seen=yes
+  direct_config_seen=no
+  [[ -e /etc/ownexit-direct || -L /etc/ownexit-direct ]] && direct_config_seen=yes
   process_seen=no
   for proc_exe in /proc/[0-9]*/exe; do
     resolved="$(readlink -f "$proc_exe" 2>/dev/null || true)"
@@ -1917,18 +1930,29 @@ if [[ "$role" == relay ]]; then
       sing-box|sing-box-*) process_seen=yes; break ;;
     esac
   done
+  case "$cohosts" in
+    yes) cohost_unit=sing-box.service; cohost_dir=/etc/sing-box ;;
+    ownexit-direct) cohost_unit=ownexit-direct.service; cohost_dir=/etc/ownexit-direct ;;
+    *) cohost_unit=''; cohost_dir='' ;;
+  esac
   if [[ "$cohosts" == yes ]]; then
     [[ "$load_state" == loaded && "$config_seen" == yes && "$process_seen" == yes ]] || fail '声明 co-host，但既有 sing-box 配置、进程或 unit 缺失'
-    [[ -d /etc/sing-box && ! -L /etc/sing-box ]] || fail '既有 /etc/sing-box 目录身份不安全'
-    config_mode="$(stat -c %a /etc/sing-box)"
-    (( (8#$config_mode & 8#022) == 0 )) || fail '既有 /etc/sing-box 可被 group/other 写'
-    [[ "$(systemctl is-active sing-box.service 2>/dev/null || true)" == active ]] || fail '既有 sing-box service 非 active'
-    pid="$(systemctl show sing-box.service -p MainPID --value)"
-    [[ "$pid" =~ ^[1-9][0-9]*$ && -d "/proc/$pid" ]] || fail '既有 sing-box MainPID 无效'
-    exe="$(readlink -f "/proc/$pid/exe")"
-    [[ -f "$exe" && ! -L "$exe" ]] || fail '既有 sing-box executable 不安全'
+    [[ "$direct_load_state" == not-found && "$direct_config_seen" == no ]] || fail '声明 233boy co-host，但中转机上还有 ownexit-direct；运行 rebaseline 重新登记'
+  elif [[ "$cohosts" == ownexit-direct ]]; then
+    [[ "$direct_load_state" == loaded && "$direct_config_seen" == yes && "$process_seen" == yes ]] || fail '声明 ownexit-direct co-host，但其配置、进程或 unit 缺失'
+    [[ "$load_state" == not-found && "$config_seen" == no ]] || fail '声明 ownexit-direct co-host，但中转机上还有 233boy 的 sing-box；运行 rebaseline 重新登记'
   else
-    [[ "$load_state" == not-found && "$config_seen" == no && "$process_seen" == no ]] || fail '声明全新中转，但发现既有 sing-box 配置、进程或 unit'
+    [[ "$load_state" == not-found && "$config_seen" == no && "$process_seen" == no && "$direct_load_state" == not-found && "$direct_config_seen" == no ]] || fail '声明全新中转，但发现既有 sing-box / ownexit-direct 的配置、进程或 unit；运行 rebaseline 重新登记'
+  fi
+  if [[ -n "$cohost_unit" ]]; then
+    [[ -d "$cohost_dir" && ! -L "$cohost_dir" ]] || fail "既有 $cohost_dir 目录身份不安全"
+    config_mode="$(stat -c %a "$cohost_dir")"
+    (( (8#$config_mode & 8#022) == 0 )) || fail "既有 $cohost_dir 可被 group/other 写"
+    [[ "$(systemctl is-active "$cohost_unit" 2>/dev/null || true)" == active ]] || fail "既有 $cohost_unit 非 active"
+    pid="$(systemctl show "$cohost_unit" -p MainPID --value)"
+    [[ "$pid" =~ ^[1-9][0-9]*$ && -d "/proc/$pid" ]] || fail "既有 $cohost_unit MainPID 无效"
+    exe="$(readlink -f "/proc/$pid/exe")"
+    [[ -f "$exe" && ! -L "$exe" ]] || fail "既有 $cohost_unit executable 不安全"
   fi
   printf 'SOCKET_PROXYD_PATH=%s\n' "$proxyd"
   printf 'SYSTEMCTL_PATH=%s\n' "$systemctl_path"
@@ -1984,7 +2008,7 @@ remote_platform_preflight() {
     0) return 0 ;;
     21) die 3 '中转平台预检 SSH 不可达' ;;
     22) die 3 '出口机平台预检 SSH 不可达' ;;
-    31) die 3 '中转依赖、防火墙或角色声明预检失败' ;;
+    31) die 3 '中转依赖、防火墙或角色声明预检失败；若中转机上的直连刚迁移、改参数、新装或卸载过，运行 rebaseline 重新登记' ;;
     32) die 3 '中转能力探针没有返回安全绝对路径' ;;
     33) die 3 '出口机依赖或防火墙预检失败' ;;
     34) die 3 '中转机与出口机的 CPU 架构必须相同（都为 amd64 或都为 arm64），且与已部署状态一致' ;;
@@ -2180,6 +2204,15 @@ snapshot_operation_state() {
   done
 }
 
+# RELAY_COHOSTS_SINGBOX 取值 → 被保护的既有单元（docs/feature/feature-direct-native-install.md §5.1.10）。
+cohost_unit_of() {
+  case "$1" in
+    yes) printf 'sing-box.service' ;;
+    ownexit-direct) printf 'ownexit-direct.service' ;;
+    *) return 1 ;;
+  esac
+}
+
 probe_collect_relay_baseline() {
   local destination script output active enabled rc
   destination="$1"
@@ -2203,6 +2236,9 @@ probe_collect_relay_baseline() {
 set -euo pipefail
 umask 077
 export LC_ALL=C
+# 被保护的既有单元由本机按 RELAY_COHOSTS_SINGBOX 传入（yes→sing-box.service，ownexit-direct→ownexit-direct.service）；
+# 输出只取决于 systemctl、/proc、ss 的结果，yes 时与旧版逐字相同，已部署链的基线不会误报漂移。
+unit="$1"
 
 metadata() {
   local path type hash mode
@@ -2251,7 +2287,7 @@ normalize_runtime_path() {
   printf '%s\n' "$resolved"
 }
 
-pid="$(systemctl show sing-box.service -p MainPID --value)"
+pid="$(systemctl show "$unit" -p MainPID --value)"
 [[ "$pid" =~ ^[1-9][0-9]*$ && -d "/proc/$pid" ]] || exit 33
 exe="$(readlink -f "/proc/$pid/exe")"
 [[ -f "$exe" && ! -L "$exe" ]] || exit 34
@@ -2322,10 +2358,10 @@ printf '%s\n' '__UNIT__'
 {
   printf 'MAINPID_CMDLINE_SHA256=%s\n' "$(sha256sum "/proc/$pid/cmdline" | awk '{print $1}')"
   printf 'MAINPID_CWD=%s\n' "$cwd"
-  printf 'EXECSTART_SHA256=%s\n' "$(systemctl show sing-box.service -p ExecStart --value | sha256sum | awk '{print $1}')"
-  fragment="$(systemctl show sing-box.service -p FragmentPath --value)"
+  printf 'EXECSTART_SHA256=%s\n' "$(systemctl show "$unit" -p ExecStart --value | sha256sum | awk '{print $1}')"
+  fragment="$(systemctl show "$unit" -p FragmentPath --value)"
   [[ -n "$fragment" ]] && metadata "$fragment"
-  systemctl show sing-box.service -p DropInPaths --value | tr ' ' '\n' | sed '/^$/d' | while IFS= read -r item; do metadata "$item"; done
+  systemctl show "$unit" -p DropInPaths --value | tr ' ' '\n' | sed '/^$/d' | while IFS= read -r item; do metadata "$item"; done
 } | sort
 
 printf '%s\n' '__BINARY__'
@@ -2347,11 +2383,11 @@ printf '%s\n' '__LISTENERS__'
     | sed -E 's/pid=[0-9]+,//g; s/fd=[0-9]+//g; s/ino:[0-9]+//g; s/[[:space:]][[:space:]]*/ /g'
 } | sort
 printf '%s\n' '__STATUS__'
-printf 'ACTIVE=%s\n' "$(systemctl is-active sing-box.service)"
-printf 'ENABLED=%s\n' "$(systemctl is-enabled sing-box.service 2>/dev/null || true)"
+printf 'ACTIVE=%s\n' "$(systemctl is-active "$unit")"
+printf 'ENABLED=%s\n' "$(systemctl is-enabled "$unit" 2>/dev/null || true)"
 COLLECT_BASELINE
   chmod 600 "${script}"
-  if output="$(ssh_relay_stdin bash -s < "${script}")"; then
+  if output="$(ssh_relay_stdin bash -s -- "$(cohost_unit_of "${RELAY_COHOSTS_SINGBOX}")" < "${script}")"; then
     rc=0
   else
     rc="$?"
@@ -6369,6 +6405,272 @@ rehost_exit_chain() {
   log_info "rehost-exit 通过；chain=${CHAIN_ID} elapsed=$(elapsed_seconds)s"
 }
 
+# ---------- 中转机既有 sing-box 重新登记：rebaseline（docs/feature/feature-direct-native-install.md §5.1.10） ----------
+#
+# 用途：中转机上的“既有 sing-box”发生了合法变化（233boy 迁移为 ownexit-direct、直连改参数 / 新装 / 卸载）后，
+# 按现场重新判定 RELAY_COHOSTS_SINGBOX、重新采集零回归基线，链本身（凭据、端口、node.txt、中转转发）不动。
+# 关键约束：
+#   - 不调用 remote_platform_preflight：它按 state 里的旧取值检查，迁移后必然失败；安全检查由基线采集脚本与
+#     收尾的 full_verify（按新取值）承担。
+#   - owner 迁移先于 noop 判定且无条件执行：中断可能把 owner 留在任意合法取值的摘要上，只有先收敛 owner，
+#     noop 才不会掩盖“verify 永远 owner 漂移”。
+#   - noop 一律与 state 比对，不与本地 baseline 文件比对（baseline 可能已替换而 state 未提交）。
+
+REBASELINE_BINDING=''
+REBASELINE_STATE_COHOST=''
+REBASELINE_STATE_CONFIG_SHA256=''
+REBASELINE_LIVE_COHOST=''
+REBASELINE_OWNER_CHANGED=0
+
+# 测试钩子：在指定阶段后以退出码 99 结束，用于中断恢复用例；正常使用不要设置。
+rebaseline_test_stop() {
+  if [[ "${OWNEXIT_TEST_CHAIN_STOP_AFTER:-}" == "$1" ]]; then
+    log_warn "测试钩子：rebaseline 在 $1 之后停止"
+    exit 99
+  fi
+}
+
+# 以给定取值计算配置摘要（与 parse_config 同一算法）；不改变调用方的 RELAY_COHOSTS_SINGBOX。
+config_sha256_with_cohost() {
+  local saved digest
+  saved="${RELAY_COHOSTS_SINGBOX}"
+  RELAY_COHOSTS_SINGBOX="$1"
+  digest="$(normalized_config | sha256_text)"
+  RELAY_COHOSTS_SINGBOX="${saved}"
+  printf '%s' "${digest}"
+}
+
+load_state_for_rebaseline() {
+  local rc config_cohost
+  if probe_state_file "${STATE_FILE}"; then rc=0; else rc="$?"; fi
+  if [[ "${rc}" -eq 0 ]]; then
+    REBASELINE_BINDING=current
+  else
+    [[ "${rc}" -eq 12 ]] || die 5 "state.env 校验失败：${STATE_PROBE_REASON}"
+    # 配置里只有 RELAY_COHOSTS_SINGBOX 与 state 不同（上次 rebaseline 改了配置未提交，或用户手工改了这一键）才放行。
+    config_cohost="${RELAY_COHOSTS_SINGBOX}"
+    RELAY_COHOSTS_SINGBOX="$(kv_get "${STATE_FILE}" RELAY_COHOSTS_SINGBOX)" || die 5 'state.env 缺少 RELAY_COHOSTS_SINGBOX'
+    CONFIG_SHA256="$(normalized_config | sha256_text)"
+    if probe_state_file "${STATE_FILE}"; then rc=0; else rc="$?"; fi
+    [[ "${rc}" -eq 0 ]] || die 2 '除 RELAY_COHOSTS_SINGBOX 外还有配置键与 state 不一致；rebaseline 只处理这一个键'
+    REBASELINE_BINDING='config-ahead'
+    log_info "[rebaseline] 配置里的 RELAY_COHOSTS_SINGBOX=${config_cohost} 与 state 不同（config-ahead）"
+  fi
+  REBASELINE_STATE_COHOST="$(kv_get "${STATE_FILE}" RELAY_COHOSTS_SINGBOX)"
+  REBASELINE_STATE_CONFIG_SHA256="$(kv_get "${STATE_FILE}" CONFIG_SHA256)"
+}
+
+# 远端 owner 迁移：规范形态（CONFIG_SHA256 行换回 state 值）的哈希必须等于 state 记录的 owner 哈希，防外部改动；
+# 当前值必须是 state 值或三种合法取值的摘要之一（覆盖任意次中断留下的中间值）；已是新值则不动。
+write_rebaseline_owner_script() {
+  local output
+  output="$1"
+  cat > "${output}" <<'REBASELINE_OWNER'
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+export LC_ALL=C
+chain_id="$1"
+owner_state_hash="$2"
+state_cfg="$3"
+new_cfg="$4"
+shift 4
+owner="/etc/ownexit-chain/$chain_id.owner.env"
+tmp=''
+scratch="$(mktemp /tmp/ownexit-rebaseline.XXXXXX)"
+trap '[[ -z "$tmp" ]] || rm -f "$tmp"; rm -f "$scratch"' EXIT
+[[ -f "$owner" && ! -L "$owner" && "$(stat -c %u:%g:%a "$owner")" == 0:0:600 ]] || exit 180
+[[ "$(awk 'index($0, "CONFIG_SHA256=") == 1 {n++} END {print n + 0}' "$owner")" == 1 ]] || exit 181
+current="$(awk 'index($0, "CONFIG_SHA256=") == 1 {print substr($0, 15)}' "$owner")"
+awk -v to="CONFIG_SHA256=$state_cfg" '{ if (index($0, "CONFIG_SHA256=") == 1) print to; else print }' "$owner" > "$scratch"
+[[ "$(sha256sum "$scratch" | awk '{print $1}')" == "$owner_state_hash" ]] || exit 181
+allowed=no
+for candidate in "$state_cfg" "$@"; do
+  [[ "$current" != "$candidate" ]] || allowed=yes
+done
+[[ "$allowed" == yes ]] || exit 182
+if [[ "$current" == "$new_cfg" ]]; then
+  result=already
+else
+  tmp="$(dirname "$owner")/.$(basename "$owner").rebaseline.$$.tmp"
+  awk -v to="CONFIG_SHA256=$new_cfg" '{ if (index($0, "CONFIG_SHA256=") == 1) print to; else print }' "$owner" > "$tmp"
+  chown root:root "$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$owner"
+  tmp=''
+  result=changed
+fi
+printf 'OWNER=%s\n' "$result"
+printf 'OWNER_SHA256=%s\n' "$(sha256sum "$owner" | awk '{print $1}')"
+REBASELINE_OWNER
+  chmod 600 "${output}"
+}
+
+rebaseline_owner_reason() {
+  case "$1" in
+    180) printf '180 owner 文件身份或权限异常（要求 root:root 600）' ;;
+    181) printf '181 owner 规范形态与 state 不符（外部改动）' ;;
+    182) printf '182 owner 中的配置摘要不是 state 值或三种合法取值的摘要之一' ;;
+    255) printf '255 SSH 不可达或会话中断' ;;
+    *) printf '%s 远端脚本异常退出' "$1" ;;
+  esac
+}
+
+# 迁移一端 owner；role=exit|relay。输出写入 REBASELINE_OWNER_RESULT / REBASELINE_OWNER_HASH。
+rebaseline_owner() {
+  local role script output rc state_hash legal_yes legal_no legal_direct
+  role="$1"
+  script="${OP_TMP}/rebaseline-owner.sh"
+  write_rebaseline_owner_script "${script}"
+  if [[ "${role}" == exit ]]; then state_hash="${EXIT_OWNER_SHA256}"; else state_hash="${RELAY_OWNER_SHA256}"; fi
+  legal_yes="$(config_sha256_with_cohost yes)"
+  legal_no="$(config_sha256_with_cohost no)"
+  legal_direct="$(config_sha256_with_cohost ownexit-direct)"
+  if [[ "${role}" == exit ]]; then
+    if output="$(ssh_exit_stdin bash -s -- "${CHAIN_ID}" "${state_hash}" "${REBASELINE_STATE_CONFIG_SHA256}" "${REBASELINE_NEW_CONFIG_SHA256}" "${legal_yes}" "${legal_no}" "${legal_direct}" < "${script}")"; then rc=0; else rc="$?"; fi
+  else
+    if output="$(ssh_relay_stdin bash -s -- "${CHAIN_ID}" "${state_hash}" "${REBASELINE_STATE_CONFIG_SHA256}" "${REBASELINE_NEW_CONFIG_SHA256}" "${legal_yes}" "${legal_no}" "${legal_direct}" < "${script}")"; then rc=0; else rc="$?"; fi
+  fi
+  [[ "${rc}" -eq 0 ]] || die 1 "${role} owner 迁移失败：$(rebaseline_owner_reason "${rc}")"
+  REBASELINE_OWNER_RESULT="$(printf '%s\n' "${output}" | awk -F= '$1 == "OWNER" {print $2}')"
+  REBASELINE_OWNER_HASH="$(printf '%s\n' "${output}" | awk -F= '$1 == "OWNER_SHA256" {print $2}')"
+  [[ "${REBASELINE_OWNER_RESULT}" =~ ^(changed|already)$ && "${REBASELINE_OWNER_HASH}" =~ ^[0-9a-f]{64}$ ]] || die 1 "${role} owner 迁移输出格式异常"
+  [[ "${REBASELINE_OWNER_RESULT}" == already ]] || REBASELINE_OWNER_CHANGED=1
+  log_info "[rebaseline] ${role}-owner=${REBASELINE_OWNER_RESULT}"
+}
+
+# 原子改写配置文件中恰好一行 RELAY_COHOSTS_SINGBOX=（其余字节不变）；旧配置先复制进审计目录。
+rewrite_config_cohost() {
+  local audit current tmp count
+  audit="$1"
+  current="$(awk -F= '$1 == "RELAY_COHOSTS_SINGBOX" {print $2}' "${CONFIG_PATH}")"
+  [[ "${current}" != "${REBASELINE_LIVE_COHOST}" ]] || return 0
+  count="$(awk 'index($0, "RELAY_COHOSTS_SINGBOX=") == 1 {n++} END {print n + 0}' "${CONFIG_PATH}")"
+  [[ "${count}" == 1 ]] || die 2 "配置文件中 RELAY_COHOSTS_SINGBOX= 不是恰好 1 行：${CONFIG_PATH}"
+  cp "${CONFIG_PATH}" "${audit}/config.env" || die 1 'rebaseline 旧配置归档失败'
+  chmod 600 "${audit}/config.env"
+  tmp="$(dirname "${CONFIG_PATH}")/.$(basename "${CONFIG_PATH}").rebaseline.$$.tmp"
+  awk -v to="RELAY_COHOSTS_SINGBOX=${REBASELINE_LIVE_COHOST}" '{ if (index($0, "RELAY_COHOSTS_SINGBOX=") == 1) print to; else print }' "${CONFIG_PATH}" > "${tmp}" || die 1 'rebaseline 配置改写失败'
+  chmod 600 "${tmp}"
+  mv -f "${tmp}" "${CONFIG_PATH}" || die 1 'rebaseline 配置原子替换失败'
+  log_info "[rebaseline] 配置 RELAY_COHOSTS_SINGBOX ${current} -> ${REBASELINE_LIVE_COHOST}"
+}
+
+# 旧 state 与旧基线归档，新基线替换 baseline/ 下 4 个文件，再按新值写 state。
+publish_rebaseline() {
+  local audit fresh file payload
+  audit="$1"
+  fresh="$2"
+  cp "${STATE_FILE}" "${audit}/state.env" || die 1 'rebaseline 旧 state 归档失败'
+  chmod 600 "${audit}/state.env"
+  ensure_private_dir "${audit}/baseline" || die 1 'rebaseline baseline 审计目录不安全'
+  ensure_private_dir "${CHAIN_STATE_DIR}/baseline" || die 1 'baseline 目录不安全'
+  for file in relay-config-manifest.txt relay-unit-manifest.txt relay-binary-manifest.txt relay-listeners.txt; do
+    if [[ -f "${CHAIN_STATE_DIR}/baseline/${file}" ]]; then
+      cp "${CHAIN_STATE_DIR}/baseline/${file}" "${audit}/baseline/${file}"
+      chmod 600 "${audit}/baseline/${file}"
+    fi
+    cp "${fresh}/${file}" "${CHAIN_STATE_DIR}/baseline/.${file}.rebaseline.tmp"
+    chmod 600 "${CHAIN_STATE_DIR}/baseline/.${file}.rebaseline.tmp"
+    mv -f "${CHAIN_STATE_DIR}/baseline/.${file}.rebaseline.tmp" "${CHAIN_STATE_DIR}/baseline/${file}"
+  done
+  rebaseline_test_stop baseline
+  payload="${OP_TMP}/state-payload"
+  render_state_payload "${payload}" || die 1 'rebaseline state payload 生成失败'
+  write_checksummed_file "${STATE_FILE}" replace "${payload}"
+  if probe_state_file "${STATE_FILE}"; then :; else die 1 "rebaseline 后 state 与配置绑定失败：${STATE_PROBE_REASON}"; fi
+  log_info "[rebaseline] state committed audit=${audit}"
+}
+
+rebaseline_chain() {
+  local rc fresh new_config_hash new_unit new_listen new_binary new_active new_enabled exit_hash relay_hash audit config_cohost
+  if acquire_chain_lock 1; then rc=0; else rc="$?"; fi
+  case "${rc}" in
+    0) ;;
+    10) die 5 '同一 chain 有活动锁（busy）；稍后重试' ;;
+    11) die 5 '存在 stale lock；先运行 verify 或其它 mutating 命令归档' ;;
+    *) die 5 '无法安全取得 chain lock' ;;
+  esac
+  require_local_dependencies
+  [[ ! -e "${JOURNAL_FILE}" && ! -L "${JOURNAL_FILE}" ]] || die 5 '存在 incomplete transaction，rebaseline 拒绝'
+  [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 'chain 尚未部署'
+  config_cohost="${RELAY_COHOSTS_SINGBOX}"
+  load_state_for_rebaseline
+  render_ssh_config
+  if probe_loaded_binding; then rc=0; else rc="$?"; fi
+  case "${rc}" in
+    0) ;;
+    11) die 5 '中转 SSH key 指纹漂移' ;;
+    12) die 5 '出口机 SSH key 指纹漂移' ;;
+    21) die 3 '中转实际协商 host-key 探针不可达' ;;
+    22) die 3 '经中转访问出口机失败' ;;
+    31) die 3 '中转实际协商 host-key 指纹漂移' ;;
+    32) die 3 '出口机实际协商 host-key 指纹漂移' ;;
+    *) die 5 '主机/密钥绑定核验异常' ;;
+  esac
+  REBASELINE_LIVE_COHOST="$(relay_cohost_kind_via "${RELAY_SSH_KEY}" "${RELAY_SSH_PORT}" "${RELAY_HOST}")" \
+    || die 3 "中转机上的 sing-box 状态不完整（${REBASELINE_LIVE_COHOST}）；先让既有服务完整运行或彻底移除再重跑"
+  log_info "[rebaseline] kind state=${REBASELINE_STATE_COHOST} config=${config_cohost} live=${REBASELINE_LIVE_COHOST}"
+
+  # 第 5 步：按现场取值采集基线、算新配置摘要（采集脚本按全局 RELAY_COHOSTS_SINGBOX 分支）。
+  RELAY_COHOSTS_SINGBOX="${REBASELINE_LIVE_COHOST}"
+  fresh="${OP_TMP}/baseline-rebaseline"
+  collect_relay_baseline "${fresh}"
+  new_config_hash="$(sha256_file "${fresh}/relay-config-manifest.txt")"
+  new_unit="$(sha256_file "${fresh}/relay-unit-manifest.txt")"
+  new_binary="$(sha256_file "${fresh}/relay-binary-manifest.txt")"
+  new_listen="$(sha256_file "${fresh}/relay-listeners.txt")"
+  new_active="${RELAY_BASELINE_SERVICE_ACTIVE}"
+  new_enabled="${RELAY_BASELINE_SERVICE_ENABLED}"
+  REBASELINE_NEW_CONFIG_SHA256="$(normalized_config | sha256_text)"
+
+  # 第 6 步：owner 迁移先于 noop 判定，无条件执行（幂等）。
+  rebaseline_owner exit
+  exit_hash="${REBASELINE_OWNER_HASH}"
+  rebaseline_owner relay
+  relay_hash="${REBASELINE_OWNER_HASH}"
+  rebaseline_test_stop owner
+
+  # 第 6a 步：noop（比较对象一律是 state）。
+  if [[ "${REBASELINE_BINDING}" == current && "${REBASELINE_LIVE_COHOST}" == "${REBASELINE_STATE_COHOST}" && "${REBASELINE_OWNER_CHANGED}" == 0 \
+        && "${new_config_hash}" == "$(kv_get "${STATE_FILE}" RELAY_BASELINE_CONFIG_MANIFEST_SHA256)" \
+        && "${new_unit}" == "$(kv_get "${STATE_FILE}" RELAY_BASELINE_UNIT_MANIFEST_SHA256)" \
+        && "${new_binary}" == "$(kv_get "${STATE_FILE}" RELAY_BASELINE_BINARY_MANIFEST_SHA256)" \
+        && "${new_listen}" == "$(kv_get "${STATE_FILE}" RELAY_BASELINE_LISTEN_SHA256)" \
+        && "${new_active}" == "$(kv_get "${STATE_FILE}" RELAY_BASELINE_SERVICE_ACTIVE)" \
+        && "${new_enabled}" == "$(kv_get "${STATE_FILE}" RELAY_BASELINE_SERVICE_ENABLED)" ]]; then
+    printf 'rebaseline=noop chain=%s kind=%s\n' "${CHAIN_ID}" "${REBASELINE_LIVE_COHOST}"
+    log_info "[rebaseline] noop chain=${CHAIN_ID}"
+    return 0
+  fi
+
+  # 第 6b 步：审计目录（第 7 步复用）与配置改写。
+  ensure_private_dir "${CHAIN_STATE_DIR}/audit" || die 1 'rebaseline audit 父目录不安全'
+  audit="${CHAIN_STATE_DIR}/audit/rebaselined.${DEPLOYMENT_ID}.${OPERATION_ID}"
+  [[ ! -e "${audit}" && ! -L "${audit}" ]] || die 1 "rebaseline audit 目录碰撞：${audit}"
+  mkdir "${audit}" || die 1 'rebaseline audit 目录创建失败'
+  chmod 700 "${audit}" || die 1 'rebaseline audit 目录权限设置失败'
+  rewrite_config_cohost "${audit}"
+  rebaseline_test_stop config
+
+  # 第 7 步：全局变量换成新值后提交（其余字段沿用 state，凭据与端口不变）。
+  CONFIG_SHA256="${REBASELINE_NEW_CONFIG_SHA256}"
+  EXIT_OWNER_SHA256="${exit_hash}"
+  RELAY_OWNER_SHA256="${relay_hash}"
+  RELAY_BASELINE_CONFIG_MANIFEST_SHA256="${new_config_hash}"
+  RELAY_BASELINE_UNIT_MANIFEST_SHA256="${new_unit}"
+  RELAY_BASELINE_BINARY_MANIFEST_SHA256="${new_binary}"
+  RELAY_BASELINE_LISTEN_SHA256="${new_listen}"
+  RELAY_BASELINE_SERVICE_ACTIVE="${new_active}"
+  RELAY_BASELINE_SERVICE_ENABLED="${new_enabled}"
+  publish_rebaseline "${audit}" "${fresh}"
+
+  # 第 8 步。
+  ensure_local_assets_match_state
+  full_verify
+  log_info "rebaseline 通过；chain=${CHAIN_ID} kind=${REBASELINE_LIVE_COHOST} elapsed=$(elapsed_seconds)s"
+}
+
 status_chain() {
   local rc
   if [[ -e "${JOURNAL_FILE}" || -L "${JOURNAL_FILE}" ]]; then
@@ -6505,7 +6807,7 @@ cleanup_operation_tmp() {
   if [[ ! -e "${OP_TMP}" && ! -L "${OP_TMP}" ]]; then
     return 0
   fi
-  operation_tmp_owner_matches "${OP_TMP}" "${LOCK_OPERATION_ID}" "${CONFIG_SHA256}" || return 1
+  operation_tmp_owner_matches "${OP_TMP}" "${LOCK_OPERATION_ID}" "${OPERATION_CONFIG_SHA256}" || return 1
   find "${OP_TMP}" -depth -mindepth 1 ! -path "${OP_TMP}/operation-owner.env" -delete || return 1
   rm -f "${OP_TMP}/operation-owner.env"
   rmdir "${OP_TMP}"
@@ -6683,9 +6985,29 @@ init_record_ed25519_hostkey() {
   log_info "已经由已验证的会话补记 ${entry} 的 ed25519 host key"
 }
 
+# 在中转机上采集 co-host 判定表的 6 个信号并判定取值（yes / ownexit-direct / no），init 与 rebaseline 共用；
+# 不满足任何一行时输出信号原文并返回 1。参数：私钥路径、SSH 端口、中转地址。
+relay_cohost_kind_via() {
+  local key="$1" port="$2" host="$3" probe u1 u2 d1 d2 p
+  probe="$(ssh -n -i "${key}" -p "${port}" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=12 \
+    root@"${host}" 'u1=$(systemctl show sing-box.service -p LoadState --value 2>/dev/null || true); u2=$(systemctl show ownexit-direct.service -p LoadState --value 2>/dev/null || true); d1=no; { [ -e /etc/sing-box ] || [ -L /etc/sing-box ]; } && d1=yes; d2=no; { [ -e /etc/ownexit-direct ] || [ -L /etc/ownexit-direct ]; } && d2=yes; p=no; for e in /proc/[0-9]*/exe; do r=$(readlink -f "$e" 2>/dev/null || true); case "${r##*/}" in sing-box|sing-box-*) p=yes; break;; esac; done; printf "%s %s %s %s %s\n" "${u1:-unknown}" "${u2:-unknown}" "$d1" "$d2" "$p"' 2>/dev/null || true)"
+  read -r u1 u2 d1 d2 p <<< "${probe}"
+  if [[ "${u1}" == loaded && "${d1}" == yes && "${p}" == yes && "${u2}" == not-found && "${d2}" == no ]]; then
+    printf 'yes'
+  elif [[ "${u2}" == loaded && "${d2}" == yes && "${p}" == yes && "${u1}" == not-found && "${d1}" == no ]]; then
+    printf 'ownexit-direct'
+  elif [[ "${u1}" == not-found && "${u2}" == not-found && "${d1}" == no && "${d2}" == no && "${p}" == no ]]; then
+    printf 'no'
+  else
+    printf 'sing-box.service=%s ownexit-direct.service=%s /etc/sing-box=%s /etc/ownexit-direct=%s 进程=%s' \
+      "${u1:-未知}" "${u2:-未知}" "${d1:-未知}" "${d2:-未知}" "${p:-未知}"
+    return 1
+  fi
+}
+
 init_chain() {
-  local relay exit_host chain_id relay_port exit_port sni relay_key exit_key exit_ip answer cohost probe
-  local load_state config_seen process_seen config_file tmp_file
+  local relay exit_host chain_id relay_port exit_port sni relay_key exit_key exit_ip answer cohost
+  local config_file tmp_file
   relay="${INIT_RELAY}"
   exit_host="${INIT_EXIT}"
   chain_id="${INIT_ID}"
@@ -6727,20 +7049,9 @@ init_chain() {
     [[ "${answer}" == y || "${answer}" == Y ]] || die 2 '未确认出口 IP，未生成配置文件'
   fi
 
-  # 中转现状：判定方式与 preflight 远端脚本一致（unit LoadState、/etc/sing-box、sing-box 进程），三者一致才自动填。
-  probe="$(ssh -n -i "${relay_key}" -p "${relay_port}" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=12 \
-    root@"${relay}" 'ls=$(systemctl show sing-box.service -p LoadState --value 2>/dev/null || true); cs=no; { [ -e /etc/sing-box ] || [ -L /etc/sing-box ]; } && cs=yes; ps=no; for e in /proc/[0-9]*/exe; do r=$(readlink -f "$e" 2>/dev/null || true); case "${r##*/}" in sing-box|sing-box-*) ps=yes; break;; esac; done; printf "%s %s %s\n" "${ls:-unknown}" "$cs" "$ps"' 2>/dev/null || true)"
-  read -r load_state config_seen process_seen <<EOF
-${probe}
-EOF
-  if [[ "${load_state}" == loaded && "${config_seen}" == yes && "${process_seen}" == yes ]]; then
-    cohost=yes
-  elif [[ "${load_state}" == not-found && "${config_seen}" == no && "${process_seen}" == no ]]; then
-    cohost=no
-  else
-    die 3 "中转机上的 sing-box 状态不完整（unit=${load_state:-未知} 配置目录=${config_seen:-未知} 进程=${process_seen:-未知}）；请先让它完整运行或彻底移除，再重跑 init"
-  fi
-  log_info "中转机已有 sing-box：${cohost}（RELAY_COHOSTS_SINGBOX=${cohost}，deploy 会保护它不受影响）"
+  # 中转现状：判定方式与 preflight 远端脚本一致（co-host 判定表，§5.1.10），满足其中一行才自动填。
+  cohost="$(relay_cohost_kind_via "${relay_key}" "${relay_port}" "${relay}")" || die 3 "中转机上的 sing-box 状态不完整（${cohost}）；请先让 233boy 的 sing-box 或 ownexit-direct 完整运行，或彻底移除，再重跑 init"
+  log_info "中转机既有 sing-box：RELAY_COHOSTS_SINGBOX=${cohost}（yes=233boy、ownexit-direct=ownexit 直连、no=没有；deploy 会保护既有服务不受影响）"
   case "${INIT_EXIT_SOURCE_FILTER}" in
     managed) log_info 'EXIT_SOURCE_FILTER=managed：部署时会在出口机加 nft 白名单，Reality 端口只放行中转机' ;;
     provider) log_info 'EXIT_SOURCE_FILTER=provider：由服务商安全组只放行中转机，部署时严格检查' ;;
@@ -6836,6 +7147,9 @@ main() {
       ;;
     rehost-exit)
       rehost_exit_chain
+      ;;
+    rebaseline)
+      rebaseline_chain
       ;;
   esac
 }

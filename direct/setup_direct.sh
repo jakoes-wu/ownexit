@@ -2,26 +2,25 @@
 # setup_direct.sh —— 直连部署入口：把一台 Debian / Ubuntu VPS 部署成自己的固定出口，并生成客户端订阅。
 #
 # 前置:
-#   - 在本机（macOS 已验证；Linux 未测试）的本仓库目录内运行；本机需要 ssh、ssh-keygen、curl、openssl、base64，
-#     第一次配免密还需要 expect（macOS: brew install expect）。
-#   - 一台可以用 root 密码 SSH 登录的 Debian / Ubuntu VPS；第一次运行会交互问一次密码，之后全程免密。
-#   - 第 4 阶段会经 SSH 交互式运行第三方安装脚本 233boy/sing-box（github.com/233boy/sing-box），
-#     端口 / SNI / UUID 由你现场回答。
+#   - 在本机运行（macOS 已验证；Linux 未测试）；本机需要 ssh、scp、ssh-keygen、curl、openssl、base64，
+#     第一次配免密还需要 expect（macOS: brew install expect）；显示二维码需要 qrencode（可选）。
+#   - 一台可以用 root 密码 SSH 登录的 Debian / Ubuntu VPS（systemd ≥ 240）；第一次运行会交互问一次密码，之后全程免密。
+#   - sing-box 由 VPS 自己从 GitHub 下载固定版本官方包并校验 SHA-256（下载失败时由本机下载后上传），全程无交互。
 #   - 不应被 source。
 #
-# 流程：
+# 流程（docs/feature/feature-direct-native-install.md）：
 #   1. 决定目标（--host > 上次记住的 VPS > 交互提问）；免密不可用时自动调用 connect_to.sh 配免密；
 #      校验系统（仅支持 Debian/Ubuntu），通过后记住这台 VPS
 #   2. VPS 上 curl ipinfo.io 确认公网 IP
 #   3. 幂等开启 BBR
-#   4. 经 SSH 交互式运行 233boy 安装 sing-box（已装则跳过）
-#   5. 用 `sb url` 拉回真实节点参数（UUID/端口/SNI/public-key/short-id/flow），不手写猜测
-#   6. 在本地暂存目录渲染订阅产物：
-#      <TOKEN>/clash.yaml、<TOKEN>/shadowrocket.txt、<TOKEN>/node.txt、
-#      根目录空 index.html（防目录列表泄露 TOKEN）、订阅服务 systemd 单元（SUB_PORT 已替换）
+#   4. 探测服务器状态（新机 / 已是本项目 / 233boy 旧版 / 迁移残局 / 未完成操作 / 冲突），按状态与参数选择操作：
+#      新装、修复、改参数、迁移（--migrate）、卸载（--uninstall）；改动 sing-box 的操作由 VPS 上的
+#      systemd 临时单元执行（direct_remote.sh），SSH 断开不影响，中途断电下次运行自动恢复
+#   5. 从 VPS 读回 /etc/ownexit-direct/client.env 得到节点参数（服务器是唯一权威源）
+#   6. 在本地暂存目录渲染订阅产物：<TOKEN>/clash.yaml、shadowrocket.txt、node.txt、空 index.html、订阅服务单元
 #   7. 调 sync_to_vps.sh 一次性同步到 VPS /opt/ownexit-subscription/，启用订阅服务
 #   8. 分层验证：VPS 主机、订阅服务、订阅链接拉取校验
-#   9. 打印三条订阅 URL、节点链接与后续步骤
+#   9. 打印订阅 URL、节点链接、二维码（有 qrencode 时）与后续步骤；同机有链时提示 rebaseline
 #
 # 不做：购买产品、改付款信息、删除服务器、重装系统、开放无关端口、运行与代理无关的服务。
 
@@ -36,6 +35,24 @@ NODE_NAME="ownexit-direct"
 SUB_BASE_DIR="/opt/ownexit-subscription"
 SUB_SERVICE="ownexit-subscription"
 ROTATE_TOKEN=0
+DO_MIGRATE=0
+DO_UNINSTALL=0
+WANT_SNI=""
+WANT_PROXY_PORT=""
+
+# sing-box 固定版本与官方包摘要：必须与 chain/setup_chain.sh 的同名常量逐字一致（CI 的“sing-box 常量一致”检查）。
+readonly SING_BOX_VERSION='1.13.14'
+readonly ARCHIVE_SHA256_LINUX_AMD64='f48703461a15476951ac4967cdad339d986f4b8096b4eb3ff0829a500502d697'
+readonly BINARY_SHA256_LINUX_AMD64='68aeab83cc4ab2659a5b92232261a20746ccdafc3b3d1e19b2d63247eec3bbf7'
+readonly ARCHIVE_SHA256_LINUX_ARM64='4742df6a4314e8ecc41736849fca6d73b8f9e91b6e8b06ee794ff17ba180579e'
+readonly BINARY_SHA256_LINUX_ARM64='85f570b96754cd7c354d28e50f66e9340b374e06b5d77ec9e15e8d04f0c87a25'
+readonly OFFICIAL_RELEASE_BASE_URL="https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}"
+# 仅供测试下载失败回退：只改 VPS 端的下载地址；本机回退下载固定走官方地址。正常使用不要设置。
+REMOTE_RELEASE_BASE_URL="${OWNEXIT_TEST_RELEASE_BASE_URL:-${OFFICIAL_RELEASE_BASE_URL}}"
+# 与链式默认 SNI 一致（chain/setup_chain.sh:66）。
+readonly DIRECT_SNI_DEFAULT='www.amazon.com'
+readonly REMOTE_WORK='/var/lib/ownexit-direct'
+readonly OP_UNIT='ownexit-direct-op'
 
 usage() {
   cat <<EOF
@@ -47,6 +64,13 @@ SSH 端口不是 22 时:
   $(basename "$0") --host 203.0.113.7 --port 2222
 之后重新部署 / 换了客户端要重新拉订阅（自动使用上次记住的 VPS）:
   $(basename "$0")
+换 Reality 伪装域名或代理端口（UUID 与密钥不变，客户端需重新导入订阅）:
+  $(basename "$0") --sni www.microsoft.com
+  $(basename "$0") --proxy-port 34567
+把用 233boy 脚本装的旧版换成本项目的服务（沿用原有 UUID / 密钥 / 端口 / SNI，客户端不用动）:
+  $(basename "$0") --migrate
+卸载 VPS 上的直连服务与订阅服务（保留 SSH 免密与迁移备份）:
+  $(basename "$0") --uninstall
 怀疑订阅链接泄露，换一个新的订阅地址:
   $(basename "$0") --rotate-token
 
@@ -54,10 +78,16 @@ SSH 端口不是 22 时:
   --host <ip/host>            出口 VPS 地址；不给时用上次记住的 VPS，没有则交互提问
   -u, --user <user>           SSH 用户名，默认 root
   -P, --port <port>           SSH 端口，默认 22
+  --sni <域名>                Reality 伪装域名；新装默认 ${DIRECT_SNI_DEFAULT}
+  --proxy-port <端口>         代理端口；新装默认在 20000-59999 随机
+  --migrate                   把 233boy 旧版迁移为本项目的服务（一次性）
+  --uninstall                 卸载直连服务与订阅服务
   --rotate-token              重新生成 TOKEN 和 SUB_PORT，并清理 VPS 上旧 TOKEN 目录
   -h, --help                  显示帮助
 
-退出码: 0 全部通过；1 部署失败或有验证项未通过；2 参数错误或缺参数（非终端运行时）。
+--migrate、--uninstall、--rotate-token 三者互斥；--sni / --proxy-port 不能与 --uninstall 同用。
+
+退出码: 0 全部通过；1 部署失败或有验证项未通过；2 参数错误、缺参数（非终端运行时）或服务器是旧版需要 --migrate。
 EOF
 }
 
@@ -78,11 +108,28 @@ while [[ $# -gt 0 ]]; do
     --user=*)         SSH_USER="${1#*=}"; shift ;;
     -P|--port)        SSH_PORT="${2:?--port 需要一个参数}"; shift 2 ;;
     --port=*)         SSH_PORT="${1#*=}"; shift ;;
+    --sni)            WANT_SNI="${2:?--sni 需要一个参数}"; shift 2 ;;
+    --sni=*)          WANT_SNI="${1#*=}"; shift ;;
+    --proxy-port)     WANT_PROXY_PORT="${2:?--proxy-port 需要一个参数}"; shift 2 ;;
+    --proxy-port=*)   WANT_PROXY_PORT="${1#*=}"; shift ;;
+    --migrate)        DO_MIGRATE=1; shift ;;
+    --uninstall)      DO_UNINSTALL=1; shift ;;
     --rotate-token)   ROTATE_TOKEN=1; shift ;;
     -h|--help)        usage; exit 0 ;;
     *)                die_usage "未知参数: $1（用 --help 查看用法）" ;;
   esac
 done
+
+(( DO_MIGRATE + DO_UNINSTALL + ROTATE_TOKEN <= 1 )) || die_usage "--migrate、--uninstall、--rotate-token 只能选一个"
+if [[ "${DO_UNINSTALL}" == 1 && ( -n "${WANT_SNI}" || -n "${WANT_PROXY_PORT}" ) ]]; then
+  die_usage "--uninstall 不能与 --sni / --proxy-port 同用"
+fi
+if [[ -n "${WANT_SNI}" && ! "${WANT_SNI}" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]; then
+  die_usage "--sni 必须是域名：${WANT_SNI}"
+fi
+if [[ -n "${WANT_PROXY_PORT}" ]] && { [[ ! "${WANT_PROXY_PORT}" =~ ^[1-9][0-9]{0,4}$ ]] || (( WANT_PROXY_PORT > 65535 )); }; then
+  die_usage "--proxy-port 必须是 1-65535 的数字：${WANT_PROXY_PORT}"
+fi
 
 resolve_target
 if [[ "${SSH_USER}" != "root" ]]; then
@@ -104,42 +151,14 @@ SSH_OPTS=(
   -o SetEnv=LC_ALL=C.UTF-8
 )
 
-# 非交互远程执行；233boy 安装单独用 ssh -t 走交互
+# 非交互远程执行
 vssh() {
   ssh "${SSH_OPTS[@]}" "${SSH_USER}@${HOST}" "$@"
 }
 
-strip_ansi() {
-  sed -E $'s/\x1b\\[[0-9;]*[A-Za-z]//g'
-}
-
-# 从 URL query 串中取指定 key 的值（key=value&...）
-query_param() {
-  local query="$1" key="$2"
-  printf '%s\n' "${query}" | tr '&' '\n' | sed -n "s/^${key}=//p" | head -n 1
-}
-
-# 解析 vless:// 链接，结果写入 PROXY_* 全局变量
-parse_vless_link() {
-  local link="$1" rest hostport query
-  rest="${link#vless://}"
-  PROXY_UUID="${rest%%@*}"
-  rest="${rest#*@}"
-  hostport="${rest%%\?*}"
-  hostport="${hostport%%/*}"
-  PROXY_SERVER="${hostport%%:*}"
-  PROXY_PORT="${hostport##*:}"
-  query="${rest#*\?}"
-  query="${query%%#*}"
-  PROXY_SNI="$(query_param "${query}" "sni")"
-  PROXY_PBK="$(query_param "${query}" "pbk")"
-  PROXY_SID="$(query_param "${query}" "sid")"
-  PROXY_FLOW="$(query_param "${query}" "flow")"
-
-  [[ -n "${PROXY_UUID}" && "${PROXY_UUID}" != "${link}" ]] || return 1
-  [[ "${PROXY_PORT}" =~ ^[0-9]+$ ]] || return 1
-  [[ -n "${PROXY_SERVER}" && -n "${PROXY_SNI}" && -n "${PROXY_PBK}" ]] || return 1
-  return 0
+# 从 KEY=VALUE 文本里取一个键（只按行解析，不 eval）。
+kv_get() {
+  printf '%s\n' "$1" | awk -F= -v k="$2" '$1 == k { sub(/^[^=]*=/, ""); print; exit }'
 }
 
 FAIL_COUNT=0
@@ -185,130 +204,402 @@ case "${OS_ID}" in
     ;;
 esac
 
-# 基础工具：curl（验IP）、wget（233boy 安装）、python3（订阅服务）
-echo "[*] 检查 VPS 基础工具（curl / wget / python3）"
-MISSING_PKGS="$(vssh 'missing=""; for c in curl wget python3; do command -v "$c" >/dev/null 2>&1 || missing="$missing $c"; done; echo "$missing"' | xargs || true)"
-if [[ -n "${MISSING_PKGS}" ]]; then
-  echo "[*] 安装缺失工具：${MISSING_PKGS}"
-  vssh "apt-get update -qq && apt-get install -y -qq ${MISSING_PKGS}" \
-    || die "apt 安装 ${MISSING_PKGS} 失败"
+# 基础工具：curl（验 IP、下载官方包）、python3（订阅服务、读迁移配置）、tar（解压官方包）
+if [[ "${DO_UNINSTALL}" == 0 ]]; then
+  echo "[*] 检查 VPS 基础工具（curl / python3 / tar）"
+  MISSING_PKGS="$(vssh 'missing=""; for c in curl python3 tar; do command -v "$c" >/dev/null 2>&1 || missing="$missing $c"; done; echo "$missing"' | xargs || true)"
+  if [[ -n "${MISSING_PKGS}" ]]; then
+    echo "[*] 安装缺失工具：${MISSING_PKGS}"
+    vssh "apt-get update -qq && apt-get install -y -qq ${MISSING_PKGS}" \
+      || die "apt 安装 ${MISSING_PKGS} 失败"
+  fi
+  pass "基础工具就绪"
 fi
-pass "基础工具就绪"
 
 # 免密和系统都确认可用后才记住这台 VPS，避免把一个连不上或不支持的目标记成"上次的 VPS"。
 save_target
 
-# ---------- 2. VPS 公网 IP ----------
+if [[ "${DO_UNINSTALL}" == 0 ]]; then
+  # ---------- 2. VPS 公网 IP ----------
 
-echo "[*] 读取 VPS 公网 IP（curl ipinfo.io）"
-VPS_PUBLIC_IP="$(vssh "curl -fsS -m 15 ipinfo.io/ip" 2>/dev/null | tr -d '[:space:]' || true)"
-if [[ -z "${VPS_PUBLIC_IP}" ]]; then
-  fail "VPS 上 curl ipinfo.io 失败，无法确认公网 IP"
-else
-  pass "VPS 公网 IP：${VPS_PUBLIC_IP}"
-  if [[ "${VPS_PUBLIC_IP}" != "${HOST}" ]]; then
-    echo "[!] 注意：VPS 出口 IP（${VPS_PUBLIC_IP}）与 SSH 地址（${HOST}）不一致，请人工确认是否符合预期"
+  echo "[*] 读取 VPS 公网 IP（curl ipinfo.io）"
+  VPS_PUBLIC_IP="$(vssh "curl -fsS -m 15 ipinfo.io/ip" 2>/dev/null | tr -d '[:space:]' || true)"
+  if [[ -z "${VPS_PUBLIC_IP}" ]]; then
+    fail "VPS 上 curl ipinfo.io 失败，无法确认公网 IP；节点地址将退回使用 SSH 地址 ${HOST}"
+  else
+    pass "VPS 公网 IP：${VPS_PUBLIC_IP}"
+    if [[ "${VPS_PUBLIC_IP}" != "${HOST}" ]]; then
+      echo "[!] 注意：VPS 出口 IP（${VPS_PUBLIC_IP}）与 SSH 地址（${HOST}）不一致，请人工确认是否符合预期"
+    fi
   fi
-fi
 
-# ---------- 3. 幂等开启 BBR ----------
+  # ---------- 3. 幂等开启 BBR ----------
 
-echo "[*] 开启 BBR（幂等，重复执行无害）"
-BBR_NOW="$(vssh "cat >/etc/sysctl.d/99-bbr.conf <<'EOF'
+  echo "[*] 开启 BBR（幂等，重复执行无害）"
+  # 远端 heredoc 的内容与结束标记必须顶格：缩进的 EOF 不会结束 heredoc，sysctl 一条都不会执行。
+  BBR_NOW="$(vssh "cat >/etc/sysctl.d/99-bbr.conf <<'EOF'
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 EOF
 sysctl --system >/dev/null 2>&1
 sysctl -n net.ipv4.tcp_congestion_control" || true)"
-if [[ "${BBR_NOW}" == "bbr" ]]; then
-  pass "BBR 已启用"
-else
-  fail "BBR 未生效（当前拥塞算法：${BBR_NOW:-未知}），可能内核过旧，请人工检查"
+  if [[ "${BBR_NOW}" == "bbr" ]]; then
+    pass "BBR 已启用"
+  else
+    fail "BBR 未生效（当前拥塞算法：${BBR_NOW:-未知}），可能内核过旧，请人工检查"
+  fi
 fi
-
-# ---------- 4. 233boy 安装 sing-box（交互式，已装则跳过） ----------
-
-if vssh "command -v sb >/dev/null 2>&1 || test -x /usr/local/bin/sb" >/dev/null 2>&1; then
-  pass "检测到 sb 命令，sing-box 已安装，跳过 233boy 安装"
-else
-  cat <<'EOF'
-[*] 即将经 SSH 交互式运行 233boy sing-box 安装脚本（官方仓库 github.com/233boy/sing-box）。
-    接下来出现的提示由你现场回答，建议：
-      - 协议：按名称选 VLESS-REALITY / Reality（不要死记菜单编号）
-      - 端口：直接回车（随机）
-      - SNI：输入 www.microsoft.com（大众脸、抗封锁稳；想用默认直接回车也行）
-      - UUID：直接回车（自动生成）
-    遇到没见过的菜单/提示，按 Ctrl+C 退出并反馈，不要盲目回车。
-EOF
-  # 交互安装必须分配 tty；这里不复用 BatchMode 的 SSH_OPTS
-  ssh -t -i "${KEY}" -p "${SSH_PORT}" \
-    -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o SetEnv=LC_ALL=C.UTF-8 \
-    "${SSH_USER}@${HOST}" \
-    "bash <(wget -qO- https://raw.githubusercontent.com/233boy/sing-box/main/install.sh)" \
-    || echo "[!] 233boy 安装进程退出码非零（无 tty 时属常见现象），以下面的 sb 检测为准"
-  vssh "command -v sb >/dev/null 2>&1 || test -x /usr/local/bin/sb" >/dev/null 2>&1 \
-    || die "安装后未检测到 sb 命令，233boy 安装可能未完成"
-  pass "233boy sing-box 安装完成"
-fi
-
-# ---------- 5. 用 sb url 拉回真实节点参数 ----------
-
-echo "[*] 用 'sb url' 拉取真实节点参数"
-# VPS 上 sing-box 有多个配置文件时（例如你自己用 sb 另加过协议），裸 `sb url` 会弹出
-# 「请选择配置」交互菜单，非交互 SSH 下读不到输入 → 死循环挂住（破坏脚本幂等重跑）。
-# 显式把 reality 配置名传给 `sb url <名>` 直取该节点链接（只有单个配置时同样可用）。
-REALITY_CONF="$(vssh "ls /etc/sing-box/conf/ 2>/dev/null | grep VLESS-REALITY | head -n1" 2>/dev/null | tr -d '[:space:]' || true)"
-SB_URL_RAW="$(vssh "sb url ${REALITY_CONF} 2>/dev/null || /usr/local/bin/sb url ${REALITY_CONF}" | strip_ansi || true)"
-NODE_LINK="$(printf '%s\n' "${SB_URL_RAW}" | grep -oE 'vless://[^[:space:]]+' | head -n 1 || true)"
-[[ -n "${NODE_LINK}" ]] || die "'sb url' 输出中找不到 vless:// 链接；请在 VPS 上运行 sb 检查节点配置。原始输出：${SB_URL_RAW}"
-
-parse_vless_link "${NODE_LINK}" \
-  || die "无法从节点链接解析出 UUID/端口/SNI/public-key，请人工核对：${NODE_LINK}"
-pass "节点参数：server=${PROXY_SERVER} port=${PROXY_PORT} sni=${PROXY_SNI} flow=${PROXY_FLOW:-无} sid=${PROXY_SID:-空}"
-
-# 保留真实参数、只改备注名，方便客户端里按统一名称选择
-SR_LINK="vless://${NODE_LINK#vless://}"
-SR_LINK="${SR_LINK%%#*}#${NODE_NAME}"
-
-# ---------- 6. 本地渲染订阅产物 ----------
 
 # 订阅 TOKEN 是"VPS 上订阅目录名"的唯一记录，丢了就只能 --rotate-token，所以放 XDG state 而不是可随时清空的 cache。
 STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/ownexit/direct/${SAFE_NAME}"
 STATE_FILE="${STATE_DIR}/state.env"
 STAGING="${STATE_DIR}/${SUB_SERVICE}"
-mkdir -p "${STATE_DIR}"
-chmod 700 "${STATE_DIR}"
-
 OLD_TOKEN=""
 SUB_PORT=""
 TOKEN=""
 if [[ -f "${STATE_FILE}" ]]; then
-  # state.env 只含本脚本写入的 SUB_PORT / TOKEN 两个键（权限 600）。
-  # shellcheck disable=SC1090
-  source "${STATE_FILE}"
+  # state.env 只含本脚本写入的 SUB_PORT / TOKEN 两个键（权限 600），按行解析不 source。
+  SUB_PORT="$(kv_get "$(cat "${STATE_FILE}")" SUB_PORT)"
+  TOKEN="$(kv_get "$(cat "${STATE_FILE}")" TOKEN)"
 fi
 
-TOKEN_CHANGED=0
-if [[ "${ROTATE_TOKEN}" == "1" || -z "${TOKEN}" || -z "${SUB_PORT}" ]]; then
-  OLD_TOKEN="${TOKEN:-}"
-  TOKEN="$(openssl rand -hex 16)"
-  # 随机高位订阅端口：避开代理端口，并确认 VPS 上未被占用
+# ---------- 同机链提示（§5.1.8） ----------
+
+# 找出 RELAY_HOST 等于本次 HOST 的链：直连在这台机器上的任何变动都会让这些链的预检 / 基线核验失败，
+# 需要用户运行 rebaseline 重新登记（转发本身不受影响）。只按 KEY=VALUE 逐行读，不 source 链配置。
+print_chain_hints() {
+  local dir file relay id found=0
+  dir="${XDG_CONFIG_HOME:-${HOME}/.config}/ownexit/chains"
+  [[ -d "${dir}" ]] || return 0
+  for file in "${dir}"/*.env; do
+    [[ -f "${file}" ]] || continue
+    relay="$(awk -F= '$1 == "RELAY_HOST" { sub(/^[^=]*=/, ""); print; exit }' "${file}")"
+    [[ "${relay}" == "${HOST}" ]] || continue
+    id="$(basename "${file}" .env)"
+    if [[ "${found}" == 0 ]]; then
+      echo
+      echo "[!] 这台 VPS 也是链式部署的中转机。直连的变动会让下列链的 verify / status / rollback 在预检或基线核验处失败"
+      echo "    （中转转发本身不受影响），请运行："
+      found=1
+    fi
+    echo "      ownexit chain --id ${id} rebaseline"
+  done
+}
+
+# ---------- 4. 服务器状态探测与操作（§5.1.2–§5.1.7） ----------
+
+case "$(vssh 'uname -m' 2>/dev/null || true)" in
+  x86_64)  REMOTE_ARCH=amd64; ARCHIVE_SHA256="${ARCHIVE_SHA256_LINUX_AMD64}"; BINARY_SHA256="${BINARY_SHA256_LINUX_AMD64}" ;;
+  aarch64) REMOTE_ARCH=arm64; ARCHIVE_SHA256="${ARCHIVE_SHA256_LINUX_ARM64}"; BINARY_SHA256="${BINARY_SHA256_LINUX_ARM64}" ;;
+  *)       die "VPS CPU 架构不受支持（只支持 x86_64 / aarch64）" ;;
+esac
+ARCHIVE_NAME="sing-box-${SING_BOX_VERSION}-linux-${REMOTE_ARCH}.tar.gz"
+
+# 把服务器端脚本投递到 VPS（root 700 目录），每次都覆盖为本版本，避免恢复执行时跑到旧版脚本。
+upload_remote_script() {
+  vssh "install -d -m 700 '${REMOTE_WORK}' && cat > '${REMOTE_WORK}/op.sh' && chmod 600 '${REMOTE_WORK}/op.sh'" \
+    < "${SCRIPT_DIR}/direct_remote.sh" || die "无法把 direct_remote.sh 上传到 VPS"
+}
+
+probe_server() {
+  PROBE="$(vssh "bash '${REMOTE_WORK}/op.sh' probe" 2>/dev/null)" || die "服务器状态探测失败（SSH 中断或脚本异常），请重跑"
+  STATE="$(kv_get "${PROBE}" STATE)"
+  [[ -n "${STATE}" ]] || die "服务器状态探测没有返回 STATE：${PROBE}"
+}
+
+local_sha256() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  else openssl dgst -sha256 "$1" | awk '{print $NF}'
+  fi
+}
+
+# VPS 下载官方包失败时：本机固定从官方地址下载、校验归档摘要，再上传到 VPS 保留的暂存目录。
+upload_archive_from_local() {
+  local stage="$1" tmp
+  [[ "${stage}" == /opt/ownexit-direct/.stage-* ]] || die "VPS 返回的暂存目录不合法：${stage}"
+  tmp="$(mktemp -d)"
+  echo "[*] VPS 下载官方包失败，改由本机下载 ${ARCHIVE_NAME} 后上传"
+  if ! curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 --max-time 600 \
+      -o "${tmp}/archive.tar.gz" "${OFFICIAL_RELEASE_BASE_URL}/${ARCHIVE_NAME}"; then
+    rm -rf "${tmp}"
+    die "本机也无法下载 ${ARCHIVE_NAME}（需要能访问 github.com）；VPS 上的操作保持在可恢复状态，网络恢复后重跑即可"
+  fi
+  [[ "$(local_sha256 "${tmp}/archive.tar.gz")" == "${ARCHIVE_SHA256}" ]] || { rm -rf "${tmp}"; die "本机下载的官方包摘要不符，停止"; }
+  scp -q -i "${KEY}" -P "${SSH_PORT}" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+    "${tmp}/archive.tar.gz" "${SSH_USER}@${HOST}:${stage}/archive.tar.gz" || { rm -rf "${tmp}"; die "上传官方包到 VPS 失败"; }
+  rm -rf "${tmp}"
+}
+
+# 写 op.args：只放业务参数，测试钩子不进这里（恢复执行时不应再次触发）。
+write_op_args() {
+  local op="$1"; shift
+  {
+    printf 'OP=%s\n' "${op}"
+    printf 'VERSION=%s\nARCH=%s\nARCHIVE_SHA256=%s\nBINARY_SHA256=%s\nRELEASE_URL=%s/%s\n' \
+      "${SING_BOX_VERSION}" "${REMOTE_ARCH}" "${ARCHIVE_SHA256}" "${BINARY_SHA256}" "${REMOTE_RELEASE_BASE_URL}" "${ARCHIVE_NAME}"
+    printf 'SUB_PORT=%s\n' "${SUB_PORT}"
+    local kv
+    for kv in "$@"; do printf '%s\n' "${kv}"; done
+  } | vssh "cat > '${REMOTE_WORK}/op.args' && chmod 600 '${REMOTE_WORK}/op.args'" || die "无法写入 VPS 上的 op.args"
+}
+
+# 启动（或等待已在运行的）临时单元并取回结果。临时单元由 systemd 托管，与本次 SSH 会话无关：
+# 本机断网 / 退出不影响它；这里只是轮询，不能用 --wait 把结果绑在 SSH 连接上。
+# 结果写入全局 OP_RESULT（result.env 的全文）。
+execute_remote_op() {
+  local offset active setenv='' tries
+  offset="$(vssh "stat -c %s '${REMOTE_WORK}/op.log' 2>/dev/null || echo 0" | tr -d '[:space:]')"
+  [[ "${offset}" =~ ^[0-9]+$ ]] || offset=0
+  active="$(vssh "systemctl show '${OP_UNIT}' -p ActiveState --value 2>/dev/null" | tr -d '[:space:]' || true)"
+  if [[ "${active}" != active && "${active}" != activating && "${active}" != deactivating && "${active}" != reloading ]]; then
+    [[ -z "${OWNEXIT_TEST_DIRECT_FAIL_AT:-}" ]] || setenv="${setenv} --setenv=OWNEXIT_TEST_DIRECT_FAIL_AT=${OWNEXIT_TEST_DIRECT_FAIL_AT}"
+    [[ -z "${OWNEXIT_TEST_DIRECT_PAUSE_AT:-}" ]] || setenv="${setenv} --setenv=OWNEXIT_TEST_DIRECT_PAUSE_AT=${OWNEXIT_TEST_DIRECT_PAUSE_AT}"
+    vssh "rm -f '${REMOTE_WORK}/result.env'; systemctl reset-failed '${OP_UNIT}' >/dev/null 2>&1; \
+      systemd-run --unit='${OP_UNIT}' --collect --quiet \
+        -p StandardOutput=append:${REMOTE_WORK}/op.log -p StandardError=append:${REMOTE_WORK}/op.log${setenv} \
+        bash '${REMOTE_WORK}/op.sh' run" || die "无法在 VPS 上启动 ${OP_UNIT}（需要 systemd ≥ 240）"
+  else
+    echo "[*] VPS 上已有一个操作在运行，等待它结束"
+  fi
+  tries=0
+  while :; do
+    sleep 2
+    if active="$(vssh "systemctl show '${OP_UNIT}' -p ActiveState --value 2>/dev/null" 2>/dev/null)"; then
+      tries=0
+      active="$(printf '%s' "${active}" | tr -d '[:space:]')"
+      case "${active}" in active|activating|deactivating|reloading) continue ;; esac
+      break
+    fi
+    # SSH 断开：操作仍在 VPS 上继续，这里重连等待即可。
+    tries=$((tries + 1))
+    (( tries <= 60 )) || die "与 VPS 的连接持续中断；VPS 上的操作会自行完成，网络恢复后重跑本命令即可看到结果"
+  done
+  vssh "tail -c +$((offset + 1)) '${REMOTE_WORK}/op.log' 2>/dev/null" | sed 's/^/    [vps] /' || true
+  OP_RESULT="$(vssh "cat '${REMOTE_WORK}/result.env' 2>/dev/null" || true)"
+}
+
+# 执行一个操作直到有结论：下载失败时走本机上传后以同一操作重入（最多一次）。
+run_op_to_end() {
+  local reason
+  execute_remote_op
+  reason="$(kv_get "${OP_RESULT}" REASON)"
+  if [[ "$(kv_get "${OP_RESULT}" RESULT)" == fail && "${reason}" == download ]]; then
+    upload_archive_from_local "$(kv_get "${OP_RESULT}" STAGE)"
+    execute_remote_op
+  fi
+  [[ -n "$(kv_get "${OP_RESULT}" RESULT)" ]] || die "VPS 上的操作没有留下结果（可能被中断），重跑本命令会自动恢复"
+  local backup
+  backup="$(kv_get "${OP_RESULT}" BACKUP)"
+  [[ -z "${backup}" ]] || echo "[*] 迁移备份：${backup}（含旧私钥，确认无需回退后可自行删除）"
+  echo "[*] 服务器操作 OP=$(kv_get "${OP_RESULT}" OP) 结果=$(kv_get "${OP_RESULT}" RESULT) reason=$(kv_get "${OP_RESULT}" REASON)"
+}
+
+start_op() {
+  write_op_args "$@"
+  run_op_to_end
+}
+
+op_ok() { [[ "$(kv_get "${OP_RESULT}" RESULT)" == ok ]]; }
+
+# 订阅端口要在新装前就确定，新装选代理端口时才能避开它。
+ensure_sub_params() {
+  if [[ "${ROTATE_TOKEN}" == "1" || -z "${TOKEN}" || -z "${SUB_PORT}" ]]; then
+    OLD_TOKEN="${TOKEN:-}"
+    TOKEN="$(openssl rand -hex 16)"
+    # 随机高位订阅端口：确认 VPS 上未被占用
+    SUB_PORT=""
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      SUB_PORT="$(( (RANDOM % 40000) + 20000 ))"
+      if ! vssh "ss -ltn | awk '{print \$4}' | grep -q ':${SUB_PORT}\$'" >/dev/null 2>&1; then
+        break
+      fi
+      SUB_PORT=""
+    done
+    [[ -n "${SUB_PORT}" ]] || die "连续 10 次未找到空闲订阅端口，请人工检查 VPS 端口占用"
+    TOKEN_CHANGED=1
+    pass "生成订阅参数：SUB_PORT=${SUB_PORT} TOKEN=${TOKEN}"
+  else
+    TOKEN_CHANGED=0
+    pass "复用已有订阅参数：SUB_PORT=${SUB_PORT}（TOKEN 不变；如需轮换用 --rotate-token）"
+  fi
+}
+
+upload_remote_script
+probe_server
+SYSTEMD_VERSION="$(kv_get "${PROBE}" SYSTEMD_VERSION)"
+[[ "${SYSTEMD_VERSION}" =~ ^[0-9]+$ ]] && (( SYSTEMD_VERSION >= 240 )) \
+  || die "VPS 的 systemd 版本为 ${SYSTEMD_VERSION:-未知}，需要 ≥ 240（Debian 10 / Ubuntu 20.04 及以上）"
+echo "[*] 服务器状态：STATE=${STATE} ARCH=${REMOTE_ARCH}"
+
+# 未完成的操作先恢复（§5.1.2 第 5 条）：只有成功或已回到可用旧状态（rolled-back）才继续本次请求。
+if [[ "${STATE}" == in_progress ]]; then
+  echo "[*] 恢复上次未完成的操作：OP=$(kv_get "${PROBE}" TXN_OP) STEP=$(kv_get "${PROBE}" TXN_STEP)"
+  run_op_to_end
+  if ! op_ok && [[ "$(kv_get "${OP_RESULT}" REASON)" != rolled-back ]]; then
+    die "上次未完成的操作恢复失败（REASON=$(kv_get "${OP_RESULT}" REASON)），本次请求未执行；详见上方 [vps] 日志与 ownexit subctl log"
+  fi
+  probe_server
+  echo "[*] 恢复后的服务器状态：STATE=${STATE}"
+fi
+
+# ---------- 卸载分支（§5.1.7） ----------
+
+if [[ "${DO_UNINSTALL}" == 1 ]]; then
+  case "${STATE}" in
+    legacy) die "服务器是 233boy 旧版，ownexit 不会卸载它：先运行 $(basename "$0") --migrate，或在 VPS 上用 233boy 自带的卸载" ;;
+  esac
+  LEFTOVER_STATE="${STATE}"
+  start_op uninstall
+  op_ok || die "卸载未完成（REASON=$(kv_get "${OP_RESULT}" REASON)）；重跑 --uninstall 会从中断处继续"
+  # 结果已读到、临时单元已结束：最后才删工作目录（结果通道在其中）。
+  vssh "systemctl is-active --quiet '${OP_UNIT}' || rm -rf '${REMOTE_WORK}'" || true
+  RESIDUE="$(vssh 'for u in ownexit-direct.service ownexit-subscription.service; do s=$(systemctl show "$u" -p LoadState --value 2>/dev/null); [ "$s" = not-found ] || echo "$u($s)"; done; for d in /etc/ownexit-direct /opt/ownexit-direct /opt/ownexit-subscription /var/lib/ownexit-direct; do [ -e "$d" ] && echo "$d"; done; true')"
+  [[ -z "${RESIDUE}" ]] || die "卸载后仍有残留：$(printf '%s' "${RESIDUE}" | tr '\n' ' ')"
+  pass "卸载残留核验通过"
+  rm -rf "${STATE_DIR}"
+  if [[ "${LEFTOVER_STATE}" == conflict || "${LEFTOVER_STATE}" == migrated_leftover ]]; then
+    # 卸载后实时核对 VPS 上剩下的 233boy / 其它 sing-box 文件（卸载前的 SEEN 还包含已删掉的 ownexit 路径）。
+    OTHERS="$(vssh 'for p in /usr/local/bin/sb /usr/local/bin/sing-box /etc/sing-box /lib/systemd/system/sing-box.service; do [ -e "$p" ] || [ -L "$p" ] && echo "$p"; done; s=$(systemctl show sing-box.service -p LoadState --value 2>/dev/null); [ "$s" = not-found ] || echo "sing-box.service($s)"; true')"
+    if [[ -n "${OTHERS}" && "${LEFTOVER_STATE}" == conflict ]]; then
+      # §5.1.3 conflict 行：只删 ownexit 的路径后仍不是 none，按失败退出。
+      rm -rf "${STATE_DIR}"
+      die "已删除 ownexit 的文件，但 VPS 上仍有其它 sing-box 相关文件，未处理：$(printf '%s' "${OTHERS}" | tr '\n' ' ')"
+    elif [[ -n "${OTHERS}" ]]; then
+      echo "[!] 卸载只删除了 ownexit 的文件；VPS 上的 233boy 残留未处理：$(printf '%s' "${OTHERS}" | tr '\n' ' ')"
+    fi
+  fi
+  vssh 'ls /var/backups/ownexit-direct/*.tar.gz 2>/dev/null' | sed 's/^/[*] 迁移备份仍保留（含旧私钥）：/' || true
+  echo "[*] 保留：SSH 免密密钥 ${KEY}、记住的目标、BBR 设置"
+  print_chain_hints
+  echo "[+] 卸载完成"
+  exit 0
+fi
+
+# ---------- 新装 / 复用 / 改参数 / 迁移 ----------
+
+read_client_env() {
+  CLIENT_ENV="$(vssh "cat /etc/ownexit-direct/client.env" 2>/dev/null)" || die "无法读取 VPS 上的 /etc/ownexit-direct/client.env"
+}
+
+server_port_in_use() {
+  vssh "ss -H -ltn | awk '{print \$4}' | grep -Eq '[:.]$1\$'" >/dev/null 2>&1
+}
+
+CHANGED_PARAMS=0
+case "${STATE}" in
+  none)
+    [[ "${DO_MIGRATE}" == 0 ]] || { echo "[!] 服务器上没有可迁移的 233boy 旧版" >&2; exit 2; }
+    ensure_sub_params
+    if [[ -n "${WANT_PROXY_PORT}" ]]; then
+      [[ "${WANT_PROXY_PORT}" != "${SUB_PORT}" ]] || die_usage "--proxy-port 与订阅端口 ${SUB_PORT} 相同，请换一个"
+      ! server_port_in_use "${WANT_PROXY_PORT}" || die_usage "VPS 上端口 ${WANT_PROXY_PORT} 已被占用"
+    fi
+    echo "[*] 新装：服务器自己下载 sing-box ${SING_BOX_VERSION} 官方包并生成密钥"
+    start_op fresh "SNI=${WANT_SNI:-${DIRECT_SNI_DEFAULT}}" "PROXY_PORT=${WANT_PROXY_PORT}"
+    op_ok || die "新装失败（REASON=$(kv_get "${OP_RESULT}" REASON)），VPS 已撤销本次写入；处理后重跑即可"
+    ;;
+  ownexit|migrated_leftover)
+    if [[ "${STATE}" == migrated_leftover && "${DO_MIGRATE}" == 1 ]]; then
+      echo "[*] 继续清理迁移残留的 233boy 文件"
+      start_op migrate "MIGRATE_START=CLEAN"
+      op_ok || die "迁移清理未完成（REASON=$(kv_get "${OP_RESULT}" REASON)）"
+    elif [[ "${STATE}" == migrated_leftover ]]; then
+      echo "[!] 迁移未清理完，加 --migrate 继续清理 233boy 残留；本次按已迁移的新版处理"
+    elif [[ "${DO_MIGRATE}" == 1 ]]; then
+      echo "[*] 服务器已是新版，无需迁移，按复用处理"
+    fi
+    ensure_sub_params
+    read_client_env
+    CUR_SNI="$(kv_get "${CLIENT_ENV}" SNI)"
+    CUR_PORT="$(kv_get "${CLIENT_ENV}" PORT)"
+    NEW_SNI=""; NEW_PORT=""
+    [[ -z "${WANT_SNI}" || "${WANT_SNI}" == "${CUR_SNI}" ]] || NEW_SNI="${WANT_SNI}"
+    [[ -z "${WANT_PROXY_PORT}" || "${WANT_PROXY_PORT}" == "${CUR_PORT}" ]] || NEW_PORT="${WANT_PROXY_PORT}"
+    if [[ -n "${NEW_SNI}" || -n "${NEW_PORT}" ]]; then
+      if [[ -n "${NEW_PORT}" ]]; then
+        [[ "${NEW_PORT}" != "${SUB_PORT}" ]] || die_usage "--proxy-port 与订阅端口 ${SUB_PORT} 相同，请换一个"
+        ! server_port_in_use "${NEW_PORT}" || die_usage "VPS 上端口 ${NEW_PORT} 已被占用"
+      fi
+      echo "[*] 改参数：sni ${CUR_SNI} -> ${NEW_SNI:-不变}，port ${CUR_PORT} -> ${NEW_PORT:-不变}（UUID 与密钥不变）"
+      start_op reparam "NEW_SNI=${NEW_SNI}" "NEW_PORT=${NEW_PORT}"
+      op_ok || die "改参数失败（REASON=$(kv_get "${OP_RESULT}" REASON)），VPS 已恢复原配置"
+      CHANGED_PARAMS=1
+    else
+      BIN_OK="$(vssh "test -f /opt/ownexit-direct/bin/sing-box-${SING_BOX_VERSION} && sha256sum /opt/ownexit-direct/bin/sing-box-${SING_BOX_VERSION} | awk '{print \$1}'" 2>/dev/null || true)"
+      if [[ "${BIN_OK}" != "${BINARY_SHA256}" ]] || ! vssh "systemctl is-active --quiet ownexit-direct" >/dev/null 2>&1; then
+        echo "[*] 二进制缺失或服务未运行，修复中"
+        start_op repair
+        op_ok || die "服务无法启动（REASON=$(kv_get "${OP_RESULT}" REASON)），配置文件未改动；运行 ownexit subctl log 查看原因"
+      else
+        pass "ownexit-direct 已在运行，参数不变"
+      fi
+    fi
+    ;;
+  legacy)
+    if [[ "${DO_MIGRATE}" == 0 ]]; then
+      echo "[!] 服务器上是用 233boy 脚本装的旧版。运行 $(basename "$0") --migrate 换成本项目的服务：" >&2
+      echo "    沿用原有 UUID / 密钥 / 端口 / SNI，客户端与订阅链接不用动；服务器本次未做任何改动" >&2
+      exit 2
+    fi
+    [[ "$(kv_get "${PROBE}" LEGACY_ACTIVE)" == yes ]] \
+      || die "233boy 的 sing-box 服务当前没有运行；先在 VPS 上用 sb 把它恢复运行再迁移（保证失败时能回退到可用状态）"
+    ensure_sub_params
+    echo "[*] 迁移：沿用 233boy 的节点参数，换成 ownexit-direct 服务（切换时代理中断约 1-3 秒）"
+    start_op migrate
+    op_ok || die "迁移失败（REASON=$(kv_get "${OP_RESULT}" REASON)）；详见上方 [vps] 日志"
+    CHANGED_PARAMS=1
+    ;;
+  conflict)
+    die "VPS 上的文件组合无法自动处理：$(kv_get "${PROBE}" SEEN)（sing-box.service=$(kv_get "${PROBE}" SINGBOX_UNIT)）。可运行 $(basename "$0") --uninstall 只删除 ownexit 的文件"
+    ;;
+  *)
+    die "未知服务器状态：${STATE}"
+    ;;
+esac
+
+# ---------- 5. 读回节点参数 ----------
+
+read_client_env
+PROXY_PORT="$(kv_get "${CLIENT_ENV}" PORT)"
+PROXY_UUID="$(kv_get "${CLIENT_ENV}" UUID)"
+PROXY_PBK="$(kv_get "${CLIENT_ENV}" PUBLIC_KEY)"
+PROXY_SID="$(kv_get "${CLIENT_ENV}" SHORT_ID)"
+PROXY_SNI="$(kv_get "${CLIENT_ENV}" SNI)"
+PROXY_FLOW="$(kv_get "${CLIENT_ENV}" FLOW)"
+[[ "${PROXY_PORT}" =~ ^[0-9]+$ && -n "${PROXY_UUID}" && -n "${PROXY_PBK}" && -n "${PROXY_SNI}" ]] \
+  || die "VPS 上的 client.env 不完整：${CLIENT_ENV}"
+
+# 节点地址取 VPS 公网 IP（与 233boy 原节点地址同源时订阅逐字不变），取不到时退回 SSH 地址。
+PROXY_SERVER="${VPS_PUBLIC_IP:-${HOST}}"
+pass "节点参数：server=${PROXY_SERVER} port=${PROXY_PORT} sni=${PROXY_SNI} flow=${PROXY_FLOW:-无} sid=${PROXY_SID:-空} source=$(kv_get "${CLIENT_ENV}" SOURCE)"
+
+# 节点链接字段顺序与链式一致（chain/setup_chain.sh:4116）；FLOW 为空时省略 flow=。
+FLOW_PARAM=""
+[[ -z "${PROXY_FLOW}" ]] || FLOW_PARAM="&flow=${PROXY_FLOW}"
+SR_LINK="vless://${PROXY_UUID}@${PROXY_SERVER}:${PROXY_PORT}?encryption=none${FLOW_PARAM}&security=reality&sni=${PROXY_SNI}&fp=chrome&pbk=${PROXY_PBK}&sid=${PROXY_SID}&type=tcp#${NODE_NAME}"
+
+# ---------- 6. 本地渲染订阅产物 ----------
+
+# 链式把锁放在 ${XDG_STATE_HOME}/ownexit/ 下并要求该目录为 700；直连先建这一级时必须同样私有，
+# 否则同一台电脑先用直连、后用链式会拿不到锁。旧版留下的 755 也在这里收紧。
+(umask 077; mkdir -p "${STATE_DIR}")
+chmod 700 "${STATE_DIR}" "$(dirname "${STATE_DIR}")" "$(dirname "$(dirname "${STATE_DIR}")")"
+# 订阅端口与代理端口撞上（迁移沿用的旧端口恰好等于订阅端口）时换一个订阅端口。
+if [[ "${SUB_PORT}" == "${PROXY_PORT}" ]]; then
+  # 只换订阅端口、保留 TOKEN：迁移承诺订阅链接的路径部分不变（端口变化概率约 1/40000）。
+  OLD_SUB_PORT="${SUB_PORT}"
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     SUB_PORT="$(( (RANDOM % 40000) + 20000 ))"
     [[ "${SUB_PORT}" != "${PROXY_PORT}" ]] || continue
-    if ! vssh "ss -ltn | awk '{print \$4}' | grep -q ':${SUB_PORT}\$'" >/dev/null 2>&1; then
-      break
-    fi
+    vssh "ss -ltn | awk '{print \$4}' | grep -q ':${SUB_PORT}\$'" >/dev/null 2>&1 || break
     SUB_PORT=""
   done
   [[ -n "${SUB_PORT}" ]] || die "连续 10 次未找到空闲订阅端口，请人工检查 VPS 端口占用"
   TOKEN_CHANGED=1
-  pass "生成订阅参数：SUB_PORT=${SUB_PORT} TOKEN=${TOKEN}"
-else
-  pass "复用已有订阅参数：SUB_PORT=${SUB_PORT}（TOKEN 不变；如需轮换用 --rotate-token）"
+  echo "[!] 订阅端口 ${OLD_SUB_PORT} 与代理端口相同，改为 ${SUB_PORT}（TOKEN 不变），客户端需要重新导入订阅"
 fi
-
-if [[ "${TOKEN_CHANGED}" == "1" ]]; then
+if [[ "${TOKEN_CHANGED:-0}" == "1" ]]; then
   printf 'SUB_PORT=%s\nTOKEN=%s\n' "${SUB_PORT}" "${TOKEN}" > "${STATE_FILE}"
   chmod 600 "${STATE_FILE}"
 fi
@@ -336,7 +627,7 @@ proxies:
     servername: ${PROXY_SNI}
     client-fingerprint: chrome
 EOF
-  # 233boy 节点链接带 flow 时必须同步写入，否则连不上
+  # flow 来自 VPS 上的 client.env；节点带 flow 时客户端必须同步，否则连不上
   if [[ -n "${PROXY_FLOW}" ]]; then
     echo "    flow: ${PROXY_FLOW}"
   fi
@@ -438,10 +729,10 @@ SR_URL="http://${HOST}:${SUB_PORT}/${TOKEN}/shadowrocket.txt"
 NODE_URL="http://${HOST}:${SUB_PORT}/${TOKEN}/node.txt"
 
 echo "[*] 验证：VPS 主机层"
-if [[ "$(vssh 'systemctl is-active sing-box' 2>/dev/null || true)" == "active" ]]; then
-  pass "sing-box 服务 active"
+if [[ "$(vssh 'systemctl is-active ownexit-direct' 2>/dev/null || true)" == "active" ]]; then
+  pass "ownexit-direct 服务 active"
 else
-  fail "sing-box 服务非 active，VPS 上运行 'sb log' 查看日志"
+  fail "ownexit-direct 服务非 active，运行 ownexit subctl log 查看日志"
 fi
 if vssh "ss -ltn | awk '{print \$4}' | grep -q ':${PROXY_PORT}\$'" >/dev/null 2>&1; then
   pass "代理端口 ${PROXY_PORT} 监听中"
@@ -461,7 +752,7 @@ else
   fail "订阅端口 ${SUB_PORT} 未监听"
 fi
 
-echo "[*] 验证：macOS 本地拉取订阅"
+echo "[*] 验证：本机拉取订阅"
 if curl -fsS -m 15 "${CLASH_URL}" | cmp -s - "${STAGING}/${TOKEN}/clash.yaml"; then
   pass "Clash 订阅链接可拉取且与本地渲染一致"
 else
@@ -489,21 +780,34 @@ cat <<EOF
 vless 节点链接（仅故障排查/备份用）:
   ${SR_LINK}
 
-二维码 / 备用导入方式：在 VPS 上执行 'sb qr' 或 'sb url' 查看
-
 后续人工步骤:
   1. Clash Verge / mihomo：「订阅」页粘贴 Clash 订阅 URL → 导入并选中 → 代理页 PROXY 组选 ${NODE_NAME}
      → 开启系统代理（或 Tun 模式）→ 模式选「规则」
   2. iPhone Shadowrocket：+ → Subscribe → 粘贴 Shadowrocket 订阅 URL → 连接
   3. 连上后访问 ipinfo.io，确认出口 IP = ${VPS_PUBLIC_IP:-VPS IP}
-  4. 所有设备都导入后，关掉订阅服务缩小暴露面：$(dirname "$0")/subctl stop
+  4. 所有设备都导入后，关掉订阅服务缩小暴露面：ownexit subctl stop
 
 安全提醒:
   - 订阅是明文 HTTP：只在新增/更新客户端时手动拉取，不要配置成高频自动更新
-  - 以后要给新设备导入订阅：先 $(dirname "$0")/subctl start，导入后再 stop
-  - 怀疑订阅泄露时运行：$(basename "$0") --rotate-token（并在 VPS 上用 sb 更换 UUID/端口）
-==================================================
+  - 以后要给新设备导入订阅：先 ownexit subctl start，导入后再 stop
+  - 怀疑订阅泄露时运行：$(basename "$0") --rotate-token
 EOF
+if [[ "${CHANGED_PARAMS}" == 1 && "${STATE}" != legacy ]]; then
+  echo "  - 本次改了节点参数：已导入的客户端需要重新拉取一次订阅"
+fi
+echo "=================================================="
+
+if command -v qrencode >/dev/null 2>&1; then
+  echo
+  echo "节点二维码（iPhone Shadowrocket / 安卓客户端扫码导入）:"
+  qrencode -t ANSIUTF8 < "${STAGING}/${TOKEN}/node.txt"
+else
+  echo "[*] 想在终端显示节点二维码：安装 qrencode（macOS: brew install qrencode）后运行 ownexit subctl qr"
+fi
+
+if [[ "${STATE}" != ownexit || "${CHANGED_PARAMS}" == 1 ]]; then
+  print_chain_hints
+fi
 
 if [[ "${FAIL_COUNT}" -gt 0 ]]; then
   echo "[!] 有 ${FAIL_COUNT} 项验证未通过，详见上方 [!] 条目"

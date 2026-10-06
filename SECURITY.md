@@ -15,4 +15,4 @@
 - 直连的订阅服务是明文 HTTP、靠随机路径保护，建议所有设备导入后用 `direct/subctl stop` 关闭。
 - 链式的中转机只运行 `systemd-socket-proxyd` 做 TCP 透传，不保存任何密钥；Reality 私钥只在出口机的 600 配置里。
 - 链式的中转端口没有鉴权，任何人都能经中转连到出口机的 Reality 入站（但没有凭据无法使用）；发现陌生来源可用 `ban` 拉黑。出口机的 Reality 端口默认只放行中转机（`EXIT_SOURCE_FILTER=managed`，nftables 表随出口服务起停）。
-- sing-box 由固定版本的官方发布包安装（链式，每台服务器自行下载，归档与 binary 的 SHA256 都写死在脚本里核对），或由第三方脚本 233boy/sing-box 安装（直连）。
+- sing-box 由固定版本的官方发布包安装（直连与链式相同：每台服务器自行下载，归档与 binary 的 SHA256 都写死在脚本里核对；服务器下载失败时由本机下载后上传）。Reality 私钥在服务器上生成，不离开服务器。
