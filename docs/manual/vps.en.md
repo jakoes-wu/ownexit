@@ -10,7 +10,7 @@ When you are done you should have:
 - For each server: its **public IPv4**, its **SSH port** (usually 22) and the **root password**.
 - **Debian 12** or **Ubuntu 22.04 LTS**, preferably on **x86_64 (amd64)**.
 
-> The providers named here are common examples to help you find your way around their consoles. They are not recommendations, and there are no referral links. Prices, plans and console layouts change often; go by what the provider's website shows today.
+> Prices, plans and console layouts change often; go by what the provider's website shows today.
 
 ## 1. Decide how many servers you need
 
@@ -31,46 +31,42 @@ If unsure, start with one server in direct mode. You can add a relay later and t
 | Public IP | One dedicated IPv4 | That is what websites see; shared-IP or NAT servers do not work |
 | Traffic | Check the monthly allowance and overage rules | Estimate from your own usage |
 | Location and route | Exit: where you want the IP to be. Relay: close to you, with a good route to the exit | If latency from mainland China matters, prefer routes advertised as optimized for it |
-| Billing | Start with hourly or monthly | You only learn the IP's reputation and the route quality by using it; replace it early if unhappy |
+| Billing | Start with monthly | You only learn the IP's reputation and the route quality by using it; switch early if unhappy |
 | Login | root password over SSH | ownexit uses the root password once to set up key login, then only keys |
 
-## 3. Common providers
+## 3. Which provider, which plan
 
-| Provider | Billing | Console | Good for |
+One fixed plan from each of two providers is all you need; there is nothing to tune:
+
+| Role | Provider and plan | Price | Highlight |
 | ---- | ---- | ---- | ---- |
-| Vultr | Hourly, delete any time | Its own web console | Trying several locations / IPs |
-| DigitalOcean | Hourly, delete any time | Its own web console (servers are called Droplets) | Same, with thorough docs |
-| RackNerd | Mostly monthly / yearly deals | SolusVM panel (details sent by email) | Low budget, long-term use |
-| BandwagonHost | Mostly quarterly / yearly, with routes optimized for mainland China | KiwiVM panel | Low latency from mainland China |
+| Direct, or the exit of a relay chain | lisa: US 9929 premium network, dual-ISP residential IP VPS, Lite edition (美国 9929 精品网络双 ISP 住宅 IP VPS - 精简版) | CNY 68 / month | Dual-ISP residential IP: the IP is classified as home broadband, not data center |
+| Relay server of a relay chain | nodemach: premium CN2 GIA route, Lite plan (精品线路 CN2 GIA - Lite 套餐) | USD 9.99 / month | CN2 GIA high-speed route; the Lite plan is a low-cost relay option |
 
-Payment methods (credit card, PayPal, Alipay and so on) differ; check before ordering.
+- **Direct**: buy 1 lisa server.
+- **Relay chain**: 1 lisa server as the exit, plus 1 nodemach Lite as the relay.
 
-## 4. Ordering (common steps)
+Where to order:
 
-The screens differ but the flow is similar:
+- lisa: open [lisahost.com](https://lisahost.com/aff.php?aff=14727), find "美国 9929 精品网络双 ISP 住宅 IP VPS" in the product list and order the "精简版" (Lite) edition.
+- nodemach: open [nodemach.com](https://www.nodemach.com/welcome?vcd=d6521618) (it lands on the sign-up page), sign up, then find "精品线路 CN2 GIA" in the product list and order the "Lite 套餐" plan.
 
-1. **Sign up** and add a payment method or top up.
-2. **Create a server** (Vultr: Deploy; DigitalOcean: Create Droplet; RackNerd / BandwagonHost: order a plan directly).
-3. **Pick a location**, following section 2.
-4. **Pick the image**: Debian 12 x64 or Ubuntu 22.04 x64.
-5. **Pick a plan**: the entry plan is fine.
-6. **Pick the login method**: if asked to choose between "SSH key" and "password", choose **password**. If only keys are offered, see section 8.
-7. **Extras**: paid backups are optional; IPv6 on or off makes no difference.
-8. **Create** it; it is usually ready within 1–3 minutes.
-9. **Write down three things**: public IPv4, SSH port, root password.
+Prices are whatever the websites show today.
 
-Where to find them:
+## 4. Ordering
 
-| Provider | IP and root password | SSH port |
-| ---- | ---- | ---- |
-| Vultr | Server Overview page; the password is hidden until you click the eye icon | 22 |
-| DigitalOcean | IP on the Droplet page; the password is the one you set when creating it | 22 |
-| RackNerd | In the welcome email | Usually 22; check the email |
-| BandwagonHost | KiwiVM panel | Often not 22; check the panel |
+Both providers sell from a plan page; the steps are the same:
+
+1. Enter through the links in section 3 and **sign up**.
+2. **Pick the plan** named in section 3; choose monthly billing to start.
+3. **Pick the image**: Debian 12 x64 or Ubuntu 22.04 x64. If the order page has no choice, reinstall from the console after delivery (section 6).
+4. **Pick the login method**: if asked to choose between "SSH key" and "password", choose **password**. If only keys are offered, see section 8.
+5. **Pay**: the checkout page lists the accepted payment methods.
+6. After delivery, **write down three things**: public IPv4, SSH port, root password. They are usually in the welcome email or on the server's detail page in the console; take the SSH port from there, it is not always 22.
 
 ## 5. Check the server
 
-**IP reputation**: open `https://ipinfo.io/<your IP>` in a browser and look at the location, the network and the type (hosting or isp); a tool such as Scamalytics shows a risk score. If you are unhappy and billed hourly, deleting and recreating the server usually gives you a new IP.
+**IP reputation**: open `https://ipinfo.io/<your IP>` in a browser and look at the location, the network and the type (hosting or isp); a tool such as Scamalytics shows a risk score. If you are unhappy, act early (change the IP or replace the server); the rules differ per provider.
 
 **Reachability** (on your own computer, preferably with your local proxy's TUN mode turned off):
 
@@ -102,14 +98,7 @@ If the new server already runs Debian 12 / Ubuntu 22.04, skip to section 7. Rein
 
 > Reinstalling **wipes the whole server**. If an ownexit relay chain is deployed on it, run `ownexit chain --id <name> rollback` on your computer first.
 
-Where to reinstall:
-
-| Provider | Where | Notes |
-| ---- | ---- | ---- |
-| Vultr | Server page → Settings → Change OS; or Reinstall to reinstall the same OS | IP stays the same |
-| DigitalOcean | Droplet page → Destroy → Rebuild Droplet, pick a new image | Rebuild keeps the IP; do not destroy the Droplet (the IP is released) |
-| RackNerd | SolusVM panel → Reinstall, pick a template | Use the root password from the panel or email |
-| BandwagonHost | KiwiVM panel → Stop first, then Install new OS | The panel shows the new root password and SSH port |
+The reinstall option is on the server's management page in the console (usually called "Reinstall"); pick a Debian 12 or Ubuntu 22.04 template. The panel tells you if the server must be stopped first. Reinstalling normally keeps the IP.
 
 After reinstalling:
 
