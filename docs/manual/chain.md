@@ -100,8 +100,8 @@ chain/multi_chain_client.sh --chains main,backup render
 | `init` 报“中转机上的 sing-box 状态不完整” | 让既有 sing-box 完整运行（服务、配置、进程都在），或彻底移除，再重跑 |
 | `init` 报“配置已存在” | 已经有同名的链；换一个 `--id`，或确认旧链不再需要（先 rollback）后删除旧配置文件 |
 | `preflight` 报防火墙或 `sockets.target.wants` 问题 | 按报错里给出的命令处理；脚本不会替你改防火墙或创建 systemd 标准目录 |
-| 本机开着 TUN、`status` / `verify` 输出 `[ssh-retry]` | 只读命令遇到 SSH 断开会自动重试最多 3 次；频繁出现时关闭 TUN 或让中转机、出口机的 IP 走直连（`ownexit doctor` 会指出哪些 IP 经过 TUN） |
-| 操作中途 SSH 断开、`verify` 报 drift | 本机 TUN 可能接管了到中转机的 SSH；关闭 TUN（或让中转机、出口机的 IP 走直连）后重跑 |
+| 本机开着 TUN、`status` / `verify` 输出 `[ssh-retry]` | 只读命令遇到 SSH 断开会自动重试最多 3 次；频繁出现时关闭 TUN 或让中转机、出口机的 IP 走直连（Clash Verge 的做法见 [让指定 IP 不走 Clash Verge 的代理](clash-direct-ips.md)；`ownexit doctor` 会指出哪些 IP 经过 TUN） |
+| 操作中途 SSH 断开、`verify` 报 drift | 本机 TUN 可能接管了到中转机的 SSH；关闭 TUN（或按 [clash-direct-ips.md](clash-direct-ips.md) 让中转机、出口机的 IP 走直连）后重跑 |
 | 报“配置目录身份或权限不安全” | 配置 / 状态目录的某一级上级目录可被同组或其他用户写入（如权限 775）；换到权限为 755 / 700 的目录下 |
 | 报“中转机与出口机的 CPU 架构必须相同” | 两台机器一台 amd64、一台 arm64，暂不支持 |
 | `status` 输出 `reason=exit-op-pending`，或 `verify` / `rollback` 报“有未完成的凭据或设备操作” | 上一次 `rotate-keys` / `add-device` / `remove-device` 没跑完，出口机上留着辅助文件；重跑中断的那条命令 |
