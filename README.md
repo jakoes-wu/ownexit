@@ -171,6 +171,8 @@ See [SECURITY.md](https://github.com/jakoes-wu/ownexit/blob/main/SECURITY.md) fo
 
 ## FAQ
 
+**Something isn't working. Where do I start?** Run `ownexit doctor`. It checks this computer (required commands, proxy variables, directory permissions, whether a proxy TUN captures the route to your servers), every remembered direct VPS and every chain, and prints a fix for each problem. `ownexit doctor --ip-check` also tests the exit IP from the server itself: owner and type, ChatGPT / Claude / Gemini, Netflix / YouTube Premium / Disney+, and common sites (indicative only). Chain checks run `status`, which holds that chain's lock for a few seconds.
+
 **Can I change the SSH port or user?** Direct: `--port`, `--user`. Relay: `--relay-port`, `--exit-port`; the relay setup requires root.
 
 **I manage several VPSes.** Pass `--host` to pick one. Without it, `ownexit direct` and `ownexit subctl` list the remembered servers and exit.

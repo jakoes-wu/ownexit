@@ -14,6 +14,7 @@
 | `subctl` | 部署后的日常操作：`status` / `start` / `stop` 订阅服务，或免密登录 VPS |
 | `connect_to.sh` | 给一台 VPS 配专用 SSH 密钥；`setup_direct.sh` 和链式的 `init` 会自动调用它 |
 | `sync_to_vps.sh` | 把本地渲染好的订阅目录上传到 VPS；由 `setup_direct.sh` 调用 |
+| `doctor.sh` | 诊断：检查本机环境、已记住的直连 VPS 和链，`--ip-check` 在出口服务器上体检出口 IP（`ownexit doctor`） |
 | `target_lib.sh` | 被 `setup_direct.sh` 和 `subctl` 共用的“记住目标 VPS”逻辑，不能单独运行 |
 
 每个可执行脚本都支持 `-h` / `--help`。

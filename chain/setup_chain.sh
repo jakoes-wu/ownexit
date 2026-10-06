@@ -46,7 +46,11 @@ readonly RELEASE_BASE_URL
 readonly REMOTE_BASE='/opt/ownexit-chain'
 readonly REMOTE_BIN='/opt/ownexit-chain/bin/sing-box-1.13.14'
 readonly REMOTE_CONFIG_DIR='/etc/ownexit-chain'
+# 持锁后每个 SSH / scp 的控制端总超时（秒）。OWNEXIT_TEST_CHAIN_SSH_TIMEOUT 只供测试“超时不重试”时调小，正常使用不要设置。
 MANAGED_CHILD_TIMEOUT_SECONDS=600
+if [[ "${OWNEXIT_TEST_CHAIN_SSH_TIMEOUT:-}" =~ ^[1-9][0-9]*$ ]]; then
+  MANAGED_CHILD_TIMEOUT_SECONDS="${OWNEXIT_TEST_CHAIN_SSH_TIMEOUT}"
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SCRIPT_PATH="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
@@ -67,6 +71,11 @@ INIT_EXIT_PORT='22'
 INIT_SNI='www.amazon.com'
 INIT_EXIT_SOURCE_FILTER='managed'
 WITH_FAIL_CLOSED=0
+# 只读命令（status、不带 --with-fail-closed 的 verify、conns、banlist）置 1：SSH 连接层失败时重试
+# （docs/feature/feature-doctor-ipcheck.md §5.1.4）。修改类命令保持 0，重放部分执行的修改没有幂等证据。
+READONLY_SSH_RETRY=0
+# 最近一次 run_managed_external 是否因控制端总超时被终止（超时同样返回 255，但不应重试）。
+MANAGED_LAST_TIMEOUT=0
 # kick/ban/unban 的目标；ban/unban 经 normalize_ip_entry 规范化为 a.b.c.d/N 后才落黑名单。
 TARGET_IP=''
 BLACKLIST_FILE=''
@@ -1054,6 +1063,7 @@ run_managed_external() {
   local kind gate pid child_start rc token argument expect_config managed_config watchdog_fifo watchdog_pid watchdog_rc timeout_marker timeout_triggered
   kind="$1"
   shift
+  MANAGED_LAST_TIMEOUT=0
   if [[ "${LOCK_CHAIN_HELD}" != 1 ]]; then
     "$@"
     return
@@ -1171,6 +1181,7 @@ run_managed_external() {
   clear_active_child "${pid}" || return 1
   if [[ "${timeout_triggered}" == 1 ]]; then
     [[ "${watchdog_rc}" -eq 124 ]] || return 1
+    MANAGED_LAST_TIMEOUT=1
     rc=255
   else
     [[ "${watchdog_rc}" -eq 0 ]] || return 1
@@ -1547,20 +1558,55 @@ render_ssh_config() {
   chmod 600 "${SSH_DIRECT_CONFIG}"
 }
 
+# 只读命令（READONLY_SSH_RETRY=1）下，SSH 返回 255 且不是控制端总超时（MANAGED_LAST_TIMEOUT=0）时重试，
+# 最多 3 次，间隔 3 / 6 秒。255 也可能是认证失败或主机指纹不符，这种情况白等 9 秒后照样失败，可以接受。
+# 每次尝试的 stdout 先写临时文件，只把最后一次的输出交给调用方，避免失败那次的半截输出混进被捕获的结果；
+# 经 stdin 投递脚本的调用先把 stdin 缓存成文件，每次尝试都从头读。非 255 或超时直接返回，不重试。
+# 参数：<role 用于日志> <stdin|nostdin> <run_managed_external 的完整参数...>。
+ssh_with_readonly_retry() {
+  local role stdin_mode stdin_file out_file attempt rc delay
+  role="$1"
+  stdin_mode="$2"
+  shift 2
+  if [[ "${READONLY_SSH_RETRY}" != 1 ]]; then
+    run_managed_external "$@"
+    return
+  fi
+  stdin_file="${OP_TMP}/ssh-retry-stdin.$$.${RANDOM}"
+  if [[ "${stdin_mode}" == stdin ]]; then
+    cat > "${stdin_file}" || return 1
+  else
+    : > "${stdin_file}" || return 1
+  fi
+  for attempt in 1 2 3; do
+    out_file="${OP_TMP}/ssh-retry-out.$$.${RANDOM}.${attempt}"
+    if run_managed_external "$@" < "${stdin_file}" > "${out_file}"; then rc=0; else rc="$?"; fi
+    if [[ "${rc}" -ne 255 || "${MANAGED_LAST_TIMEOUT}" == 1 || "${attempt}" -eq 3 ]]; then
+      cat "${out_file}"
+      rm -f "${out_file}" "${stdin_file}"
+      return "${rc}"
+    fi
+    rm -f "${out_file}"
+    delay=$(( attempt * 3 ))
+    log_warn "[ssh-retry] role=${role} attempt=${attempt}/3 rc=255，${delay} 秒后重试（只读命令）"
+    sleep "${delay}"
+  done
+}
+
 ssh_relay() {
-  run_managed_external ssh ssh -n -F "${SSH_CONFIG}" chain-relay "$@"
+  ssh_with_readonly_retry relay nostdin ssh ssh -n -F "${SSH_CONFIG}" chain-relay "$@"
 }
 
 ssh_exit() {
-  run_managed_external ssh ssh -n -F "${SSH_CONFIG}" chain-exit "$@"
+  ssh_with_readonly_retry exit nostdin ssh ssh -n -F "${SSH_CONFIG}" chain-exit "$@"
 }
 
 ssh_relay_stdin() {
-  run_managed_external ssh ssh -F "${SSH_CONFIG}" chain-relay "$@"
+  ssh_with_readonly_retry relay stdin ssh ssh -F "${SSH_CONFIG}" chain-relay "$@"
 }
 
 ssh_exit_stdin() {
-  run_managed_external ssh ssh -F "${SSH_CONFIG}" chain-exit "$@"
+  ssh_with_readonly_retry exit stdin ssh ssh -F "${SSH_CONFIG}" chain-exit "$@"
 }
 
 scp_relay() {
@@ -1589,19 +1635,29 @@ fingerprint_private_key() {
 }
 
 negotiated_hostkey_fingerprint() {
-  local alias debug_file fingerprint rc
+  local alias debug_file fingerprint rc attempt max_attempts
   alias="$1"
   debug_file="${OP_TMP}/ssh-target-debug.${alias}.${LOCK_OPERATION_ID}"
   [[ ! -e "${debug_file}" && ! -L "${debug_file}" ]] || return 1
-  ( set -o noclobber; : > "${debug_file}" ) 2>/dev/null || return 1
-  chmod 600 "${debug_file}" || return 1
-  # ProxyJump 子进程会继承 verbose 等级，但不会继承外层 ssh 的 LogFile；因此 -E 文件只含目标会话日志，
-  # 避免从合并 stderr 的第一条 `Server host key` 误取中转机指纹。
-  if run_managed_external ssh ssh -vv -E "${debug_file}" -n -F "${SSH_CONFIG}" "${alias}" true >/dev/null 2>&1; then
-    rc=0
-  else
-    rc="$?"
-  fi
+  # 只读命令下与 ssh_with_readonly_retry 同一重试条件（255 且非超时）。
+  max_attempts=1
+  [[ "${READONLY_SSH_RETRY}" != 1 ]] || max_attempts=3
+  for attempt in 1 2 3; do
+    # -E 是追加写：每次尝试前必须重建空文件，否则前一次残留的 `Server host key` 行会让下面 count != 1 判定失败。
+    rm -f "${debug_file}" || return 1
+    ( set -o noclobber; : > "${debug_file}" ) 2>/dev/null || return 1
+    chmod 600 "${debug_file}" || return 1
+    # ProxyJump 子进程会继承 verbose 等级，但不会继承外层 ssh 的 LogFile；因此 -E 文件只含目标会话日志，
+    # 避免从合并 stderr 的第一条 `Server host key` 误取中转机指纹。
+    if run_managed_external ssh ssh -vv -E "${debug_file}" -n -F "${SSH_CONFIG}" "${alias}" true >/dev/null 2>&1; then
+      rc=0
+    else
+      rc="$?"
+    fi
+    [[ "${rc}" -eq 255 && "${MANAGED_LAST_TIMEOUT}" != 1 && "${attempt}" -lt "${max_attempts}" ]] || break
+    log_warn "[ssh-retry] role=${alias#chain-} attempt=${attempt}/3 rc=255，$(( attempt * 3 )) 秒后重试（只读命令，主机指纹探测）"
+    sleep "$(( attempt * 3 ))"
+  done
   if [[ "${rc}" -ne 0 ]] || ! require_secure_user_file "${debug_file}" 600; then
     rm -f "${debug_file}" || true
     return 1
@@ -3892,6 +3948,9 @@ REMOTE_SMOKE
 
 smoke_from_relay() {
   local server server_port label local_port config runner output
+  # 远端 smoke 在中转机临时起 sing-box 并占用固定端口：前一次被断开的那次可能还占着端口，重试会以非 255
+  # 失败并误报“Reality smoke 失败”，所以 smoke（含选端口）不参与只读重试（bash 动态作用域，被调函数读到的是这里的 0）。
+  local READONLY_SSH_RETRY=0
   server="$1"
   server_port="$2"
   label="$3"
@@ -7468,6 +7527,10 @@ main() {
   trap 'cleanup_dispatcher 130 INT' INT
   trap 'cleanup_dispatcher 143 TERM' TERM
   init_operation_tmp
+  case "${COMMAND}" in
+    status|conns|banlist) READONLY_SSH_RETRY=1 ;;
+    verify) [[ "${WITH_FAIL_CLOSED}" == 1 ]] || READONLY_SSH_RETRY=1 ;;
+  esac
 
   case "${COMMAND}" in
     preflight)

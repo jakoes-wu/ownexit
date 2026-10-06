@@ -21,6 +21,7 @@ COMMANDS = {
     "connect": (os.path.join("direct", "connect_to.sh"), "set up key-based SSH login to a server (connect_to.sh)"),
     "chain": (os.path.join("chain", "setup_chain.sh"), "relay + exit chain: init / deploy / verify / rollback ... (setup_chain.sh)"),
     "multi": (os.path.join("chain", "multi_chain_client.sh"), "combine several chains into one client config (multi_chain_client.sh)"),
+    "doctor": (os.path.join("direct", "doctor.sh"), "check this computer, your servers and chains; --ip-check tests the exit IP (doctor.sh)"),
 }
 
 
@@ -40,6 +41,7 @@ def _usage():
         "  ownexit direct --host 203.0.113.7",
         "  ownexit chain init --relay 203.0.113.10 --exit 203.0.113.20",
         "  ownexit chain --id main deploy",
+        "  ownexit doctor --ip-check",
         "",
         "  ownexit --version",
     ]
