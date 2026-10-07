@@ -89,7 +89,6 @@ ownexit                              # 在终端里只敲 ownexit：先选语言
 | `ownexit …` | 仓库里的脚本 |
 | ---- | ---- |
 | `ownexit direct` | `direct/setup_direct.sh` |
-| `ownexit subctl`（已废弃，改用 `ownexit direct sub …` / `status` / `log` …） | `direct/subctl` |
 | `ownexit connect` | `direct/connect_to.sh` |
 | `ownexit chain` | `chain/setup_chain.sh` |
 | `ownexit multi` | `chain/multi_chain_client.sh` |
@@ -127,7 +126,7 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
    ownexit direct sub stop
    ```
 
-脚本会记住这台 VPS，之后不用再带 `--host`：`ownexit direct up` 重新部署，`ownexit direct sub start|stop` 开关订阅服务，`ownexit direct status|log|qr` 看状态、日志、二维码，`ownexit direct uninstall` 卸载，`ownexit direct rotate-keys` 在服务器上更换全部设备的 UUID、Reality 密钥和 short id（所有设备都要重新导入订阅）。`ownexit direct add-device phone` 给一台设备单独一个 UUID 和订阅地址，`ownexit direct remove-device phone` 吊销它而不影响其它设备，`ownexit direct devices` 列出设备。（旧写法 `ownexit subctl …`、`ownexit direct --rotate-keys` 等在 1.x 里照常可用，会提示新写法。）
+脚本会记住这台 VPS，之后不用再带 `--host`：`ownexit direct up` 重新部署，`ownexit direct sub start|stop` 开关订阅服务，`ownexit direct status|log|qr` 看状态、日志、二维码，`ownexit direct uninstall` 卸载，`ownexit direct rotate-keys` 在服务器上更换全部设备的 UUID、Reality 密钥和 short id（所有设备都要重新导入订阅）。`ownexit direct add-device phone` 给一台设备单独一个 UUID 和订阅地址，`ownexit direct remove-device phone` 吊销它而不影响其它设备，`ownexit direct devices` 列出设备。（旧写法 `ownexit subctl …`、`ownexit direct --rotate-keys` 等已在 2.0 移除，调用时退出 2 并提示新写法。）
 
 **以前用旧版装过（233boy 脚本）？** 运行一次 `ownexit direct migrate`：沿用原有 UUID、密钥、端口和 SNI，换成本项目自己的服务，并删除 233boy 的文件（先打包备份）；客户端和订阅链接都不用动。
 
@@ -160,7 +159,7 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 
 ## 稳定性
 
-从 1.0.0 起，命令行、配置键和本机 / 服务器上的文件格式在整个 1.x 系列内冻结：新版本只增加功能，不改名、不删除，已有部署升级后不需要重新部署，客户端也不需要重新导入。不兼容的改动只在 2.0 做，并提供迁移。被冻结的接口逐项列在 [docs/reference/commands.md](docs/reference/commands.md) 与 [docs/reference/files.md](docs/reference/files.md)，规则见 [docs/reference/compatibility.md](docs/reference/compatibility.md)。
+命令行、配置键和本机 / 服务器上的文件格式在整个 2.x 系列内冻结（1.x 自 1.0.0 起同样如此）：新版本只增加功能，不改名、不删除，已有部署升级后不需要重新部署，客户端也不需要重新导入。2.0.0 只移除了 1.5.0 废弃的旧写法，从 1.x 升级不需要任何操作。不兼容的改动只在 3.0 做，并提供迁移。被冻结的接口逐项列在 [docs/reference/commands.md](docs/reference/commands.md) 与 [docs/reference/files.md](docs/reference/files.md)，规则见 [docs/reference/compatibility.md](docs/reference/compatibility.md)。
 
 ## 安全须知
 

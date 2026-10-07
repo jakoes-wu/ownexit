@@ -1,8 +1,8 @@
-# 文件参考（1.x 冻结）
+# 文件参考（2.x 冻结）
 
 [English](files.en.md) | **简体中文**
 
-本文件列出 ownexit 在本机与服务器上读写的文件、键与路径。1.x 内这些路径、键与格式只增不减、含义不变；标为“参考”或“内部”的不属于公开接口，兼容规则见 [compatibility.md](compatibility.md)。表格中带反引号的首列由 `scripts/check_interface.sh` 与源码自动比对。
+本文件列出 ownexit 在本机与服务器上读写的文件、键与路径。2.x 内这些路径、键与格式只增不减、含义不变；标为“参考”或“内部”的不属于公开接口，兼容规则见 [compatibility.md](compatibility.md)。表格中带反引号的首列由 `scripts/check_interface.sh` 与源码自动比对。
 
 ## 本机目录
 
@@ -41,7 +41,7 @@
 | `${TMPDIR:-/tmp}/multi-chain-client-qr.*/qr-<n>-<节点名>.png` | `ownexit multi render` 的二维码（`--qr-out` 可指定目录；含明文凭据，扫完即删） |
 | `<缓存目录>/chains/<id>/downloads/` | 固定版本 sing-box 官方包缓存 |
 
-内部文件（不属于公开接口，但 1.y 必须能读 1.x 写下的版本）：`<状态目录>/chains/<id>/` 下的 `transaction.env`、`baseline/`、`audit/`、`operation.lock`、`active-child.env`、`local-process.env`、各类以 `.` 开头的临时文件（含 `.migrate-exit.env.*.tmp`），`<状态目录>/` 下的 `shared.lock`。
+内部文件（不属于公开接口，但 2.x 必须能读 1.x 与 2.x 写下的版本）：`<状态目录>/chains/<id>/` 下的 `transaction.env`、`baseline/`、`audit/`、`operation.lock`、`active-child.env`、`local-process.env`、各类以 `.` 开头的临时文件（含 `.migrate-exit.env.*.tmp`），`<状态目录>/` 下的 `shared.lock`。
 
 ### 链配置键
 
@@ -61,11 +61,11 @@
 | `RELAY_COHOSTS_SINGBOX` | 中转机上的既有 sing-box：`yes`（233boy 安装）/ `ownexit-direct`（ownexit 直连）/ `no`（没有） |
 | `EXIT_SOURCE_FILTER` | 出口机 Reality 端口如何只放行中转：`managed`（本项目加 nft 白名单）/ `provider`（服务商安全组负责）/ `none` |
 
-配置必须且只能包含这 13 个键；1.x 内新增的键必须是可选的（缺省时行为与之前相同）。
+配置必须且只能包含这 13 个键；2.x 内新增的键必须是可选的（缺省时行为与之前相同）。
 
 ### 链 state.env 键（参考）
 
-`state.env` 由 ownexit 写入并带内嵌校验和，外部程序不要直接读取或修改。冻结的是 `SCHEMA_VERSION=1` 的语义与“1.y 能读 1.x 写下的 state”的承诺；下面的键表只供参考，由检查脚本防止它被静默改变。
+`state.env` 由 ownexit 写入并带内嵌校验和，外部程序不要直接读取或修改。冻结的是 `SCHEMA_VERSION=1` 的语义与“2.x 能读 1.x 与 2.x 写下的 state”的承诺；下面的键表只供参考，由检查脚本防止它被静默改变。
 
 | 键 |
 | ---- |
@@ -130,7 +130,7 @@
 | `ownexit-subscription-ttl.timer` / `.service` | 订阅服务自动关闭的瞬时单元（`systemd-run` 创建、不落盘），只在用了 `--sub-ttl` / `direct sub start --ttl` 时存在，到时 `systemctl stop ownexit-subscription`；VPS 重启后消失 |
 | `/etc/systemd/system/ownexit-subscription.service` | 订阅服务（`python3 /opt/ownexit-subscription/subserver.py`，以 nobody 运行；1.3.0 之前是 `python3 -m http.server`，重跑一次 `ownexit direct` 即切换） |
 | `/opt/ownexit-subscription/` | 订阅目录：每个 TOKEN 一个子目录（文件见“订阅文件”）、订阅服务脚本 `subserver.py`、一个空 `index.html`（1.3.0 起服务脚本只响应白名单路径，根目录与其它路径一律 404；index.html 保留但不再承担防目录列表） |
-| `/var/backups/ownexit-direct/233boy-<时间>.tar.gz` | `--migrate` 前的 233boy 备份（含旧私钥，任何操作都不会删除） |
+| `/var/backups/ownexit-direct/233boy-<时间>.tar.gz` | `migrate` 前的 233boy 备份（含旧私钥，任何操作都不会删除） |
 
 订阅地址：`http://<VPS 地址>:<SUB_PORT>/<TOKEN>/<文件名>`。default 设备用 `state.env` 的 TOKEN，额外设备各用自己的 TOKEN。1.3.0 起另有自适应地址 `http://<VPS 地址>:<SUB_PORT>/<TOKEN>/sub`（不是文件）：User-Agent 含 clash / mihomo / stash / verge 返回 `clash.yaml`，含 sing-box / singbox 或以 sfa/、sfi/、sfm/ 开头返回 `sing-box.json`，其余返回 `shadowrocket.txt`。其它路径一律 404。
 

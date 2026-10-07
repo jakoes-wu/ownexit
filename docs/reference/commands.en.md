@@ -1,8 +1,8 @@
-# Command reference (frozen for 1.x)
+# Command reference (frozen for 2.x)
 
 **English** | [简体中文](commands.md)
 
-This file lists, item by item, the options, subcommands, exit codes and machine-readable output of each `ownexit` subcommand. Throughout 1.x these items are only ever added to, never changed in meaning; the compatibility rules are in [compatibility.en.md](compatibility.en.md). `scripts/check_interface.sh` compares the backticked first column of the tables in the Chinese edition against the source code automatically, and compares this English edition's first columns against the Chinese edition.
+This file lists, item by item, the options, subcommands, exit codes and machine-readable output of each `ownexit` subcommand. Throughout 2.x these items are only ever added to, never changed in meaning; the compatibility rules are in [compatibility.en.md](compatibility.en.md). `scripts/check_interface.sh` compares the backticked first column of the tables in the Chinese edition against the source code automatically, and compares this English edition's first columns against the Chinese edition.
 
 Every subcommand prints its help and exits 0 when given `-h` / `--help` alone (help text is not frozen); the chain script shows help only for a lone `--help`, rejects `chain init --help` with exit code 2, and prints help with exit 0 for `chain up --help`. For a git clone, the script behind each subcommand is named under each section heading, and its options are identical to `ownexit <subcommand>`.
 
@@ -23,7 +23,7 @@ Exit codes of the entry point itself: 2 for an unknown subcommand; 1 when a bund
 
 ## ownexit direct
 
-Script: `direct/setup_direct.sh`. Deploys / reuses / reconfigures / migrates / uninstalls a direct exit and renders the subscriptions; day-to-day operations (formerly `ownexit subctl`) also start here.
+Script: `direct/setup_direct.sh`. Deploys / reuses / reconfigures / migrates / uninstalls a direct exit and renders the subscriptions; day-to-day operations also start here (the former `ownexit subctl` was removed in 2.0).
 
 ### Subcommands
 
@@ -32,20 +32,20 @@ Subcommands may appear before or after options. No subcommand means `up`.
 | Subcommand | Effect |
 | ---- | ---- |
 | `up` | Deploy / reuse (accepts `--host` `--sni` `--proxy-port` `--sub-ttl` `--allow-tun`); cannot be combined with the maintenance subcommands below |
-| `rotate-keys` | Regenerates the UUID and Reality key / short id of every device (same as `--rotate-keys`) |
-| `rotate-token` | Regenerates the subscription TOKEN and port (same as `--rotate-token`) |
-| `add-device` | Adds a device, followed by its name (same as `--add-device`) |
-| `remove-device` | Revokes a device, followed by its name (same as `--remove-device`) |
-| `migrate` | Migrates an old 233boy install to ownexit-direct (same as `--migrate`) |
-| `uninstall` | Removes the direct service and the subscription service (same as `--uninstall`) |
-| `sub` | Followed by `start [--ttl <duration>]` or `stop`: turns the subscription service on or off (same as subctl start / stop) |
-| `status` | Shows the status of the proxy service and the subscription service (same as subctl status) |
-| `log` | Shows the proxy service log, optionally followed by a line count (same as subctl log) |
-| `qr` | Shows the default device's node QR code in the terminal (same as subctl qr) |
-| `devices` | Read-only list of devices and subscription URLs (same as subctl devices) |
-| `login` | Logs in to the VPS with the key (same as subctl login) |
+| `rotate-keys` | Regenerates the UUID and Reality key / short id of every device |
+| `rotate-token` | Regenerates the subscription TOKEN and port |
+| `add-device` | Adds a device, followed by its name (`[a-z0-9][a-z0-9-]{0,31}`, not default) |
+| `remove-device` | Revokes a device, followed by its name |
+| `migrate` | Migrates an old 233boy install to ownexit-direct |
+| `uninstall` | Removes the direct service and the subscription service |
+| `sub` | Followed by `start [--ttl <duration>]` or `stop`: turns the subscription service on or off |
+| `status` | Shows the status of the proxy service and the subscription service |
+| `log` | Shows the proxy service log, optionally followed by a line count |
+| `qr` | Shows the default device's node QR code in the terminal |
+| `devices` | Read-only list of devices and subscription URLs |
+| `login` | Logs in to the VPS with the key |
 
-`sub` / `status` / `log` / `qr` / `devices` / `login` are day-to-day operations: they are handed over entirely to `direct/subctl`, and the exit code is subctl's (see the ownexit subctl section below). Only `--host` / `--user` / `--port` may come before them; `up`, a maintenance subcommand or a deployment option before them exits 2. Arguments after them are passed to subctl unchanged for it to validate.
+`sub` / `status` / `log` / `qr` / `devices` / `login` are day-to-day operations: they are handed over entirely to the internal script `direct/subctl`, with exit codes 0 success, 1 a remote operation failed or the key is missing, 2 argument error or the target cannot be determined; `sub start` accepts `--ttl <duration>` (same format as `--sub-ttl`; cancels the previous auto-off timer first) and `log` accepts a line count (default 100). Only `--host` / `--user` / `--port` may come before them; `up`, a maintenance subcommand or a deployment option before them exits 2. Arguments after them are passed to subctl unchanged for it to validate.
 
 ### Options
 
@@ -57,15 +57,15 @@ Subcommands may appear before or after options. No subcommand means `up`.
 | `--sni` | | Reality camouflage domain (default for new installs: www.amazon.com) |
 | `--proxy-port` | | Proxy port (default for new installs: random in 20000-59999) |
 | `--sub-ttl` | | How long after starting the subscription service turns itself off (`<positive integer>[s/m/h]`, minutes when no unit is given, 1 minute to 24 hours); without it the service is not turned off automatically |
-| `--migrate` | | Deprecated: use the `migrate` subcommand (still works; prints the new form on stderr) |
-| `--uninstall` | | Deprecated: use the `uninstall` subcommand |
-| `--rotate-token` | | Deprecated: use the `rotate-token` subcommand |
-| `--rotate-keys` | | Deprecated: use the `rotate-keys` subcommand |
-| `--add-device` | | Deprecated: use the `add-device` subcommand (device names `[a-z0-9][a-z0-9-]{0,31}`, not default) |
-| `--remove-device` | | Deprecated: use the `remove-device` subcommand |
+| `--migrate` | | Removed in 2.0: exits 2 and suggests the `migrate` subcommand |
+| `--uninstall` | | Removed in 2.0: exits 2 and suggests the `uninstall` subcommand |
+| `--rotate-token` | | Removed in 2.0: exits 2 and suggests the `rotate-token` subcommand |
+| `--rotate-keys` | | Removed in 2.0: exits 2 and suggests the `rotate-keys` subcommand |
+| `--add-device` | | Removed in 2.0: exits 2 and suggests the `add-device` subcommand |
+| `--remove-device` | | Removed in 2.0: exits 2 and suggests the `remove-device` subcommand |
 | `--allow-tun` | | When the route from this computer to the VPS goes through a proxy TUN, deployment is refused by default (exit 1); this option only warns and continues |
 
-Mutual exclusions (a subcommand and its old option are equivalent): `migrate`, `uninstall` and `rotate-token` exclude each other; `rotate-keys` cannot be combined with `migrate` / `uninstall`; `add-device` and `remove-device` exclude each other and cannot be combined with `migrate` / `uninstall`; `--sni` / `--proxy-port` / `--sub-ttl` cannot be combined with `uninstall`; `up` cannot be combined with the maintenance subcommands.
+Mutual exclusions: `migrate`, `uninstall` and `rotate-token` exclude each other; `rotate-keys` cannot be combined with `migrate` / `uninstall`; `add-device` and `remove-device` exclude each other and cannot be combined with `migrate` / `uninstall`; `--sni` / `--proxy-port` / `--sub-ttl` cannot be combined with `uninstall`; `up` cannot be combined with the maintenance subcommands.
 
 ### Exit codes
 
@@ -73,46 +73,11 @@ Mutual exclusions (a subcommand and its old option are equivalent): `migrate`, `
 | ---- | ---- |
 | 0 | All checks passed |
 | 1 | Deployment failed or a check did not pass; the pre-deploy check found the route to the VPS going through TUN without `--allow-tun` |
-| 2 | Argument error, missing argument (when not in a terminal), the server runs the old 233boy install and needs `--migrate`, or a refused device operation (already exists / does not exist / over the limit) |
+| 2 | Argument error, missing argument (when not in a terminal), the server runs the old 233boy install and needs `migrate`, an option removed in 2.0 was used, or a refused device operation (already exists / does not exist / over the limit) |
 
 ### Output
 
 Lines starting with `[*]` / `[+]` / `[!]` are progress for humans and are not frozen. What is frozen is the exit code and the generated subscriptions (paths and files in [files.en.md](files.en.md)).
-
-## ownexit subctl
-
-Script: `direct/subctl`. Day-to-day operations after a direct deployment. **Deprecated** (still works, may be removed in 2.0 at the earliest): use the `ownexit direct` subcommands instead (start / stop → `sub start` / `sub stop`, the rest keep their names). When called directly it prints one deprecation line on stderr; when reached through `ownexit direct` it does not.
-
-### Options
-
-| Long option | Short | Meaning |
-| ---- | ---- | ---- |
-| `--host` | | Target VPS; without it the single remembered target is used |
-| `--port` | | SSH port, default 22 |
-| `--user` | | SSH user, default root |
-| `--ttl` | | Only with `start`: how long until the subscription service turns itself off (same format as direct's `--sub-ttl`) |
-
-### Subcommands
-
-| Subcommand | Effect |
-| ---- | ---- |
-| `login` | Logs in to the VPS with the key (default) |
-| `start` | Starts the subscription service (accepts `--ttl`; cancels the previous auto-off timer first) |
-| `stop` | Stops the subscription service |
-| `status` | Shows the status of the proxy service and the subscription service |
-| `log` | Shows the proxy service log, optionally followed by a line count (default 100) |
-| `qr` | Shows the default device's node QR code in the terminal (reads the local subscription; needs qrencode) |
-| `devices` | Read-only list of the devices on the VPS and the subscription URLs recorded locally |
-
-There is also `help` (same as `-h` / `--help`).
-
-### Exit codes
-
-| Code | Meaning |
-| ---- | ---- |
-| 0 | Success |
-| 1 | A remote operation failed or the key is missing |
-| 2 | Argument error, or the target cannot be determined |
 
 ## ownexit connect
 
@@ -189,7 +154,6 @@ Script: `chain/setup_chain.sh`. Relay + exit chain. Apart from `init` / `up`, ev
 | `ban` | Blocks a source (followed by an IPv4 or CIDR) |
 | `unban` | Unblocks a source (followed by an IPv4 or CIDR) |
 | `banlist` | Compares the local and relay blocklists |
-| `rehost-exit` | Deprecated (still works, prints a notice on stderr): migrates in place after the exit got a new IP on the same machine, after editing the configuration by hand; use `migrate-exit` instead |
 | `rebaseline` | Re-registers the existing sing-box on the relay |
 | `rotate-keys` | Replaces the UUID and Reality key / short id of every device |
 | `add-device` | Adds a device (followed by its name) |
@@ -203,10 +167,10 @@ Script: `chain/setup_chain.sh`. Relay + exit chain. Apart from `init` / `up`, ev
 | ---- | ---- |
 | 0 | Success, or `status` is deployed / not_deployed |
 | 1 | Runtime failure (remote operation, local commit and so on) |
-| 2 | Argument error, configuration not matching state, refused device operation; with `--id` omitted, no configuration or several; `up` with an existing configuration but different addresses; `qr` with no such device |
+| 2 | Argument error (including the `rehost-exit` removed in 2.0, which suggests `migrate-exit --to <new IP>`), configuration not matching state, refused device operation; with `--id` omitted, no configuration or several; `up` with an existing configuration but different addresses; `qr` with no such device |
 | 3 | Failed pre-check / check, unreachable server or mismatching host fingerprint (any `preflight` failure is 3; failed key setup or probes in `init` / `up` are 3 too); the pre-deploy check of `deploy` / `up` found a route through TUN without `--allow-tun` |
 | 4 | The deployment phase of `deploy` / `up` failed (unreachable servers are still 3; refusal during an exit migration is also 4); `migrate-exit` found this chain's files on the new exit |
-| 5 | `status` unhealthy (busy / stale_lock / incomplete / unreachable / orphaned / drifted), `verify` failed; for `qr`: chain not deployed, lock busy / stale, or node file not matching state; for other commands: lock, corrupted state, unfinished transaction or failed final verify; rehost-exit / rebaseline / rotate-keys / add-device / remove-device refused during an exit migration |
+| 5 | `status` unhealthy (busy / stale_lock / incomplete / unreachable / orphaned / drifted), `verify` failed; for `qr`: chain not deployed, lock busy / stale, or node file not matching state; for other commands: lock, corrupted state, unfinished transaction or failed final verify; rebaseline / rotate-keys / add-device / remove-device refused during an exit migration |
 | 6 | `rollback` pre-check or execution failed (including refusal during an exit migration) |
 
 ### Output
@@ -271,7 +235,7 @@ The following lines on stdout are frozen; `[chain][<subcommand>] INFO / WARN / E
 | `rotate=done` | `rotate=done chain=<chain> result=<fresh / resumed / already / resumed-after-commit>` | rotate-keys |
 | `device=added` | `device=added chain=<chain> name=<name> node=<path> result=<…>` | add-device |
 | `device=removed` | `device=removed chain=<chain> name=<name> result=<…>` | remove-device |
-| `rehost=noop` | `rehost=noop chain=<chain> next=run-verify` | rehost-exit, migrate-exit (the same-machine switch is already done, nothing to migrate) |
+| `rehost=noop` | `rehost=noop chain=<chain> next=run-verify` | migrate-exit (the same-machine switch is already done, nothing to migrate) |
 | `rebaseline=noop` | `rebaseline=noop chain=<chain> kind=<yes / ownexit-direct / no>` | rebaseline (nothing to re-register) |
 | `banlist=consistent` | `banlist=consistent entries=<count>` | banlist |
 | `banlist=inconsistent` | `banlist=inconsistent next=run-ban-or-unban` | banlist |

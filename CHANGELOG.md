@@ -6,6 +6,30 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-10-07
+
+### Removed / 移除
+
+The spellings deprecated in 1.5.0 (they kept working, with a hint, through 1.5.0, 1.6.0 and 1.7.0) are removed. Calling one now exits 2 and prints the replacement on stderr:
+
+1.5.0 废弃的旧写法（1.5.0、1.6.0、1.7.0 都照常可用并提示新写法）在本版移除。调用时退出 2，并在 stderr 给出替代写法：
+
+- `ownexit direct --rotate-keys` / `--rotate-token` / `--add-device <name>` / `--remove-device <name>` / `--migrate` / `--uninstall` → `ownexit direct rotate-keys` / `rotate-token` / `add-device <name>` / `remove-device <name>` / `migrate` / `uninstall`
+- `ownexit subctl start` / `stop` / `status` / `log` / `qr` / `devices` / `login` (and running `direct/subctl` directly) → `ownexit direct sub start` / `sub stop` / `status` / `log` / `qr` / `devices` / `login`. `direct/subctl` stays as the internal implementation of these operations. / `direct/subctl` 保留，作为这些操作的内部实现。
+- `ownexit chain rehost-exit` → `ownexit chain migrate-exit --to <new IP>` (the same machine is detected automatically). / （同一台机器会自动识别。）
+
+### Upgrading / 升级
+
+- Nothing to do: local configuration, state, subscriptions, server files and every other command, option, exit code and machine-readable output are unchanged, so deployments made with 1.x keep working without redeploying or re-importing clients. Update your own scripts or aliases that still use the spellings above.
+- 无需任何操作：本机配置、状态、订阅、服务器上的文件，以及其余命令、参数、退出码和机器可读输出都没有变，1.x 部署的直连与链升级后照常管理，不用重新部署、客户端不用重新导入。自己的脚本或别名里如果还写着上述旧写法，改成新写法即可。
+- A `rehost-exit` interrupted under 1.x (configuration already on the new IP, state still on the old one): rerun it with 1.x before upgrading, or after upgrading run `ownexit chain migrate-exit --to <EXIT_HOST from the configuration>` to finish it.
+- 1.x 里中断的 `rehost-exit`（配置已改成新 IP、state 还是旧 IP）：升级前用 1.x 重跑它，或升级后运行 `ownexit chain migrate-exit --to <配置中的 EXIT_HOST>` 续上。
+
+### Changed / 变更
+
+- The compatibility promise now covers 2.x (`docs/reference/compatibility.md`): the reference documents are frozen for 2.x, and 2.x reads every file 1.x wrote. `direct/subctl` and the `OWNEXIT_VIA_DIRECT` marker are listed as internal.
+- 兼容承诺改为 2.x（`docs/reference/compatibility.md`）：参考文档按 2.x 冻结，2.x 能读取 1.x 写下的全部文件；`direct/subctl` 与内部标记 `OWNEXIT_VIA_DIRECT` 列为内部内容。
+
 ## [1.7.0] - 2026-10-07
 
 ### Added / 新增

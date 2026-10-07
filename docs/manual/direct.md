@@ -133,7 +133,7 @@ curl -x http://127.0.0.1:7890 https://ipinfo.io   # 另开终端验证
 ```
 
 - 订阅服务是明文 HTTP 的公网端口，平时保持关闭，只在导入时临时打开。
-- 旧写法（`./direct/subctl …`、`--rotate-keys` / `--rotate-token` / `--add-device` / `--remove-device` / `--migrate` / `--uninstall`）在 1.x 里照常可用，会提示对应的新写法，最早 2.0 移除。
+- 旧写法（`./direct/subctl …`、`--rotate-keys` / `--rotate-token` / `--add-device` / `--remove-device` / `--migrate` / `--uninstall`）已在 2.0 移除：调用时退出 2，并提示对应的新写法。
 - 换一台 VPS：对新机器运行 `setup_direct.sh up --host <新IP>`，再到客户端更新订阅。记住了多台 VPS 时，`setup_direct.sh` 不带 `--host` 会列出可选目标并退出（日常操作也一样）。
 - 改伪装域名或代理端口：`setup_direct.sh up --sni <域名>` 或 `up --proxy-port <端口>`，UUID 和密钥不变，改完客户端要重新拉一次订阅。不是每个 HTTPS 站点都能当伪装域名：实测 `www.amazon.com`（默认）、`www.apple.com` 可用，`www.microsoft.com` 不可用（客户端握手被服务器判为无效）；换域名后先用一台设备确认能连上，连不上就换回。正在通过这条隧道上网时改握手参数会把自己锁在外面：先切到别的网络，再改。
 - 多设备：`add-device <名字>` 给一台设备单独一个 UUID 和一组订阅地址（交付信息里单独列出，只发给这台设备），`remove-device <名字>` 吊销它，它立即连不上、订阅地址也被删除，其它设备不受影响。现有的那套凭据就是 `default`，订阅地址不变。设备名只允许小写字母、数字和 `-`，最多 32 个字符，每台 VPS 最多 32 台（含 default）。`ownexit direct devices` 列出设备与订阅地址。换了电脑后本机没有某台设备的订阅记录时，重跑一次 `setup_direct.sh` 会补生成；旧电脑上生成的设备订阅目录不会被自动删除。有设备后请保持本机为 0.7.0 及以上：旧版本改参数时会丢掉设备。

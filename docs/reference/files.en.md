@@ -1,8 +1,8 @@
-# File reference (frozen for 1.x)
+# File reference (frozen for 2.x)
 
 **English** | [简体中文](files.md)
 
-This file lists the files, keys and paths ownexit reads and writes on your computer and on the servers. Throughout 1.x these paths, keys and formats are only ever added to, never changed in meaning; items marked "reference" or "internal" are not part of the public interface. The compatibility rules are in [compatibility.en.md](compatibility.en.md). `scripts/check_interface.sh` compares the backticked first column of the tables in the Chinese edition against the source code automatically, and compares this English edition's first columns against the Chinese edition.
+This file lists the files, keys and paths ownexit reads and writes on your computer and on the servers. Throughout 2.x these paths, keys and formats are only ever added to, never changed in meaning; items marked "reference" or "internal" are not part of the public interface. The compatibility rules are in [compatibility.en.md](compatibility.en.md). `scripts/check_interface.sh` compares the backticked first column of the tables in the Chinese edition against the source code automatically, and compares this English edition's first columns against the Chinese edition.
 
 ## Local directories
 
@@ -41,7 +41,7 @@ This file lists the files, keys and paths ownexit reads and writes on your compu
 | `${TMPDIR:-/tmp}/multi-chain-client-qr.*/qr-<n>-<node name>.png` | QR codes from `ownexit multi render` (`--qr-out` chooses the directory; they contain plain-text credentials, delete after scanning) |
 | `<cache dir>/chains/<id>/downloads/` | Cache of the pinned official sing-box packages |
 
-Internal files (not part of the public interface, but 1.y must be able to read what 1.x wrote): under `<state dir>/chains/<id>/`, `transaction.env`, `baseline/`, `audit/`, `operation.lock`, `active-child.env`, `local-process.env` and the various temporary files starting with `.` (including `.migrate-exit.env.*.tmp`); under `<state dir>/`, `shared.lock`.
+Internal files (not part of the public interface, but 2.x must be able to read what 1.x and 2.x wrote): under `<state dir>/chains/<id>/`, `transaction.env`, `baseline/`, `audit/`, `operation.lock`, `active-child.env`, `local-process.env` and the various temporary files starting with `.` (including `.migrate-exit.env.*.tmp`); under `<state dir>/`, `shared.lock`.
 
 ### Chain configuration keys
 
@@ -61,11 +61,11 @@ Internal files (not part of the public interface, but 1.y must be able to read w
 | `RELAY_COHOSTS_SINGBOX` | Existing sing-box on the relay: `yes` (233boy install) / `ownexit-direct` (ownexit direct) / `no` (none) |
 | `EXIT_SOURCE_FILTER` | How the exit's Reality port admits only the relay: `managed` (this project adds an nft allow-list) / `provider` (the provider's security group handles it) / `none` |
 
-The configuration must contain exactly these 13 keys; keys added within 1.x must be optional (behaving as before when absent).
+The configuration must contain exactly these 13 keys; keys added within 2.x must be optional (behaving as before when absent).
 
 ### Chain state.env keys (reference)
 
-`state.env` is written by ownexit with an embedded checksum; external programs should not read or modify it directly. What is frozen is the meaning of `SCHEMA_VERSION=1` and the promise that "1.y can read the state 1.x wrote"; the key table below is for reference only, and the check script keeps it from changing silently.
+`state.env` is written by ownexit with an embedded checksum; external programs should not read or modify it directly. What is frozen is the meaning of `SCHEMA_VERSION=1` and the promise that "2.x can read the state 1.x and 2.x wrote"; the key table below is for reference only, and the check script keeps it from changing silently.
 
 | Key |
 | ---- |
@@ -130,7 +130,7 @@ The configuration must contain exactly these 13 keys; keys added within 1.x must
 | `ownexit-subscription-ttl.timer` / `.service` | Transient units that turn the subscription service off automatically (created by `systemd-run`, nothing on disk); exist only after `--sub-ttl` / `direct sub start --ttl`, run `systemctl stop ownexit-subscription` when due, and disappear when the VPS reboots |
 | `/etc/systemd/system/ownexit-subscription.service` | The subscription service (`python3 /opt/ownexit-subscription/subserver.py`, running as nobody; before 1.3.0 it was `python3 -m http.server`, and running `ownexit direct` once switches it) |
 | `/opt/ownexit-subscription/` | Subscription directory: one subdirectory per TOKEN (files in "Subscription files"), the service script `subserver.py`, and an empty `index.html` (since 1.3.0 the script answers only allow-listed paths and returns 404 for the root and everything else; index.html is kept but no longer needed to prevent directory listing) |
-| `/var/backups/ownexit-direct/233boy-<time>.tar.gz` | The 233boy backup taken before `--migrate` (contains the old private key; never deleted by any operation) |
+| `/var/backups/ownexit-direct/233boy-<time>.tar.gz` | The 233boy backup taken before `migrate` (contains the old private key; never deleted by any operation) |
 
 Subscription URL: `http://<VPS address>:<SUB_PORT>/<TOKEN>/<file name>`. The default device uses the TOKEN in `state.env`; each extra device uses its own TOKEN. Since 1.3.0 there is also an adaptive URL `http://<VPS address>:<SUB_PORT>/<TOKEN>/sub` (not a file): a User-Agent containing clash / mihomo / stash / verge gets `clash.yaml`, one containing sing-box / singbox or starting with sfa/, sfi/ or sfm/ gets `sing-box.json`, and everything else gets `shadowrocket.txt`. Every other path returns 404.
 

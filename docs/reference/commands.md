@@ -1,8 +1,8 @@
-# 命令参考（1.x 冻结）
+# 命令参考（2.x 冻结）
 
 [English](commands.en.md) | **简体中文**
 
-本文件逐项列出 `ownexit` 各子命令的参数、子命令、退出码与机器可读输出。1.x 内这些项只增不减、含义不变，兼容规则见 [compatibility.md](compatibility.md)。表格中带反引号的首列由 `scripts/check_interface.sh` 与源码自动比对。
+本文件逐项列出 `ownexit` 各子命令的参数、子命令、退出码与机器可读输出。2.x 内这些项只增不减、含义不变，兼容规则见 [compatibility.md](compatibility.md)。表格中带反引号的首列由 `scripts/check_interface.sh` 与源码自动比对。
 
 所有子命令单独使用 `-h` / `--help` 时打印帮助并退出 0（帮助文字不冻结）；链式只在单独使用 `--help` 时显示帮助，`chain init --help` 以退出码 2 拒绝；`chain up --help` 打印帮助并退出 0。`git clone` 用法下各子命令对应的脚本见每节标题下的说明，参数与 `ownexit <子命令>` 完全相同。
 
@@ -21,7 +21,7 @@
 
 ## ownexit direct
 
-脚本：`direct/setup_direct.sh`。部署 / 复用 / 改参数 / 迁移 / 卸载直连出口，并生成订阅；日常操作（原 `ownexit subctl`）也从这里进入。
+脚本：`direct/setup_direct.sh`。部署 / 复用 / 改参数 / 迁移 / 卸载直连出口，并生成订阅；日常操作也从这里进入（原 `ownexit subctl` 已在 2.0 移除）。
 
 ### 子命令
 
@@ -30,20 +30,20 @@
 | 子命令 | 作用 |
 | ---- | ---- |
 | `up` | 部署 / 复用（可带 `--host` `--sni` `--proxy-port` `--sub-ttl` `--allow-tun`）；不能与下面的维护子命令同用 |
-| `rotate-keys` | 重新生成全部设备的 UUID 与 Reality 密钥 / short id（同 `--rotate-keys`） |
-| `rotate-token` | 重新生成订阅 TOKEN 与端口（同 `--rotate-token`） |
-| `add-device` | 新增一台设备，跟设备名（同 `--add-device`） |
-| `remove-device` | 吊销一台设备，跟设备名（同 `--remove-device`） |
-| `migrate` | 把 233boy 旧版迁移为 ownexit-direct（同 `--migrate`） |
-| `uninstall` | 卸载直连服务与订阅服务（同 `--uninstall`） |
-| `sub` | 跟 `start [--ttl <时长>]` 或 `stop`：开关订阅服务（同 subctl 的 start / stop） |
-| `status` | 查看代理服务与订阅服务状态（同 subctl status） |
-| `log` | 查看代理服务日志，可跟行数（同 subctl log） |
-| `qr` | 终端显示 default 设备的节点二维码（同 subctl qr） |
-| `devices` | 只读列出设备与订阅地址（同 subctl devices） |
-| `login` | 免密登录 VPS（同 subctl login） |
+| `rotate-keys` | 重新生成全部设备的 UUID 与 Reality 密钥 / short id |
+| `rotate-token` | 重新生成订阅 TOKEN 与端口 |
+| `add-device` | 新增一台设备，跟设备名（`[a-z0-9][a-z0-9-]{0,31}`，不能是 default） |
+| `remove-device` | 吊销一台设备，跟设备名 |
+| `migrate` | 把 233boy 旧版迁移为 ownexit-direct |
+| `uninstall` | 卸载直连服务与订阅服务 |
+| `sub` | 跟 `start [--ttl <时长>]` 或 `stop`：开关订阅服务 |
+| `status` | 查看代理服务与订阅服务状态 |
+| `log` | 查看代理服务日志，可跟行数 |
+| `qr` | 终端显示 default 设备的节点二维码 |
+| `devices` | 只读列出设备与订阅地址 |
+| `login` | 免密登录 VPS |
 
-`sub` / `status` / `log` / `qr` / `devices` / `login` 是日常操作：整体交给 `direct/subctl` 执行，退出码即 subctl 的退出码（见下方 ownexit subctl 一节）；它们之前只能出现 `--host` / `--user` / `--port`，出现 `up`、维护子命令或部署参数时退出 2；它们之后的参数原样交给 subctl 校验。
+`sub` / `status` / `log` / `qr` / `devices` / `login` 是日常操作：整体交给内部脚本 `direct/subctl` 执行，退出码为 0 成功、1 远端操作失败或缺少密钥、2 参数错误或无法确定目标；`sub start` 可跟 `--ttl <时长>`（格式同 `--sub-ttl`，会先取消上一次的自动关闭计时），`log` 可跟行数（默认 100）；它们之前只能出现 `--host` / `--user` / `--port`，出现 `up`、维护子命令或部署参数时退出 2；它们之后的参数原样交给 subctl 校验。
 
 ### 参数
 
@@ -55,15 +55,15 @@
 | `--sni` | | Reality 伪装域名（新装默认 www.amazon.com） |
 | `--proxy-port` | | 代理端口（新装默认 20000-59999 随机） |
 | `--sub-ttl` | | 订阅服务启动后多久自动关闭（`<正整数>[s/m/h]`，不带单位按分钟，1 分钟到 24 小时）；不给则不自动关闭 |
-| `--migrate` | | 已废弃，用 `migrate` 子命令（仍可用，stderr 提示新写法） |
-| `--uninstall` | | 已废弃，用 `uninstall` 子命令 |
-| `--rotate-token` | | 已废弃，用 `rotate-token` 子命令 |
-| `--rotate-keys` | | 已废弃，用 `rotate-keys` 子命令 |
-| `--add-device` | | 已废弃，用 `add-device` 子命令（设备名 `[a-z0-9][a-z0-9-]{0,31}`，不能是 default） |
-| `--remove-device` | | 已废弃，用 `remove-device` 子命令 |
+| `--migrate` | | 2.0 已移除：退出 2，提示改用 `migrate` 子命令 |
+| `--uninstall` | | 2.0 已移除：退出 2，提示改用 `uninstall` 子命令 |
+| `--rotate-token` | | 2.0 已移除：退出 2，提示改用 `rotate-token` 子命令 |
+| `--rotate-keys` | | 2.0 已移除：退出 2，提示改用 `rotate-keys` 子命令 |
+| `--add-device` | | 2.0 已移除：退出 2，提示改用 `add-device` 子命令 |
+| `--remove-device` | | 2.0 已移除：退出 2，提示改用 `remove-device` 子命令 |
 | `--allow-tun` | | 本机到 VPS 的路由经代理 TUN 时默认拒绝部署（退出 1），加它只警告继续 |
 
-互斥规则（子命令与对应旧参数等同）：`migrate`、`uninstall`、`rotate-token` 三者互斥；`rotate-keys` 不能与 `migrate` / `uninstall` 同用；`add-device` 与 `remove-device` 互斥，且不能与 `migrate` / `uninstall` 同用；`--sni` / `--proxy-port` / `--sub-ttl` 不能与 `uninstall` 同用；`up` 不能与维护子命令同用。
+互斥规则：`migrate`、`uninstall`、`rotate-token` 三者互斥；`rotate-keys` 不能与 `migrate` / `uninstall` 同用；`add-device` 与 `remove-device` 互斥，且不能与 `migrate` / `uninstall` 同用；`--sni` / `--proxy-port` / `--sub-ttl` 不能与 `uninstall` 同用；`up` 不能与维护子命令同用。
 
 ### 退出码
 
@@ -71,46 +71,11 @@
 | ---- | ---- |
 | 0 | 全部通过 |
 | 1 | 部署失败或有验证项未通过；部署前自检发现到 VPS 的路由经 TUN 且未加 `--allow-tun` |
-| 2 | 参数错误、缺参数（非终端运行时）、服务器是 233boy 旧版需要 `--migrate`、设备操作被拒（已存在 / 不存在 / 超过上限） |
+| 2 | 参数错误、缺参数（非终端运行时）、服务器是 233boy 旧版需要 `migrate`、调用了 2.0 已移除的旧参数、设备操作被拒（已存在 / 不存在 / 超过上限） |
 
 ### 输出
 
 `[*]` / `[+]` / `[!]` 开头的行是给人看的进度，不冻结。冻结的是退出码与生成的订阅（路径与文件见 [files.md](files.md)）。
-
-## ownexit subctl
-
-脚本：`direct/subctl`。直连部署后的日常操作。**已废弃**（仍可用，最早 2.0 移除）：改用 `ownexit direct` 的子命令（start / stop → `sub start` / `sub stop`，其余同名）。直接调用时 stderr 打一行废弃提示；经 `ownexit direct` 转来时不打。
-
-### 参数
-
-| 长参数 | 短参数 | 含义 |
-| ---- | ---- | ---- |
-| `--host` | | 目标 VPS；不给时用唯一记住的目标 |
-| `--port` | | SSH 端口，默认 22 |
-| `--user` | | SSH 用户，默认 root |
-| `--ttl` | | 只配合 `start`：订阅服务多久后自动关闭（格式同 direct 的 `--sub-ttl`） |
-
-### 子命令
-
-| 子命令 | 作用 |
-| ---- | ---- |
-| `login` | 免密登录 VPS（默认） |
-| `start` | 启动订阅服务（可加 `--ttl`；会先取消上一次的自动关闭计时） |
-| `stop` | 停止订阅服务 |
-| `status` | 查看代理服务与订阅服务状态 |
-| `log` | 查看代理服务日志，可跟行数（默认 100） |
-| `qr` | 在终端显示 default 设备的节点二维码（读本机订阅，需要 qrencode） |
-| `devices` | 只读列出 VPS 上的设备与本机记录的订阅地址 |
-
-另有 `help`（同 `-h` / `--help`）。
-
-### 退出码
-
-| 码 | 含义 |
-| ---- | ---- |
-| 0 | 成功 |
-| 1 | 远端操作失败或缺少密钥 |
-| 2 | 参数错误或无法确定目标 |
 
 ## ownexit connect
 
@@ -187,7 +152,6 @@
 | `ban` | 拉黑来源（跟 IPv4 或 CIDR） |
 | `unban` | 解除拉黑（跟 IPv4 或 CIDR） |
 | `banlist` | 对照本地与中转的黑名单 |
-| `rehost-exit` | 已废弃（仍可用，stderr 提示）：出口机同机换 IP 后原地迁移，要先手改配置；改用 `migrate-exit` |
 | `rebaseline` | 重新登记中转机上的既有 sing-box |
 | `rotate-keys` | 更换全部设备的 UUID 与 Reality 密钥 / short id |
 | `add-device` | 新增一台设备（跟设备名） |
@@ -201,10 +165,10 @@
 | ---- | ---- |
 | 0 | 成功，或 `status` 为 deployed / not_deployed |
 | 1 | 运行时失败（远端操作、本地提交等） |
-| 2 | 参数错误、配置与 state 不一致、设备操作被拒；省略 `--id` 时没有配置或有多条；`up` 已有配置但地址不同；`qr` 没有这台设备 |
+| 2 | 参数错误（含调用 2.0 已移除的 `rehost-exit`，提示改用 `migrate-exit --to <新 IP>`）、配置与 state 不一致、设备操作被拒；省略 `--id` 时没有配置或有多条；`up` 已有配置但地址不同；`qr` 没有这台设备 |
 | 3 | 预检 / 检查失败、远端不可达或主机指纹不符（`preflight` 的失败一律为 3；`init` / `up` 配免密或探测失败也是 3）；`deploy` / `up` 部署前自检发现路由经 TUN 且未加 `--allow-tun` |
 | 4 | `deploy` / `up` 的部署阶段失败（远端不可达仍为 3；迁移进行中被拒也是 4）；`migrate-exit` 发现新出口机上已有本链文件 |
-| 5 | `status` 不健康（busy / stale_lock / incomplete / unreachable / orphaned / drifted）、`verify` 失败；`qr` 链未部署、锁忙 / 陈旧、节点文件与 state 不一致；其它命令的锁、state 损坏、未完成事务或收尾 verify 失败；出口机迁移进行中时 rehost-exit / rebaseline / rotate-keys / add-device / remove-device 被拒 |
+| 5 | `status` 不健康（busy / stale_lock / incomplete / unreachable / orphaned / drifted）、`verify` 失败；`qr` 链未部署、锁忙 / 陈旧、节点文件与 state 不一致；其它命令的锁、state 损坏、未完成事务或收尾 verify 失败；出口机迁移进行中时 rebaseline / rotate-keys / add-device / remove-device 被拒 |
 | 6 | `rollback` 预校验或执行失败（含出口机迁移进行中被拒） |
 
 ### 输出
@@ -269,7 +233,7 @@ stdout 上的下列行冻结；stderr 上 `[chain][<子命令>] INFO / WARN / ER
 | `rotate=done` | `rotate=done chain=<链> result=<fresh / resumed / already / resumed-after-commit>` | rotate-keys |
 | `device=added` | `device=added chain=<链> name=<名字> node=<路径> result=<…>` | add-device |
 | `device=removed` | `device=removed chain=<链> name=<名字> result=<…>` | remove-device |
-| `rehost=noop` | `rehost=noop chain=<链> next=run-verify` | rehost-exit、migrate-exit（同机切换已完成、无需再迁时） |
+| `rehost=noop` | `rehost=noop chain=<链> next=run-verify` | migrate-exit（同机切换已完成、无需再迁时） |
 | `rebaseline=noop` | `rebaseline=noop chain=<链> kind=<yes / ownexit-direct / no>` | rebaseline（无需重新登记时） |
 | `banlist=consistent` | `banlist=consistent entries=<数量>` | banlist |
 | `banlist=inconsistent` | `banlist=inconsistent next=run-ban-or-unban` | banlist |
