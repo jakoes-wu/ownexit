@@ -52,21 +52,23 @@ Everything runs on your laptop and talks to the servers over SSH. Configuration,
 | | Direct | Relay |
 | ---- | ---- | ---- |
 | Operating system | macOS or Linux | macOS or Linux (WSL counts as Linux) |
-| Needed | Python 3.8+ with `pipx`, `ssh`, `curl`, `openssl`, `expect` | same |
+| Needed | Python 3.8+ with `pipx`, `ssh`, `curl`, `openssl` | same |
 | Optional | `qrencode`, to show the node as a QR code | `qrencode`, for QR codes in `ownexit multi render` |
 
 Install what is missing:
 
 ```sh
 # macOS (with Homebrew, https://brew.sh); ssh, curl and openssl come with macOS
-brew install pipx expect
+brew install pipx
 pipx ensurepath            # then open a new terminal
 
 # Debian / Ubuntu / WSL
 sudo apt update
-sudo apt install -y pipx expect openssh-client curl openssl
+sudo apt install -y pipx openssh-client curl openssl
 pipx ensurepath            # then open a new terminal
 ```
+
+The first time it sets up key login on a server it types the root password for you, using the Python package pexpect, which pipx installs along with ownexit. If you run the scripts from a git clone, either `pip3 install pexpect` or install the system `expect` (macOS `brew install expect`, Debian / Ubuntu `sudo apt install expect`).
 
 Windows itself is not supported; use WSL. If your computer runs a proxy in TUN mode (Clash and similar), turn it off while deploying — see [Supported platforms](#supported-platforms).
 
@@ -105,7 +107,7 @@ When run from a clone, the chain scripts additionally refuse configuration files
 
    It sets up key login, checks the system, enables BBR, has the server download a pinned official sing-box release and check its SHA-256, generates the Reality keys on the server, renders subscriptions, uploads them and verifies every layer. No questions asked. Pass `--sni <domain>` or `--proxy-port <port>` to choose them yourself; run it again with new values to change them later (the UUID and keys stay the same).
 
-2. **Import on your devices** — the script prints four URLs:
+2. **Import on your devices** — the script prints one subscription URL ending in `/sub`; paste that same URL into every client. The server returns the right format for each one (Clash Verge / mihomo get a Clash config, sing-box gets a sing-box config, Shadowrocket, v2rayN and others get a node list). Phones can also scan the QR code in the terminal. If your client isn't recognised, use one of the fixed-format URLs:
 
    | URL | For |
    | ---- | ---- |

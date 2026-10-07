@@ -201,16 +201,26 @@ check_local() {
   for cmd in ssh scp ssh-keygen curl openssl base64; do
     command -v "${cmd}" >/dev/null 2>&1 || missing="${missing} ${cmd}"
   done
-  for cmd in expect qrencode; do
-    command -v "${cmd}" >/dev/null 2>&1 || optional="${optional} ${cmd}"
-  done
+  command -v qrencode >/dev/null 2>&1 || optional="${optional} qrencode"
   if [[ -z "${missing}" ]]; then
     ok "本机 直连所需命令齐全（ssh scp ssh-keygen curl openssl base64）"
   else
     fail "本机 缺少直连所需命令：${missing# }" "用系统包管理器安装（macOS: brew install <命令>）"
   fi
   if [[ -n "${optional}" ]]; then
-    warn "本机 缺少可选命令：${optional# }（expect 只在首次配免密时需要，qrencode 只用于终端二维码）" "需要时安装（macOS: brew install expect qrencode）"
+    warn "本机 缺少可选命令：${optional# }（只用于终端二维码）" "需要时安装（macOS: brew install qrencode）"
+  fi
+  # 首次配免密要能自动输入密码：pexpect（OWNEXIT_PYTHON 指向的解释器或 PATH 里的 python3）或 expect，任一即可。
+  item=''
+  for cmd in "${OWNEXIT_PYTHON:-}" python3; do
+    [[ -n "${cmd}" ]] || continue
+    if "${cmd}" -c 'import pexpect' >/dev/null 2>&1; then item="pexpect（${cmd}）"; break; fi
+  done
+  if [[ -z "${item}" ]] && command -v expect >/dev/null 2>&1; then item=expect; fi
+  if [[ -n "${item}" ]]; then
+    ok "本机 首次配免密的密码输入工具：${item}"
+  else
+    warn "本机 没有自动输入密码的工具（只在第一次给服务器配免密时需要）" "pipx 安装的 ownexit 自带；git clone 用法运行 pip3 install pexpect，或安装 expect（macOS: brew install expect）"
   fi
   # 链式依赖：完整清单在 chain/setup_chain.sh 的 require_local_dependencies，这里只查常见项。
   if [[ "${#CHAIN_IDS[@]}" -gt 0 ]]; then

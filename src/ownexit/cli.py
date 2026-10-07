@@ -117,8 +117,12 @@ def main(argv=None):
     if bash is None:
         sys.stderr.write("ownexit: bash is required but was not found in PATH\n")
         return 1
-    # execv 替换当前进程：退出码、信号与交互式终端都直接属于脚本，不经过 Python。
-    os.execv(bash, [bash, script] + args[1:])
+    # 把入口自己的解释器告诉脚本：pipx 的 venv 里装着 pexpect，connect_to.sh 用它自动输入密码，
+    # 不必再依赖系统的 expect；用户已自己设置时不覆盖。
+    env = dict(os.environ)
+    env.setdefault("OWNEXIT_PYTHON", sys.executable)
+    # execve 替换当前进程：退出码、信号与交互式终端都直接属于脚本，不经过 Python。
+    os.execve(bash, [bash, script] + args[1:], env)
 
 
 if __name__ == "__main__":

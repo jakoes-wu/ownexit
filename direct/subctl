@@ -137,12 +137,12 @@ REMOTE
     STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/ownexit/direct/${SAFE_NAME}"
     SUB_PORT="$(awk -F= '$1 == "SUB_PORT" {print $2; exit}' "${STATE_DIR}/state.env" 2>/dev/null || true)"
     TOKEN="$(awk -F= '$1 == "TOKEN" {print $2; exit}' "${STATE_DIR}/state.env" 2>/dev/null || true)"
-    echo "default : http://${HOST}:${SUB_PORT:-?}/${TOKEN:-?}/clash.yaml（及同目录 shadowrocket.txt / sing-box.json / node.txt）"
+    echo "default : http://${HOST}:${SUB_PORT:-?}/${TOKEN:-?}/sub（自适应；同目录另有 clash.yaml / shadowrocket.txt / sing-box.json / node.txt）"
     while IFS= read -r name; do
       [[ -n "${name}" ]] || continue
       tok="$(awk -F= -v n="${name}" '$1 == n {print $2; exit}' "${STATE_DIR}/devices.env" 2>/dev/null || true)"
       if [[ -n "${tok}" ]]; then
-        echo "${name} : http://${HOST}:${SUB_PORT:-?}/${tok}/clash.yaml（及同目录其它格式）"
+        echo "${name} : http://${HOST}:${SUB_PORT:-?}/${tok}/sub（自适应；同目录另有固定格式）"
       else
         echo "${name} : 本机没有它的订阅（换过电脑？），重跑 ownexit direct --host ${HOST} 生成"
       fi

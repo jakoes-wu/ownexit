@@ -9,6 +9,8 @@ description = "Turn a VPS you rent into your own fixed exit IP: direct or via a 
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.8"
+# pexpect：首次配免密时自动输入 SSH 密码（替代系统 expect）；纯 Python，自带 ptyprocess。
+dependencies = ["pexpect>=4.8"]
 keywords = ["vps", "proxy", "sing-box", "vless", "reality", "relay", "ssh", "bash"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",

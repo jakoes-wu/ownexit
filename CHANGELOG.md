@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-06
+
+### 新增
+
+- 直连自适应订阅地址 `http://<VPS>:<订阅端口>/<TOKEN>/sub`（default 与每台设备都有）：按客户端 User-Agent 返回 Clash 配置、sing-box 配置或 base64 节点列表，认不出的客户端返回节点列表；部署结束只推荐这一条，原来四条按格式固定的地址照旧可用。已部署的直连升级后重跑一次 `ownexit direct` 即可启用。
+- 首次配免密改用 Python 包 pexpect 自动输入密码（pipx / pip 安装时自动带上），本机不再需要另装 `expect`；没有 pexpect 时仍可用系统 `expect`。新增环境变量 `OWNEXIT_PYTHON`（入口自动设置）。
+
+### 变更
+
+- 直连订阅服务由 `python3 -m http.server` 换成随包分发的 `subserver.py`（服务名、端口、目录、文件名不变）：只响应订阅路径，根目录与其它路径返回 404，不再把带 TOKEN 的请求路径写进系统日志。
+- 新增 Python 依赖 `pexpect`（含 `ptyprocess`）；离线安装需一并准备。
+
 ## [1.2.0] - 2026-10-06
 
 ### 新增

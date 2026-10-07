@@ -8527,7 +8527,7 @@ tun_precheck() {
       log_warn "目标 ${ip} 不是 IPv4，跳过 TUN 自检"
       continue
     fi
-    iface="$(route_interface "${ip}")"
+    iface="$(route_interface "${ip}" || true)"  # 缺 route / ip 命令时管道失败，set -e 下会静默退出；这里只要“取不到就跳过”
     if [[ -z "${iface}" ]]; then
       log_warn "无法判定到 ${ip} 的出接口，跳过 TUN 自检"
       continue
