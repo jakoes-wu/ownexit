@@ -21,15 +21,18 @@ _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 # 每行必须保持 `    "<name>": (` 形态：scripts/check_interface.sh 按这个形态提取子命令表。
 COMMANDS = {
     "direct": (os.path.join("direct", "setup_direct.sh"), "deploy a VPS as your direct exit (setup_direct.sh)"),
-    "subctl": (os.path.join("direct", "subctl"), "subscription service start / stop / status, service log, node QR code, or log in (subctl)"),
     "connect": (os.path.join("direct", "connect_to.sh"), "set up key-based SSH login to a server (connect_to.sh)"),
     "chain": (os.path.join("chain", "setup_chain.sh"), "relay + exit chain: up / status / qr / verify / rollback ... (setup_chain.sh)"),
     "multi": (os.path.join("chain", "multi_chain_client.sh"), "combine several chains into one client config (multi_chain_client.sh)"),
     "doctor": (os.path.join("direct", "doctor.sh"), "check this computer, your servers and chains; --ip-check tests the exit IP (doctor.sh)"),
 }
 
+# 2.0 已移除的命令 → 仍转给的脚本：脚本自己按语言打印“已移除，改用 …”并以退出码 2 结束，入口不重复写文案。
+# 必须保持单行、值不加括号：scripts/check_interface.sh 按 `    "<name>": (` 提取 COMMANDS，带括号的写法会被误认成公开命令。
+_REMOVED = {"subctl": os.path.join("direct", "subctl")}
+
 # 帮助里的分组：新用户只需要认识“常用”三个；其余按需查。
-# subctl（已并入 direct）与 connect（direct / chain init 自动调用）从 1.5.0 起不在帮助里列出，但照常可以转发。
+# connect（direct / chain init 自动调用）从 1.5.0 起不在帮助里列出，但照常可以转发；subctl 已在 2.0 移除（见 _REMOVED）。
 _GROUPS = (("common", ("direct", "chain", "doctor")), ("other", ("multi",)))
 
 _TEXT = {
@@ -242,10 +245,13 @@ def main(argv=None):
         print("ownexit {}".format(__version__))
         return 0
     name = args[0]
-    if name not in COMMANDS:
+    if name in COMMANDS:
+        script = os.path.join(_PACKAGE_DIR, COMMANDS[name][0])
+    elif name in _REMOVED:
+        script = os.path.join(_PACKAGE_DIR, _REMOVED[name])
+    else:
         sys.stderr.write("ownexit: unknown command: {}\n\n{}\n".format(name, _usage()))
         return 2
-    script = os.path.join(_PACKAGE_DIR, COMMANDS[name][0])
     if not os.path.isfile(script):
         sys.stderr.write("ownexit: bundled script is missing: {}\n".format(script))
         return 1
@@ -257,6 +263,9 @@ def main(argv=None):
     # 不必再依赖系统的 expect；用户已自己设置时不覆盖。
     env = dict(os.environ)
     env.setdefault("OWNEXIT_PYTHON", sys.executable)
+    if name in _REMOVED:
+        # 已移除命令的脚本靠“没有内部标记”判定为直接调用；环境里残留的 OWNEXIT_VIA_DIRECT=1 会让旧入口照常执行。
+        env.pop("OWNEXIT_VIA_DIRECT", None)
     if lang is not None:
         # 向导选的语言要延续到脚本输出：脚本只看 OWNEXIT_LANG 与 locale，不传的话选了 English 也可能出中文。
         env["OWNEXIT_LANG"] = lang

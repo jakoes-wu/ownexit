@@ -8,8 +8,7 @@
 #   - 连接治理命令（conns/kick/ban/unban/banlist）要求链已 deploy；kick 依赖中转内核支持 ss -K，
 #     ban 依赖中转 cgroup v2 + systemd IPAddressDeny=（BPF），二者实测于 Debian 12 / systemd 252。
 #   - rebaseline 要求链已 deploy；只允许配置里 RELAY_COHOSTS_SINGBOX 一键与 state 不同（由它自己改写）。
-#   - rehost-exit（已废弃，改用 migrate-exit）要求链已 deploy、config 已改好新 EXIT_HOST / EXPECTED_EXIT_IPV4、
-#     known_hosts 已有新 IP 的 ed25519 条目，且新 IP 与 state 的主机指纹一致（同一台出口机）。
+#   - rehost-exit 已在 2.0 移除（调用时退出 2，提示改用 migrate-exit --to <新 IP>）。
 #   - migrate-exit 遇同一台出口机（新地址的 ed25519 主机指纹等于 state）时自动原地切换：经中转用当前出口机私钥探测，
 #     自己登记 known_hosts、改写配置，不要求旧 IP 可达；SSH 端口必须不变。
 #   - migrate-exit 要求链已 deploy 且健康、旧出口机仍可经中转登录；新出口机由本命令配免密（非终端时需要
@@ -198,7 +197,6 @@ Usage:
   $(basename "${SCRIPT_PATH}") --config <absolute path> ban <ipv4|ipv4/prefix>
   $(basename "${SCRIPT_PATH}") --config <absolute path> unban <ipv4|ipv4/prefix>
   $(basename "${SCRIPT_PATH}") --config <absolute path> banlist
-  $(basename "${SCRIPT_PATH}") --config <absolute path> rehost-exit          (deprecated, use migrate-exit)
   $(basename "${SCRIPT_PATH}") --config <absolute path> rebaseline
   $(basename "${SCRIPT_PATH}") --config <absolute path> rotate-keys
   $(basename "${SCRIPT_PATH}") --config <absolute path> add-device <name>
@@ -251,9 +249,7 @@ What each does (grouped by how often it is used):
                  share one exit, migrate them one by one and run multi render again when all are done.
                If it fails midway, rerun the same command to converge; when the switch is already complete it prints
                rehost=noop.
-  rehost-exit  deprecated (still works, removed in 2.0 at the earliest): the old way to handle a new IP on the same machine,
-               which required editing EXIT_HOST / EXPECTED_EXIT_IPV4 in the config and adding known_hosts by hand; use
-               migrate-exit --to <new IP> instead.
+  rehost-exit  removed in 2.0 (exits 2); use migrate-exit --to <new IP>, which detects the same machine by itself.
   rebaseline   after a legitimate change to the pre-existing sing-box on the relay (233boy migrated to ownexit-direct, direct
                reconfigured / newly installed / uninstalled), re-decides RELAY_COHOSTS_SINGBOX from the live system and
                re-registers the baseline; credentials, ports and node.txt stay the same
@@ -345,7 +341,6 @@ EOF
   $(basename "${SCRIPT_PATH}") --config <绝对路径> ban <ipv4|ipv4/prefix>
   $(basename "${SCRIPT_PATH}") --config <绝对路径> unban <ipv4|ipv4/prefix>
   $(basename "${SCRIPT_PATH}") --config <绝对路径> banlist
-  $(basename "${SCRIPT_PATH}") --config <绝对路径> rehost-exit          （已废弃，改用 migrate-exit）
   $(basename "${SCRIPT_PATH}") --config <绝对路径> rebaseline
   $(basename "${SCRIPT_PATH}") --config <绝对路径> rotate-keys
   $(basename "${SCRIPT_PATH}") --config <绝对路径> add-device <名字>
@@ -386,8 +381,7 @@ EOF
                  旧出口机必须还能登录（私钥只在它上面）；中转切换前可用 --abort 放弃；旧机器永久失联时用
                  --abandon-cleanup 放弃清理。多条链共用同一台出口机时逐条迁移，全部迁完后重新 multi render。
                中途失败重跑同一条命令收敛；已经切换完成时输出 rehost=noop。
-  rehost-exit  已废弃（仍可用，最早 2.0 移除）：同机换 IP 的旧写法，要先手改 config 的 EXIT_HOST /
-               EXPECTED_EXIT_IPV4 并补 known_hosts；改用 migrate-exit --to <新 IP>。
+  rehost-exit  已在 2.0 移除（退出 2）：改用 migrate-exit --to <新 IP>，同一台机器会自动识别。
   rebaseline   中转机上的既有 sing-box 合法变化后（233boy 迁移为 ownexit-direct、直连改参数 / 新装 / 卸载），
                按现场重新判定 RELAY_COHOSTS_SINGBOX 并重新登记基线；凭据、端口、node.txt 不变
   rollback   先全量预校验，再按中转 -> 出口机顺序事务拆除专属资源。
@@ -765,7 +759,7 @@ parse_init_args() {
 # scripts/check_interface.sh 会比对这里的词与 parse_args 主 case 的分支词一致；加子命令时两处都要改。
 is_chain_subcommand() {
   case "${1:-}" in
-    preflight|deploy|status|rollback|conns|banlist|rehost-exit|rebaseline|rotate-keys|list-devices|add-device|remove-device|verify|migrate-exit|kick|ban|unban|qr) return 0 ;;
+    preflight|deploy|status|rollback|conns|banlist|rebaseline|rotate-keys|list-devices|add-device|remove-device|verify|migrate-exit|kick|ban|unban|qr) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -774,6 +768,13 @@ parse_args() {
   if [[ "$#" -eq 1 && ( "$1" == '-h' || "$1" == '--help' ) ]]; then
     usage
     exit 0
+  fi
+  # rehost-exit 1.5.0 废弃、2.0 移除：在解析配置之前就拦下（省略 --id、--id、--config 三种写法），
+  # 没有配置或有多条链时也给同一条提示。$3 必须带 :-，--config <路径> 只有两个参数时 set -u 下会报未绑定。
+  # 1.x 里中断的 rehost-exit（配置已是新 IP、state 还是旧 IP）由 migrate-exit --to <配置中的 EXIT_HOST> 续上。
+  if [[ "${1:-}" == rehost-exit ]] || [[ ( "${1:-}" == --config || "${1:-}" == --id ) && "${3:-}" == rehost-exit ]]; then
+    COMMAND=rehost-exit
+    die 2 "$(L "rehost-exit 已在 2.0 移除：改用 migrate-exit --to <新 IP>（同一台机器会自动识别，不必手改配置）" "rehost-exit was removed in 2.0; use migrate-exit --to <new IP> (the same machine is detected automatically; no need to edit the configuration)")"
   fi
   if [[ "${1:-}" == init || "${1:-}" == up ]]; then
     COMMAND="$1"
@@ -814,7 +815,7 @@ parse_args() {
     shift 3
   fi
   case "${COMMAND}" in
-    preflight|status|rollback|conns|banlist|rehost-exit|rebaseline|rotate-keys|list-devices)
+    preflight|status|rollback|conns|banlist|rebaseline|rotate-keys|list-devices)
       [[ "$#" -eq 0 ]] || die 2 "$(L "${COMMAND} 不接受额外参数" "${COMMAND} takes no extra arguments")"
       ;;
     deploy)
@@ -6540,9 +6541,9 @@ relay_banlist() {
   fi
 }
 
-# ---------- 出口机同机换 IP：rehost-exit ----------
+# ---------- 出口机同机换 IP（migrate-exit 的同机分支） ----------
 # 适用场景：出口机还是同一台机器（ed25519 主机指纹不变），只是服务商换了公网 IP。
-# 用户先把 config 的 EXIT_HOST / EXPECTED_EXIT_IPV4 改成新值，本命令把中转转发目标、两端 owner
+# migrate-exit 先把 config 的 EXIT_HOST / EXPECTED_EXIT_IPV4 改成新值，再由这里把中转转发目标、两端 owner
 # 和本地 state 原地收敛到新值。UUID、Reality 密钥、端口、客户端产物都不变，客户端无需重新订阅。
 # 不进入 transaction/journal：每个远端步骤都同时接受“旧形态”和“已迁移形态”，本地 state 最后提交；
 # 中途失败时重跑同一命令即可收敛，state 已经绑定新 config 时直接 noop。
@@ -6768,22 +6769,9 @@ commit_rehost_state() {
   log_info "[rehost] state committed audit=${audit}"
 }
 
-rehost_exit_chain() {
-  local rc
-  if acquire_chain_lock 1; then rc=0; else rc="$?"; fi
-  case "${rc}" in
-    0) ;;
-    10) die 5 "$(L '同一 chain 有活动锁（busy）；稍后重试' 'The same chain holds an active lock (busy); try again later')" ;;
-    11) die 5 "$(L '存在 stale lock；先运行 verify 或其它 mutating 命令归档' 'A stale lock exists; run verify or another modifying command first to archive it')" ;;
-    *) die 5 "$(L '无法安全取得 chain lock' 'Cannot safely acquire the chain lock')" ;;
-  esac
-  migrate_gate
-  rehost_exit_body
-}
-
-# 同机换 IP 的原地切换主体：rehost-exit 与 migrate-exit 的同机分支（migrate_rehost_same_host、续跑分支）共用。
+# 同机换 IP 的原地切换主体：migrate-exit 的同机分支（migrate_rehost_same_host、续跑分支）调用（原 rehost-exit 入口已在 2.0 移除）。
 # 调用方负责取锁；进入时配置里的 EXIT_HOST / EXPECTED_EXIT_IPV4 已是新值。state 已绑定当前配置时打印 rehost=noop 并返回；
-# 否则按“出口机 owner → 中转 → 本地 state → 完整 verify”收敛，每一步都可重跑。报错文字不写命令名：两条入口都会走到这里。
+# 否则按“出口机 owner → 中转 → 本地 state → 完整 verify”收敛，每一步都可重跑。报错文字不写命令名：同机切换与续跑两个分支都会走到这里。
 rehost_exit_body() {
   local rc
   require_local_dependencies
@@ -7226,7 +7214,7 @@ rebaseline_chain() {
 # （docs/feature/feature-formats-key-rotation.md §5.1.3、docs/feature/feature-devices-sni-scan.md §5.1.2）
 #
 # 三个命令共用一套“出口机凭据操作”：只改出口机 sing-box 配置（users 行，rotate 时另换私钥与 short id），
-# 中转、端口、部署 ID、owner、配置摘要都不变。不走事务（同 rehost-exit）：中间状态放在出口机的辅助文件里，
+# 中转、端口、部署 ID、owner、配置摘要都不变。不走事务（同 migrate-exit 的同机切换）：中间状态放在出口机的辅助文件里，
 # 本地 state 最后提交，任一步中断后重跑同一条命令都能按现场收敛。私钥与 UUID 只在出口机上生成。
 #   <id>.rotate.json      待切换的新配置（rotate 时含新私钥）
 #   <id>.rotate.env       MODE（本次操作）、新配置哈希、目标设备全表（DEVICE_<名字>=UUID）、rotate 时的公钥与 short id
@@ -7810,7 +7798,7 @@ list_devices_chain() {
 #
 # 用途：把链的出口机换成另一台机器，UUID、Reality 密钥、short id、全部设备、中转地址与端口不变，客户端不重新导入。
 # 关键约束：
-#   - 不走事务（同 rehost-exit / rotate-keys）：每一步都可重跑，本机 state 最后提交；中间状态放在迁移记录
+#   - 不走事务（同同机切换 / rotate-keys）：每一步都可重跑，本机 state 最后提交；中间状态放在迁移记录
 #     ${CHAIN_STATE_DIR}/migrate-exit.env 里。
 #   - 迁移记录里的 PHASE 只作下限参考，实际进度由现场推导（migrate_derive_stage）：配置是新是旧、state 绑定哪份配置、
 #     中转 owner / service 指向旧还是新。这样“动作已完成、PHASE 还没写”就崩溃的情况也能正确接续，--abort 不会误拆新链。
@@ -9466,10 +9454,6 @@ main() {
       ;;
     banlist)
       relay_banlist
-      ;;
-    rehost-exit)
-      log_warn "$(L "[deprecated] rehost-exit 已废弃（仍可用）：改用 migrate-exit --to <新 IP>，同一台机器会自动识别，不必手改配置" "[deprecated] rehost-exit is deprecated (still works): use migrate-exit --to <new IP> instead; the same machine is detected automatically, no need to edit the configuration by hand")"
-      rehost_exit_chain
       ;;
     rebaseline)
       rebaseline_chain

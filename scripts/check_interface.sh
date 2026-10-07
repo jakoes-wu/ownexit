@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# check_interface.sh —— 1.x 接口冻结守护：从源码提取命令参数、子命令、机器可读输出、配置与状态键、订阅文件名，
+# check_interface.sh —— 接口冻结守护（2.x）：从源码提取命令参数、子命令、机器可读输出、配置与状态键、订阅文件名，
 # 与 docs/reference/ 下的参考文档逐项比对，不一致就失败（docs/feature/feature-v1-freeze.md §5.1.2）。
 #
 # 前置:
@@ -7,7 +7,7 @@
 #   - 默认检查本脚本所在的仓库；--root 指定另一个仓库副本（负向测试用）。
 #   - 不应被 source。
 #
-# 子命令清单含 direct（主参数循环的分支词）、subctl、multi、chain。
+# 子命令清单含 direct（主参数循环的分支词）、multi、chain（direct/subctl 2.0 起是 direct 日常操作的内部实现，不再单列）。
 # 另比对 docs/reference/ 下中英两版（*.md 与 *.en.md）的表格首列（第 14 项）。
 # 用途：以后改动参数、子命令、status 取值、配置 / 状态键、订阅文件名时，必须同步更新参考文档，
 # 否则本脚本（CI 的 Interface freeze 步骤）失败。只守护“可机读”的清单；退出码、路径、节点名等由人工核对
@@ -136,17 +136,12 @@ grep -E '^## ownexit [a-z]+$' "${CMDS}" | sed -E 's/^## ownexit //' > "${TMP}/b"
 compare "ownexit 子命令" "${TMP}/a" "${TMP}/b"
 
 # 2. 各子命令参数（主参数循环）
-for pair in direct:direct/setup_direct.sh connect:direct/connect_to.sh subctl:direct/subctl doctor:direct/doctor.sh; do
+for pair in direct:direct/setup_direct.sh connect:direct/connect_to.sh doctor:direct/doctor.sh; do
   name="${pair%%:*}"; file="${pair#*:}"
   main_loop "${file}" | long_opts > "${TMP}/a"
   doc_table "${CMDS}" "ownexit ${name}" 参数 > "${TMP}/b"
   compare "${name} 参数" "${TMP}/a" "${TMP}/b"
 done
-
-# 3. subctl 子命令
-main_loop direct/subctl | sub_words > "${TMP}/a"
-doc_table "${CMDS}" "ownexit subctl" 子命令 > "${TMP}/b"
-compare "subctl 子命令" "${TMP}/a" "${TMP}/b"
 
 # 3b. direct 子命令（1.5.0 起的子命令形态：主参数循环里不以 - 开头的分支词）
 main_loop direct/setup_direct.sh | sub_words > "${TMP}/a"

@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# subctl —— 直连出口 VPS 的免密登录、订阅服务开关、服务日志与节点二维码（薄封装，复用 connect_to.sh 生成的专用密钥）。
+# subctl —— ownexit direct 日常操作（login / sub start|stop / status / log / qr / devices）的实现：
+# 直连出口 VPS 的免密登录、订阅服务开关、服务日志与节点二维码（薄封装，复用 connect_to.sh 生成的专用密钥）。
 #
 # 前置:
+#   - 只由 setup_direct.sh 的 forward_to_subctl 带内部标记 OWNEXIT_VIA_DIRECT=1 调起；直接运行（原 ownexit subctl，
+#     2.0 已移除）以退出码 2 结束并提示新写法。
 #   - 已用 setup_direct.sh 部署过（它会配好免密并记住这台 VPS）；本脚本只用密钥、不碰密码。
 #   - 目标来源：--host 参数 > ${XDG_CONFIG_HOME:-~/.config}/ownexit/direct/ 下唯一的目标配置（见 target_lib.sh）。
 #   - qr 读本机 setup_direct.sh 渲染的订阅（${XDG_STATE_HOME:-~/.local/state}/ownexit/direct/<目标>/），需要 qrencode。
@@ -17,68 +20,65 @@ SUB_SERVICE="ownexit-subscription"
 usage() {
   if [[ "${OWNEXIT_UI_LANG}" == en ]]; then
     cat <<'EOF'
-subctl -- key login, subscription service on/off, logs and QR code for the direct exit VPS
-
-Deprecated (still works, removed in 2.0 at the earliest): use the ownexit direct subcommands instead -- start / stop map to
-sub start / sub stop, status / log / qr / devices / login keep their names, e.g. ownexit direct sub stop, ownexit direct status.
+ownexit direct day-to-day operations -- key login, subscription service on/off, logs and QR code for the direct exit VPS
 
 Usage:
-  subctl [--host <ip>] [--port <port>] [--user <user>] [subcommand]
+  ownexit direct [--host <ip>] [--port <port>] [--user <user>] <operation>
 
-Subcommands:
-  login        log in to the VPS with the key (interactive SSH, the default)
-  start [--ttl <duration>]
-               start the subscription service (briefly, to import on a new device); --ttl turns it off when due (e.g. 30m, 2h,
-               minutes when no unit is given, 1 minute to 24 hours); without it it stays on, remember to stop it afterwards
-  stop         stop the subscription service (keep it off normally to reduce public exposure)
-  status       status of the proxy service and the subscription service
-  log [lines]  recent proxy service log, 100 lines by default
-  qr           show the node QR code in the terminal (needs qrencode; reads the local subscription, no VPS connection)
-  devices      list the devices on the VPS and the subscription URLs recorded locally (read-only)
-  help         show this help (same as -h / --help)
+Operations:
+  login                     log in to the VPS with the key (interactive SSH)
+  sub start [--ttl <duration>]
+                            start the subscription service (briefly, to import on a new device); --ttl turns it off when due
+                            (e.g. 30m, 2h, minutes when no unit is given, 1 minute to 24 hours); without it it stays on,
+                            remember to stop it afterwards
+  sub stop                  stop the subscription service (keep it off normally to reduce public exposure)
+  status                    status of the proxy service and the subscription service
+  log [lines]               recent proxy service log, 100 lines by default
+  qr                        show the node QR code in the terminal (needs qrencode; reads the local subscription, no VPS connection)
+  devices                   list the devices on the VPS and the subscription URLs recorded locally (read-only)
 
 Examples:
-  subctl status                         # use the VPS remembered by the last ownexit direct
-  subctl start
-  subctl start --ttl 30m                # turn off after 30 minutes
-  subctl log 300
-  subctl qr
-  subctl devices
-  subctl --host 203.0.113.7 stop        # pick one when several VPSes are remembered
+  ownexit direct status                         # use the VPS remembered by the last ownexit direct up
+  ownexit direct sub start --ttl 30m            # turn off after 30 minutes
+  ownexit direct sub stop
+  ownexit direct log 300
+  ownexit direct qr
+  ownexit direct devices
+  ownexit direct --host 203.0.113.7 sub stop    # pick one when several VPSes are remembered
+
+This file (direct/subctl) implements these operations for ownexit direct and cannot be run on its own; the former
+ownexit subctl command was removed in 2.0.
 
 Exit codes: 0 success; 1 remote operation failed or key missing; 2 argument error or target cannot be determined.
 EOF
   else
     # i18n:zh-begin
     cat <<'EOF'
-subctl —— 直连出口 VPS 的免密登录、订阅服务开关、日志与二维码
-
-已废弃（仍可用，最早 2.0 移除）：改用 ownexit direct 的子命令——start / stop 对应 sub start / sub stop，
-status / log / qr / devices / login 同名，例：ownexit direct sub stop、ownexit direct status。
+ownexit direct 的日常操作 —— 直连出口 VPS 的免密登录、订阅服务开关、日志与二维码
 
 用法:
-  subctl [--host <ip>] [--port <port>] [--user <user>] [子命令]
+  ownexit direct [--host <ip>] [--port <port>] [--user <user>] <操作>
 
-子命令:
-  login        免密登录 VPS（交互式 SSH，默认）
-  start [--ttl <时长>]
-               启动订阅服务（给新设备导入订阅时临时打开）；--ttl 到时自动关闭（例：30m、2h，
-               不带单位按分钟，1 分钟到 24 小时），不给则一直开着，用完记得 stop
-  stop         停止订阅服务（平时应保持关闭，缩小公网暴露）
-  status       查看代理服务与订阅服务状态
-  log [行数]   查看代理服务最近的日志，默认 100 行
-  qr           在终端显示节点二维码（需要 qrencode；读本机订阅，不连 VPS）
-  devices      列出 VPS 上的设备与本机记录的各设备订阅地址（只读）
-  help         显示本帮助（同 -h / --help）
+操作:
+  login                     免密登录 VPS（交互式 SSH）
+  sub start [--ttl <时长>]  启动订阅服务（给新设备导入订阅时临时打开）；--ttl 到时自动关闭（例：30m、2h，
+                            不带单位按分钟，1 分钟到 24 小时），不给则一直开着，用完记得 sub stop
+  sub stop                  停止订阅服务（平时应保持关闭，缩小公网暴露）
+  status                    查看代理服务与订阅服务状态
+  log [行数]                查看代理服务最近的日志，默认 100 行
+  qr                        在终端显示节点二维码（需要 qrencode；读本机订阅，不连 VPS）
+  devices                   列出 VPS 上的设备与本机记录的各设备订阅地址（只读）
 
 示例:
-  subctl status                         # 使用上次 ownexit direct 记住的 VPS
-  subctl start
-  subctl start --ttl 30m                # 30 分钟后自动关闭
-  subctl log 300
-  subctl qr
-  subctl devices
-  subctl --host 203.0.113.7 stop        # 记住了多台 VPS 时指定其中一台
+  ownexit direct status                         # 使用上次 ownexit direct up 记住的 VPS
+  ownexit direct sub start --ttl 30m            # 30 分钟后自动关闭
+  ownexit direct sub stop
+  ownexit direct log 300
+  ownexit direct qr
+  ownexit direct devices
+  ownexit direct --host 203.0.113.7 sub stop    # 记住了多台 VPS 时指定其中一台
+
+本文件（direct/subctl）是 ownexit direct 这些操作的实现，不能单独运行；原 ownexit subctl 命令已在 2.0 移除。
 
 退出码: 0 成功；1 远端操作失败或缺少密钥；2 参数错误或无法确定目标。
 EOF
@@ -94,6 +94,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${SCRIPT_DIR}/i18n_lib.sh"
 # shellcheck source=target_lib.sh
 . "${SCRIPT_DIR}/target_lib.sh"
+
+# 原 ownexit subctl 已在 2.0 移除：没有内部标记 = 用户直接调用（ownexit subctl 或 bash direct/subctl），
+# 在解析参数之前就退出 2，并按第一个操作词给出 ownexit direct 的新写法。必须先于解析：否则 --ttl 校验、
+# 记住的目标解析等报错会盖掉这条提示。提示不带用户原来写的 --host 等参数（与 1.x 的废弃提示一致）。
+if [[ "${OWNEXIT_VIA_DIRECT:-}" != 1 ]]; then
+  NEW_FORM=login
+  # skip_value：上一个词是要跟值的选项（--host 等），这个词是它的值，不能当操作词（如 --port log）。
+  skip_value=0
+  for arg in "$@"; do
+    if (( skip_value )); then skip_value=0; continue; fi
+    case "${arg}" in
+      --host|--port|--user|--ttl)   skip_value=1 ;;
+      start|stop)                   NEW_FORM="sub ${arg}"; break ;;
+      login|status|log|qr|devices)  NEW_FORM="${arg}"; break ;;
+      help|-h|--help)               NEW_FORM="--help"; break ;;
+    esac
+  done
+  die_usage "$(L "ownexit subctl 已在 2.0 移除，改用：ownexit direct ${NEW_FORM}" "ownexit subctl was removed in 2.0; use: ownexit direct ${NEW_FORM}")"
+fi
 
 CMD=""
 LOG_LINES=100
@@ -127,16 +146,6 @@ if [[ -n "${WANT_TTL}" ]]; then
   TTL_SECONDS="$(parse_ttl "${WANT_TTL}")" || exit 2
   # 不带单位按分钟：提示里补上 m，避免显示成“30 后自动关闭”。
   [[ "${WANT_TTL}" =~ [smh]$ ]] || WANT_TTL="${WANT_TTL}m"
-fi
-
-# 1.5.0 起 subctl 并入 ownexit direct（sub start / sub stop / status / log / qr / devices / login），本命令废弃但照常可用。
-# 经 ownexit direct 转进来时设了 OWNEXIT_VIA_DIRECT=1，不提示；直接调用时在 stderr 提示一次新写法，stdout 不受影响。
-if [[ "${OWNEXIT_VIA_DIRECT:-}" != 1 ]]; then
-  case "${CMD}" in
-    start|stop) NEW_FORM="sub ${CMD}" ;;
-    *)          NEW_FORM="${CMD}" ;;
-  esac
-  echo "$(L "[!] ownexit subctl 已废弃（仍可用），改用：ownexit direct ${NEW_FORM}" "[!] ownexit subctl is deprecated (still works); use: ownexit direct ${NEW_FORM}")" >&2
 fi
 
 # subctl 不负责首次部署：没有记住的目标时不交互提问，直接提示先跑 setup_direct.sh。

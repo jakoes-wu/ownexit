@@ -13,7 +13,7 @@ For step-by-step instructions (choosing a machine, importing into clients, verif
 | Script | Purpose |
 | ---- | ---- |
 | `setup_direct.sh` | Deployment entry point: key login → system check → BBR → install sing-box → render and upload subscriptions → verify |
-| `subctl` | Day-to-day operations after deploying: `status` / `start` / `stop` the subscription service, `log`, `qr`, `devices` to list devices, or log in to the VPS with the key. Since 1.5.0 it is called by the `sub start` / `sub stop` / `status` / `log` / `qr` / `devices` / `login` subcommands of `setup_direct.sh`; calling it directly is deprecated (still works, and prints the new form) |
+| `subctl` | Day-to-day operations after deploying: `status` / `start` / `stop` the subscription service, `log`, `qr`, `devices` to list devices, or log in to the VPS with the key. It is called by the `sub start` / `sub stop` / `status` / `log` / `qr` / `devices` / `login` subcommands of `setup_direct.sh` as their internal implementation; calling it directly (the former `ownexit subctl`) was removed in 2.0, exits 2 and prints the new form |
 | `connect_to.sh` | Sets up a dedicated SSH key for a VPS; `setup_direct.sh` and the chain `init` call it automatically |
 | `sync_to_vps.sh` | Uploads the locally rendered subscription directory to the VPS; called by `setup_direct.sh` |
 | `doctor.sh` | Diagnostics: checks this computer, the remembered direct VPSes and chains; `--ip-check` checks the exit IP and `--scan-sni` scans for usable camouflage domains (`ownexit doctor`) |

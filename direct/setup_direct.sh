@@ -14,7 +14,7 @@
 #   2. VPS 上 curl ipinfo.io 确认公网 IP
 #   3. 幂等开启 BBR
 #   4. 探测服务器状态（新机 / 已是本项目 / 233boy 旧版 / 迁移残局 / 未完成操作 / 冲突），按状态与参数选择操作：
-#      新装、修复、改参数、迁移（--migrate）、卸载（--uninstall）；改动 sing-box 的操作由 VPS 上的
+#      新装、修复、改参数、迁移（migrate）、卸载（uninstall）；改动 sing-box 的操作由 VPS 上的
 #      systemd 临时单元执行（direct_remote.sh），SSH 断开不影响，中途断电下次运行自动恢复
 #   5. 从 VPS 读回 /etc/ownexit-direct/client.env 得到节点参数（服务器是唯一权威源）
 #   6. 在本地暂存目录渲染订阅产物：<TOKEN>/clash.yaml、shadowrocket.txt、node.txt、sing-box.json、订阅服务脚本 subserver.py、订阅服务单元
@@ -36,13 +36,13 @@ NODE_NAME="ownexit-direct"
 SUB_BASE_DIR="/opt/ownexit-subscription"
 SUB_SERVICE="ownexit-subscription"
 ROTATE_TOKEN=0
-# --rotate-keys：在服务器上重新生成 UUID / Reality 密钥 / short id（端口、SNI、订阅地址不变）。
+# rotate-keys：在服务器上重新生成 UUID / Reality 密钥 / short id（端口、SNI、订阅地址不变）。
 ROTATE_KEYS=0
 # 本机到 VPS 的路由经代理 TUN 时默认拒绝部署；--allow-tun 置 1 后只警告继续。
 ALLOW_TUN=0
 # 本次运行中已经完成过一次凭据轮换（来自恢复的未完成操作）；为 1 时不再轮换，避免用户重跑时凭据被换两次。
 ROTATED=0
-# --add-device / --remove-device 的设备名（docs/feature/feature-devices-sni-scan.md §5.1.1）；default 指现有 UUID，保留。
+# add-device / remove-device 的设备名（docs/feature/feature-devices-sni-scan.md §5.1.1）；default 指现有 UUID，保留。
 WANT_ADD_DEVICE=""
 WANT_REMOVE_DEVICE=""
 # 本次运行（含恢复的未完成操作）改动了设备表：其它设备不必重新导入，但同机链需要 rebaseline。
@@ -120,8 +120,9 @@ add-device and remove-device exclude each other and cannot be combined with migr
 cannot be combined with uninstall; up cannot be combined with maintenance subcommands; day-to-day operations cannot be combined with
 deployment / maintenance options (arguments after a day-to-day operation are handled by it).
 
-Deprecated spellings (still work and print the new form; may be removed in 2.0 at the earliest):
+Removed in 2.0 (calling them exits 2 and prints the new form):
   --rotate-token / --rotate-keys / --add-device <name> / --remove-device <name> / --migrate / --uninstall
+                                       →  rotate-token / rotate-keys / add-device <name> / remove-device <name> / migrate / uninstall
   ownexit subctl <start|stop|status|log|qr|devices|login>   →  ownexit direct sub start / sub stop / status / …
 
 Exit codes: 0 all checks passed; 1 deployment failed or a check did not pass; 2 argument error, missing argument (when not in a
@@ -176,8 +177,9 @@ migrate、uninstall、rotate-token 三者互斥；rotate-keys 不能与 migrate 
 add-device 与 remove-device 互斥，且不能与 migrate / uninstall 同用；--sni / --proxy-port / --sub-ttl 不能与 uninstall 同用；
 up 不能与维护子命令同用；日常操作不能与部署 / 维护参数同用（日常操作之后的参数交给它自己处理）。
 
-已废弃写法（仍可用，会提示新写法；最早 2.0 移除）:
+2.0 已移除的写法（调用时退出 2 并提示新写法）:
   --rotate-token / --rotate-keys / --add-device <名> / --remove-device <名> / --migrate / --uninstall
+                                       →  rotate-token / rotate-keys / add-device <名> / remove-device <名> / migrate / uninstall
   ownexit subctl <start|stop|status|log|qr|devices|login>   →  ownexit direct sub start / sub stop / status / …
 
 退出码: 0 全部通过；1 部署失败或有验证项未通过；2 参数错误、缺参数（非终端运行时）或服务器是旧版需要 migrate。
@@ -198,11 +200,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=target_lib.sh
 . "${SCRIPT_DIR}/target_lib.sh"
 
-# 子命令形态（1.5.0）：维护操作写成 direct rotate-keys 等子命令；旧的 --rotate-keys 等参数照常可用但已废弃，
-# 每次使用在 stderr 提示新写法。提示用字符串累积而不是数组：macOS 自带 bash 3.2 在 set -u 下展开空数组会报
-# unbound variable，脚本会在没有任何废弃参数的正常运行里直接退出。
-DEPRECATED_MSGS=""
-deprecated() { DEPRECATED_MSGS="$(L "${DEPRECATED_MSGS}[!] $1 已废弃（仍可用），改用：ownexit direct $2" "${DEPRECATED_MSGS}[!] $1 is deprecated (still works); use: ownexit direct $2")"$'\n'; }
+# 子命令形态（1.5.0）：维护操作写成 direct rotate-keys 等子命令。旧的 --rotate-keys 等参数 1.5.0 废弃、2.0 移除：
+# 主循环仍识别它们，但遇到即以退出码 2 结束并给出新写法——不能删掉这些分支让它们落进“未知参数”，
+# 那样用户看不到该换成什么（docs/feature/feature-remove-deprecated.md）。
+# $1 = 用户写的旧参数，$2 = 对应的新写法（不含 ownexit direct 前缀）。
+removed_flag() { die_usage "$(L "$1 已在 2.0 移除，改用：ownexit direct $2" "$1 was removed in 2.0; use: ownexit direct $2")"; }
+# --add-device / --remove-device 后面的设备名：$2 存在且不以 - 开头才算给了名字（--add-device --host x 不算），
+# 没给时提示里用占位 <名>。只用于拼提示，不校验名字合法性。
+removed_device_name() { if [[ -n "${1:-}" && "${1}" != -* ]]; then printf '%s' "$1"; else L '<名>' '<name>'; fi; }
 # 出现过 up、维护操作（子命令或旧参数）或部署参数（--sni 等）：之后再出现日常操作词（status 等）就是混用，报错。
 SAW_DEPLOY_ARG=0
 SAW_UP=0
@@ -212,7 +217,7 @@ FWD_TARGET=()
 
 # 日常操作（原 subctl 的功能）整体转给 subctl，不在这里重写：sub start|stop、status、log、qr、devices、login。
 # 日常操作词之后的参数原样交给 subctl 校验与报错（-u / -P 换成 subctl 认的长参数）；exec 后退出码、交互终端都属于 subctl。
-# OWNEXIT_VIA_DIRECT=1 让 subctl 知道是经新写法进来的，不打废弃提示。
+# OWNEXIT_VIA_DIRECT=1 是内部标记：subctl 没有它时视为用户直接调用已移除的 ownexit subctl，退出 2。
 forward_to_subctl() {
   local word="$1" arg subctl_args
   shift
@@ -245,18 +250,17 @@ while [[ $# -gt 0 ]]; do
     --proxy-port=*)   WANT_PROXY_PORT="${1#*=}"; SAW_DEPLOY_ARG=1; shift ;;
     --sub-ttl)        WANT_SUB_TTL="${2:?$(L '--sub-ttl 需要一个时长' '--sub-ttl needs a duration')}"; SAW_DEPLOY_ARG=1; shift 2 ;;
     --sub-ttl=*)      WANT_SUB_TTL="${1#*=}"; SAW_DEPLOY_ARG=1; shift ;;
-    --migrate)        DO_MIGRATE=1; SAW_DEPLOY_ARG=1; deprecated --migrate migrate; shift ;;
-    --uninstall)      DO_UNINSTALL=1; SAW_DEPLOY_ARG=1; deprecated --uninstall uninstall; shift ;;
-    --rotate-token)   ROTATE_TOKEN=1; SAW_DEPLOY_ARG=1; deprecated --rotate-token rotate-token; shift ;;
-    --rotate-keys)    ROTATE_KEYS=1; SAW_DEPLOY_ARG=1; deprecated --rotate-keys rotate-keys; shift ;;
-    --add-device)     WANT_ADD_DEVICE="${2:?$(L '--add-device 需要一个设备名' '--add-device needs a device name')}"; SAW_DEPLOY_ARG=1
-                      deprecated "--add-device" "add-device ${WANT_ADD_DEVICE}"; shift 2 ;;
-    --add-device=*)   WANT_ADD_DEVICE="${1#*=}"; SAW_DEPLOY_ARG=1; deprecated "--add-device" "add-device ${WANT_ADD_DEVICE}"; shift ;;
-    --remove-device)  WANT_REMOVE_DEVICE="${2:?$(L '--remove-device 需要一个设备名' '--remove-device needs a device name')}"; SAW_DEPLOY_ARG=1
-                      deprecated "--remove-device" "remove-device ${WANT_REMOVE_DEVICE}"; shift 2 ;;
-    --remove-device=*) WANT_REMOVE_DEVICE="${1#*=}"; SAW_DEPLOY_ARG=1; deprecated "--remove-device" "remove-device ${WANT_REMOVE_DEVICE}"; shift ;;
+    # 2.0 已移除的旧参数：遇到即退出 2，先于后面的互斥检查，和什么参数组合都得到同一条提示。
+    --migrate)        removed_flag --migrate migrate ;;
+    --uninstall)      removed_flag --uninstall uninstall ;;
+    --rotate-token)   removed_flag --rotate-token rotate-token ;;
+    --rotate-keys)    removed_flag --rotate-keys rotate-keys ;;
+    --add-device)     removed_flag --add-device "add-device $(removed_device_name "${2:-}")" ;;
+    --add-device=*)   removed_flag --add-device "add-device $(removed_device_name "${1#*=}")" ;;
+    --remove-device)  removed_flag --remove-device "remove-device $(removed_device_name "${2:-}")" ;;
+    --remove-device=*) removed_flag --remove-device "remove-device $(removed_device_name "${1#*=}")" ;;
     --allow-tun)      ALLOW_TUN=1; SAW_DEPLOY_ARG=1; shift ;;
-    # 子命令（1.5.0 起的推荐写法）：与上面对应的旧参数共用同一组变量，后面的互斥检查与执行路径完全相同。
+    # 子命令（1.5.0 起的写法）：后面的互斥检查与执行路径都按这组变量判断。
     up)               SAW_UP=1; SAW_DEPLOY_ARG=1; shift ;;
     rotate-keys)      ROTATE_KEYS=1; SAW_DEPLOY_ARG=1; shift ;;
     rotate-token)     ROTATE_TOKEN=1; SAW_DEPLOY_ARG=1; shift ;;
@@ -273,7 +277,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -z "${DEPRECATED_MSGS}" ]] || printf '%s' "${DEPRECATED_MSGS}" >&2
 if [[ "${SAW_UP}" == 1 ]] && { (( DO_MIGRATE + DO_UNINSTALL + ROTATE_TOKEN + ROTATE_KEYS > 0 )) || [[ -n "${WANT_ADD_DEVICE}${WANT_REMOVE_DEVICE}" ]]; }; then
   die_usage "$(L "up 只用于部署，不能与 migrate / uninstall / rotate-token / rotate-keys / add-device / remove-device 同用" "up is only for deploying and cannot be combined with migrate / uninstall / rotate-token / rotate-keys / add-device / remove-device")"
 fi
@@ -458,7 +461,7 @@ sysctl -n net.ipv4.tcp_congestion_control" || true)"
   fi
 fi
 
-# 订阅 TOKEN 是"VPS 上订阅目录名"的唯一记录，丢了就只能 --rotate-token，所以放 XDG state 而不是可随时清空的 cache。
+# 订阅 TOKEN 是"VPS 上订阅目录名"的唯一记录，丢了就只能 rotate-token，所以放 XDG state 而不是可随时清空的 cache。
 STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/ownexit/direct/${SAFE_NAME}"
 STATE_FILE="${STATE_DIR}/state.env"
 STAGING="${STATE_DIR}/${SUB_SERVICE}"
@@ -655,7 +658,7 @@ if [[ "${STATE}" == in_progress ]]; then
     die "$(L "上次未完成的操作恢复失败（REASON=$(kv_get "${OP_RESULT}" REASON)），本次请求未执行；详见上方 [vps] 日志与 ownexit direct log" "Recovering the unfinished operation failed (REASON=$(kv_get "${OP_RESULT}" REASON)); this request was not carried out; see the [vps] log above and ownexit direct log")"
   fi
   # 恢复完成的是一次改参数：节点参数已变，后面要提示重新导入与同机链的 rebaseline。
-  # 只有结果 ok 才算凭据已换；rolled-back 表示回到了旧凭据，本次 --rotate-keys 仍要照常执行。
+  # 只有结果 ok 才算凭据已换；rolled-back 表示回到了旧凭据，本次 rotate-keys 仍要照常执行。
   if [[ "$(kv_get "${OP_RESULT}" OP)" == reparam ]] && op_ok; then
     # 纯设备操作（没有 SNI / 端口 / 轮换变化）不要求其它设备重新导入，只记设备变动。
     # TXN_PARAMS 为空是 v0.6.0 及更早留下的操作：按改参数处理。
@@ -994,7 +997,7 @@ render_subscription_dir
 
 # ---------- 设备订阅（docs/feature/feature-devices-sni-scan.md §5.1.1） ----------
 # 本机设备 TOKEN 文件：每行 名字=TOKEN；以 ! 开头的行是“待在 VPS 上删除的旧 TOKEN”（吊销的设备、
-# --rotate-token 换下的旧 TOKEN），VPS 删除成功后才从文件去掉，同步中断时下次仍能找到它们。
+# rotate-token 换下的旧 TOKEN），VPS 删除成功后才从文件去掉，同步中断时下次仍能找到它们。
 DEVICE_TOKENS_FILE="${STATE_DIR}/devices.env"
 device_token_of() {
   [[ -f "${DEVICE_TOKENS_FILE}" ]] || return 0

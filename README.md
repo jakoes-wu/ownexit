@@ -89,7 +89,6 @@ Output language: the scripts print in Chinese when the system language (`LC_ALL`
 | `ownexit …` | script in a clone |
 | ---- | ---- |
 | `ownexit direct` | `direct/setup_direct.sh` |
-| `ownexit subctl` (deprecated, use `ownexit direct sub …` / `status` / `log` …) | `direct/subctl` |
 | `ownexit connect` | `direct/connect_to.sh` |
 | `ownexit chain` | `chain/setup_chain.sh` |
 | `ownexit multi` | `chain/multi_chain_client.sh` |
@@ -127,7 +126,7 @@ When run from a clone, the chain scripts additionally refuse configuration files
    ownexit direct sub stop
    ```
 
-The VPS is remembered, so later runs need no `--host`: `ownexit direct up` to redeploy, `ownexit direct sub start|stop`, `ownexit direct status|log|qr`, `ownexit direct uninstall` to remove it. `ownexit direct rotate-keys` replaces the UUIDs, Reality key pair and short id on the server (every device must re-import the subscription). `ownexit direct add-device phone` gives one device its own UUID and subscription URLs; `ownexit direct remove-device phone` revokes it without touching the others; `ownexit direct devices` lists them. (The older spellings `ownexit subctl …` and `ownexit direct --rotate-keys` etc. still work in 1.x and print the new form.)
+The VPS is remembered, so later runs need no `--host`: `ownexit direct up` to redeploy, `ownexit direct sub start|stop`, `ownexit direct status|log|qr`, `ownexit direct uninstall` to remove it. `ownexit direct rotate-keys` replaces the UUIDs, Reality key pair and short id on the server (every device must re-import the subscription). `ownexit direct add-device phone` gives one device its own UUID and subscription URLs; `ownexit direct remove-device phone` revokes it without touching the others; `ownexit direct devices` lists them. (The older spellings `ownexit subctl …` and `ownexit direct --rotate-keys` etc. were removed in 2.0; they exit 2 and print the new form.)
 
 **Set up with the 233boy script by an earlier version?** Run `ownexit direct migrate` once. It keeps the existing UUID, keys, port and SNI, switches to ownexit's own service and removes the 233boy files (backed up first) — your clients and subscription URLs keep working.
 
@@ -160,7 +159,7 @@ If your computer runs a proxy in TUN mode (Clash and similar), SSH to the server
 
 ## Stability
 
-From 1.0.0 the command-line interface, configuration keys and on-disk formats are frozen for the whole 1.x series: releases only add things, nothing is renamed or removed, and existing deployments keep working after an upgrade without redeploying or re-importing clients. Breaking changes are reserved for 2.0 and will come with a migration. The frozen surface is listed in [docs/reference/commands.en.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/reference/commands.en.md) and [docs/reference/files.en.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/reference/files.en.md); the rules are in [docs/reference/compatibility.en.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/reference/compatibility.en.md). The design records under `docs/feature/` are Chinese only; every user-facing document has an English edition.
+The command-line interface, configuration keys and on-disk formats are frozen for the whole 2.x series (as they were for 1.x from 1.0.0): releases only add things, nothing is renamed or removed, and existing deployments keep working after an upgrade without redeploying or re-importing clients. 2.0.0 only removed the spellings deprecated in 1.5.0; upgrading from 1.x needs no action. Breaking changes are reserved for 3.0 and will come with a migration. The frozen surface is listed in [docs/reference/commands.en.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/reference/commands.en.md) and [docs/reference/files.en.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/reference/files.en.md); the rules are in [docs/reference/compatibility.en.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/reference/compatibility.en.md). The design records under `docs/feature/` are Chinese only; every user-facing document has an English edition.
 
 ## Security notes
 

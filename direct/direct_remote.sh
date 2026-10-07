@@ -119,7 +119,7 @@ probe() {
   if [[ -f "${TXN}" ]]; then
     state=in_progress
     printf 'TXN_OP=%s\nTXN_STEP=%s\n' "$(txn_get OP)" "$(txn_get STEP)"
-    # 本机据此判断“恢复完成的这次操作是否已经换过凭据”，避免用户带 --rotate-keys 重跑时再换一次。
+    # 本机据此判断“恢复完成的这次操作是否已经换过凭据”，避免用户用 rotate-keys 重跑时再换一次。
     printf 'TXN_ROTATE=%s\n' "$( [[ -f "${ARGS}" && "$(arg ROTATE)" == 1 ]] && printf 1 || printf 0)"
     # 恢复完成的若是同一个设备操作，本机跳过重复提交（否则会报 device-exists / device-missing）。
     printf 'TXN_DEVICE_ADD=%s\nTXN_DEVICE_REMOVE=%s\n' "$(arg DEVICE_ADD)" "$(arg DEVICE_REMOVE)"
