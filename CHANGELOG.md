@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-06
+
+### 新增
+
+- 链式 `chain up --relay <IP> --exit <IP>`：一条命令完成 init、deploy 并打印节点二维码与下一步；可重跑，已有配置且地址一致时直接继续，不带 IP 且本机只有一条链时复用它。
+- 链式子命令在本机只有一条链时可以省略 `--id`（`ownexit chain status`）；没有配置或有多条时退出 2 并提示。
+- 链式 `chain qr [--device <名字>]`：在终端显示节点二维码，只读本机文件。
+- 直连与链式部署成功后打印“下一步”块（导入哪条链接、应显示的出口 IP、`subctl stop`、`doctor`），二维码紧随其后。
+- `ownexit --help` 按系统语言输出中文或英文（`OWNEXIT_LANG=zh|en` 可强制），并分“常用 / 其它”两组；`chain --help` 的子命令按常用 / 日常 / 维护 / 高级分组。
+
+### 变更
+
+- **部署前自检（行为变化）**：`ownexit direct`、`chain deploy` / `chain up` 开始前检查本机到服务器的路由是否经过代理 TUN；经过时不再只是警告，而是拒绝（链式退出 3，直连退出 1）并给出处理办法。一直在 TUN 下部署的用户需要关闭 TUN、按 `docs/manual/clash-direct-ips.md` 让服务器 IP 走物理网卡，或加 `--allow-tun` 恢复旧行为。
+
 ## [1.1.0] - 2026-10-06
 
 ### 新增

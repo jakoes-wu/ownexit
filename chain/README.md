@@ -20,17 +20,26 @@
 在本仓库根目录运行：
 
 ```bash
+# 一条命令：没有配置就先 init（配免密、探测出口 IP），然后 deploy，结束时打印节点二维码与下一步
+chain/setup_chain.sh up --relay 203.0.113.10 --exit 203.0.113.20
+```
+
+中途断开再跑一次同样的命令即可收敛；已部署后再跑等于完整 verify。分步做：
+
+```bash
 # 1. 只问两个 IP：给两台机器配免密（各问一次 root 密码），探测出口 IP 与中转现状，生成配置
 chain/setup_chain.sh init --relay 203.0.113.10 --exit 203.0.113.20
 
 # 2. 部署（先只读预检、再按“出口机 → 中转机”顺序事务部署，最后完整验证）
 chain/setup_chain.sh --id main deploy
 
-# 3. 客户端节点链接在这里（含凭据，权限 600）：
-cat ~/.local/state/ownexit/chains/main/client/node.txt
+# 3. 节点二维码随时再看；节点链接在 ~/.local/state/ownexit/chains/main/client/node.txt（含凭据，权限 600）
+chain/setup_chain.sh qr
 ```
 
 想先看看能不能部署、不改动远端：`chain/setup_chain.sh --id main preflight`。
+
+本机只有一条链时，所有子命令都可以省略 `--id`（`chain/setup_chain.sh status`）；没有配置或有多条时退出 2 并提示。部署命令（`up` / `deploy`）开始前会检查本机到两台服务器的路由是否经过代理的 TUN：经过就拒绝（退出 3）并给出处理办法——关 TUN，或按 [docs/manual/clash-direct-ips.md](../docs/manual/clash-direct-ips.md) 让服务器 IP 走物理网卡；确认要继续加 `--allow-tun`。
 
 `init` 生成的配置写在 `~/.config/ownexit/chains/<名字>.env`（默认名字 `main`），之后 `deploy`、`verify`、`rollback` 等只读这个文件，不接受主机参数覆盖：部署状态绑定了配置文件的哈希，改了配置会和状态对不上。要部署第二条链，用 `init --id <新名字>`。
 
@@ -76,8 +85,10 @@ cat ~/.local/state/ownexit/chains/main/client/node.txt
 
 ```bash
 chain/setup_chain.sh init --relay <ip> --exit <ip> [--id <名字>] [--relay-port N] [--exit-port N] [--sni <域名>] [--exit-source-filter managed|provider|none]
+chain/setup_chain.sh up [init 的全部参数] [--allow-tun]        # init（如需）+ deploy + 二维码，可重跑
 chain/setup_chain.sh --id main preflight
-chain/setup_chain.sh --id main deploy
+chain/setup_chain.sh --id main deploy [--allow-tun]
+chain/setup_chain.sh --id main qr [--device <名字>]
 chain/setup_chain.sh --id main verify
 chain/setup_chain.sh --id main verify --with-fail-closed
 chain/setup_chain.sh --id main status

@@ -128,25 +128,17 @@ Step-by-step guide: [docs/manual/direct.md](https://github.com/jakoes-wu/ownexit
 
 ## Quick start: relay
 
-1. **Give it two IPs**
+1. **One command**
 
    ```sh
-   ownexit chain init --relay 203.0.113.10 --exit 203.0.113.20
+   ownexit chain up --relay 203.0.113.10 --exit 203.0.113.20
    ```
 
-   It sets up key login on both servers (one password prompt each), detects the exit IP and asks you to confirm it, checks whether the relay already runs sing-box, and writes `~/.config/ownexit/chains/main.env`. Nothing on the servers is changed yet. By default deploy will also add an nftables rule on the exit so that only the relay can reach its Reality port (`--exit-source-filter managed`); use `provider` if your provider's security group already does that, or `none` to skip it.
+   It sets up key login on both servers (one password prompt each), detects the exit IP and asks you to confirm it, writes `~/.config/ownexit/chains/main.env`, then deploys: both servers download the pinned sing-box release from GitHub themselves (falling back to an upload from your computer), the exit first, then the relay, as one transaction, and the exit IP is verified three different ways. If anything fails, it cleans up; if your network drops halfway, run the same `chain up` again and it converges. By default an nftables rule on the exit lets only the relay reach its Reality port (`--exit-source-filter managed`); use `provider` if your provider's security group already does that, or `none` to skip it. Prefer two steps? `chain init …` writes the config, `chain deploy` deploys it.
 
-2. **Deploy**
+2. **Import**: the node QR code and `vless://` link are printed at the end (any time later: `ownexit chain qr`). Open `https://ipinfo.io` on the device; it should show the exit's IP.
 
-   ```sh
-   ownexit chain --id main deploy
-   ```
-
-   Both servers download the pinned sing-box release from GitHub themselves (falling back to an upload from your computer). It deploys the exit first, then the relay, as one transaction, and verifies the exit IP three different ways. If anything fails, it cleans up; if your network drops halfway, run `deploy` or `rollback` again and it converges.
-
-3. **Import** the node from `~/.local/state/ownexit/chains/main/client/node.txt`, or run `ownexit multi --chains main render` for QR codes and a Clash snippet.
-
-Day to day: `ownexit chain --id main status | verify | conns | rollback`. `ownexit chain --id main rotate-keys` replaces the exit's UUIDs, Reality key pair and short id in place (relay, ports and deployment stay; re-import afterwards). `add-device <name>` / `remove-device <name>` / `list-devices` manage per-device UUIDs. If the relay also runs a direct exit and you migrate, reconfigure or uninstall that direct exit, run `ownexit chain --id main rebaseline` afterwards so the chain re-records what it protects (the direct script reminds you). Relay blocked? Deploy a second relay with `init --id backup …` and combine both with `multi_chain_client.sh` — clients switch automatically. Full reference: [chain/README.md](https://github.com/jakoes-wu/ownexit/blob/main/chain/README.md); guide: [docs/manual/chain.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/manual/chain.md) (both in Chinese).
+Day to day (no `--id` needed while you have a single chain): `ownexit chain status | verify | conns | rollback`. `ownexit chain rotate-keys` replaces the exit's UUIDs, Reality key pair and short id in place (relay, ports and deployment stay; re-import afterwards). `add-device <name>` / `remove-device <name>` / `list-devices` manage per-device UUIDs; `qr --device <name>` shows one device's QR code. With several chains add `--id <name>`. If the relay also runs a direct exit and you migrate, reconfigure or uninstall that direct exit, run `ownexit chain rebaseline` afterwards so the chain re-records what it protects (the direct script reminds you). Relay blocked? Deploy a second relay with `init --id backup …` and combine both with `multi_chain_client.sh` — clients switch automatically. Full reference: [chain/README.md](https://github.com/jakoes-wu/ownexit/blob/main/chain/README.md); guide: [docs/manual/chain.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/manual/chain.md) (both in Chinese).
 
 ## Supported platforms
 
@@ -157,7 +149,7 @@ Day to day: `ownexit chain --id main status | verify | conns | rollback`. `ownex
 | Server CPU | amd64 (tested on cloud servers) or arm64 (tested on Ubuntu 22.04 arm64 virtual machines) | amd64 (tested on cloud servers) or arm64 (tested on Ubuntu 22.04 arm64 virtual machines); relay and exit must match |
 | Clients | Clash Verge, mihomo, Shadowrocket tested; sing-box and v2rayN subscriptions provided; any VLESS-Reality client via `vless://` | Clash Verge, mihomo, Shadowrocket tested; any VLESS-Reality client via `vless://` |
 
-If your computer runs a proxy in TUN mode (Clash and similar), SSH to the servers may be cut off halfway through a deploy. Turn TUN off, or route the relay and exit IPs directly, while running chain commands.
+If your computer runs a proxy in TUN mode (Clash and similar), SSH to the servers gets cut off halfway through a deploy. Deploy commands now check the route to each server first and refuse when it goes through the TUN, telling you what to do: turn TUN off, or route the server IPs through the physical interface (Clash Verge: [docs/manual/clash-direct-ips.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/manual/clash-direct-ips.md), Chinese); pass `--allow-tun` to proceed anyway.
 
 ## Stability
 
@@ -181,7 +173,7 @@ See [SECURITY.md](https://github.com/jakoes-wu/ownexit/blob/main/SECURITY.md) fo
 
 **I manage several VPSes.** Pass `--host` to pick one. Without it, `ownexit direct` and `ownexit subctl` list the remembered servers and exit.
 
-**How do I undo it?** Relay: `ownexit chain --id main rollback`. Direct: `ownexit direct --uninstall` (keeps your SSH key login and any migration backup).
+**How do I undo it?** Relay: `ownexit chain rollback`. Direct: `ownexit direct --uninstall` (keeps your SSH key login and any migration backup).
 
 **Where are my files?** Keys: `~/.ssh/ownexit/`. Configuration: `~/.config/ownexit/`. State and subscriptions: `~/.local/state/ownexit/`.
 

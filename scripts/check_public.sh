@@ -15,6 +15,8 @@
 #   加 --history 时，对 `git log -p --all` 的全部输出做同样的检查（首次推送前、改公开前各跑一次）。
 
 set -euo pipefail
+# macOS 的 grep / awk 在中文 locale 下会漏掉紧挨着中文字符的 IPv4（CI 的 GNU 工具不漏），统一按 C locale 匹配。
+export LC_ALL=C
 
 usage() {
   cat <<'EOF'

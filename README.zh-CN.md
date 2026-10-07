@@ -128,25 +128,17 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 
 ## 快速上手：链式
 
-1. **给两个 IP**
+1. **一条命令**
 
    ```sh
-   ownexit chain init --relay 203.0.113.10 --exit 203.0.113.20
+   ownexit chain up --relay 203.0.113.10 --exit 203.0.113.20
    ```
 
-   给两台机器配免密（各问一次密码），探测出口 IP 并请你确认，检查中转机上是否已有 sing-box，生成 `~/.config/ownexit/chains/main.env`。这一步不改动服务器。默认部署时还会在出口机加一条 nftables 规则，让它的 Reality 端口只接受中转机的连接（`--exit-source-filter managed`）；服务商安全组已经这样限制时用 `provider`，不想限制用 `none`。
+   给两台机器配免密（各问一次密码），探测出口 IP 并请你确认，生成 `~/.config/ownexit/chains/main.env`，然后部署：两台服务器自己从 GitHub 下载固定版本的 sing-box（失败才由你的电脑上传），先部署出口机、再部署中转机，整个过程是一个事务，最后从三个层面验证出口 IP。任何一步失败都会自动清理；网络中途断开时再跑一次同样的 `chain up` 就会收敛。默认会在出口机加一条 nftables 规则，让它的 Reality 端口只接受中转机的连接（`--exit-source-filter managed`）；服务商安全组已经这样限制时用 `provider`，不想限制用 `none`。想分步做：`chain init …` 生成配置，再 `chain deploy`。
 
-2. **部署**
+2. **导入**：结束时终端直接打印节点二维码和 `vless://` 链接（随时再看：`ownexit chain qr`）；在设备上打开 `https://ipinfo.io`，应显示出口机的 IP。
 
-   ```sh
-   ownexit chain --id main deploy
-   ```
-
-   两台服务器自己从 GitHub 下载固定版本的 sing-box（失败才由你的电脑上传），先部署出口机、再部署中转机，整个过程是一个事务，最后从三个层面验证出口 IP；任何一步失败都会自动清理，网络中途断开时再跑一次 `deploy` 或 `rollback` 就会收敛。
-
-3. **导入**：节点链接在 `~/.local/state/ownexit/chains/main/client/node.txt`；也可以运行 `ownexit multi --chains main render` 生成二维码和 Clash 配置片段。
-
-日常操作：`ownexit chain --id main status | verify | conns | rollback`。`ownexit chain --id main rotate-keys` 原地更换出口机全部设备的 UUID、Reality 密钥和 short id（中转、端口、部署不变，之后重新导入）。`add-device <名字>` / `remove-device <名字>` / `list-devices` 管理每台设备的 UUID。中转机上同时跑着直连、并且你迁移、改参数或卸载了这台的直连时，之后运行一次 `ownexit chain --id main rebaseline`，让链重新登记它要保护的服务（直连脚本会提醒你）。中转机被墙了？用 `init --id backup …` 再部署一台中转，再用 `multi_chain_client.sh` 把两条链合在一起，客户端会自动切换。完整参考见 [chain/README.md](chain/README.md)，逐步说明见 [docs/manual/chain.md](docs/manual/chain.md)。
+日常操作（只有一条链时不用带 `--id`）：`ownexit chain status | verify | conns | rollback`。`ownexit chain rotate-keys` 原地更换出口机全部设备的 UUID、Reality 密钥和 short id（中转、端口、部署不变，之后重新导入）。`add-device <名字>` / `remove-device <名字>` / `list-devices` 管理每台设备的 UUID，`qr --device <名字>` 看某台设备的二维码。有多条链时加 `--id <名字>`。中转机上同时跑着直连、并且你迁移、改参数或卸载了这台的直连时，之后运行一次 `ownexit chain rebaseline`，让链重新登记它要保护的服务（直连脚本会提醒你）。中转机被墙了？用 `init --id backup …` 再部署一台中转，再用 `multi_chain_client.sh` 把两条链合在一起，客户端会自动切换。完整参考见 [chain/README.md](chain/README.md)，逐步说明见 [docs/manual/chain.md](docs/manual/chain.md)。
 
 ## 支持的平台
 
@@ -157,7 +149,7 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 | 服务器 CPU | amd64（已在云服务器上测试）或 arm64（已在 Ubuntu 22.04 arm64 虚拟机上测试） | amd64（已在云服务器上测试）或 arm64（已在 Ubuntu 22.04 arm64 虚拟机上测试），两台须相同 |
 | 客户端 | 已测试 Clash Verge、mihomo、Shadowrocket；另提供 sing-box 与 v2rayN 订阅；其它支持 VLESS-Reality 的客户端可用 `vless://` 导入 | 已测试 Clash Verge、mihomo、Shadowrocket；其它支持 VLESS-Reality 的客户端可用 `vless://` 导入 |
 
-如果你的电脑开着代理的 TUN 模式（Clash 一类），部署途中到服务器的 SSH 可能被切断。运行链式命令时请关掉 TUN，或让中转机、出口机的 IP 走直连。
+如果你的电脑开着代理的 TUN 模式（Clash 一类），部署途中到服务器的 SSH 会被切断。部署命令开始前会检查到服务器的路由，经过 TUN 时直接拒绝并给出处理办法：关掉 TUN，或按 [docs/manual/clash-direct-ips.md](docs/manual/clash-direct-ips.md) 让服务器 IP 走物理网卡；确认要继续时加 `--allow-tun`。
 
 ## 稳定性
 
@@ -181,7 +173,7 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 
 **我有好几台 VPS。** 用 `--host` 指定。不带 `--host` 时，`ownexit direct` 和 `ownexit subctl` 会列出记住的几台并退出。
 
-**怎么撤销？** 链式：`ownexit chain --id main rollback`。直连：`ownexit direct --uninstall`（保留 SSH 免密与迁移备份）。
+**怎么撤销？** 链式：`ownexit chain rollback`。直连：`ownexit direct --uninstall`（保留 SSH 免密与迁移备份）。
 
 **文件都在哪？** 密钥：`~/.ssh/ownexit/`；配置：`~/.config/ownexit/`；状态和订阅：`~/.local/state/ownexit/`。
 
