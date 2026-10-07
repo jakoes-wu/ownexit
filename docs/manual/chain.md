@@ -39,14 +39,18 @@ SSH 端口不是 22 时加 `--relay-port` / `--exit-port`。想部署多条链�
 
 ## 3. 部署
 
+第 2 节和本节可以合成一条命令：`chain/setup_chain.sh up --relay <中转 IP> --exit <出口 IP>`，它在没有配置时先做 init，然后 deploy，结束时打印节点二维码；中途断开再跑一次同样的命令即可。分步做的话：
+
 ```bash
 chain/setup_chain.sh --id main preflight   # 可选：先只读检查一遍
 chain/setup_chain.sh --id main deploy
 ```
 
+部署命令开始前会检查本机到两台服务器的路由是否经过代理的 TUN（经过时 SSH 会在途中被切断）：经过就拒绝并给出处理办法，见[让指定 IP 不走 Clash Verge 的代理](clash-direct-ips.md)；确认要继续加 `--allow-tun`。
+
 `deploy` 让两台服务器自己下载固定版本的 sing-box（校验 SHA256，失败才由本机上传），先部署出口机再部署中转机，最后从三个层面验证出口 IP。任何一步失败都会按事务清理，不留半套配置；网络中途断开时，再跑一次 `deploy` 或 `rollback` 都会按事务记录收敛。
 
-成功后客户端节点链接在 `~/.local/state/ownexit/chains/main/client/node.txt`（含凭据，权限 600）。
+成功后终端打印“下一步”块：节点二维码与 `vless://` 链接、应显示的出口 IP、出问题先跑 `ownexit doctor`。节点链接也在 `~/.local/state/ownexit/chains/main/client/node.txt`（含凭据，权限 600），随时可用 `chain/setup_chain.sh qr` 再看二维码（`--device <名字>` 看设备的）。本机只有一条链时，所有子命令都可以省略 `--id main`。
 
 ## 4. 导入客户端
 

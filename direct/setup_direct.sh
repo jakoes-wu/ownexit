@@ -37,6 +37,8 @@ SUB_SERVICE="ownexit-subscription"
 ROTATE_TOKEN=0
 # --rotate-keys：在服务器上重新生成 UUID / Reality 密钥 / short id（端口、SNI、订阅地址不变）。
 ROTATE_KEYS=0
+# 本机到 VPS 的路由经代理 TUN 时默认拒绝部署；--allow-tun 置 1 后只警告继续。
+ALLOW_TUN=0
 # 本次运行中已经完成过一次凭据轮换（来自恢复的未完成操作）；为 1 时不再轮换，避免用户重跑时凭据被换两次。
 ROTATED=0
 # --add-device / --remove-device 的设备名（docs/feature/feature-devices-sni-scan.md §5.1.1）；default 指现有 UUID，保留。
@@ -91,6 +93,8 @@ SSH 端口不是 22 时:
 
 选项:
   --host <ip/host>            出口 VPS 地址；不给时用上次记住的 VPS，没有则交互提问
+  --allow-tun                 本机到 VPS 的路由经代理 TUN 时默认拒绝（部署途中 SSH 会被切断），加它只警告继续；
+                              让 VPS 的 IP 走物理网卡的做法见 docs/manual/clash-direct-ips.md
   -u, --user <user>           SSH 用户名，默认 root
   -P, --port <port>           SSH 端口，默认 22
   --sni <域名>                Reality 伪装域名；新装默认 ${DIRECT_SNI_DEFAULT}。不是每个 HTTPS 站点都能用
@@ -140,6 +144,7 @@ while [[ $# -gt 0 ]]; do
     --add-device=*)   WANT_ADD_DEVICE="${1#*=}"; shift ;;
     --remove-device)  WANT_REMOVE_DEVICE="${2:?--remove-device 需要一个设备名}"; shift 2 ;;
     --remove-device=*) WANT_REMOVE_DEVICE="${1#*=}"; shift ;;
+    --allow-tun)      ALLOW_TUN=1; shift ;;
     -h|--help)        usage; exit 0 ;;
     *)                die_usage "未知参数: $1（用 --help 查看用法）" ;;
   esac
@@ -198,6 +203,44 @@ kv_get() {
 FAIL_COUNT=0
 pass() { echo "[+] $*"; }
 fail() { echo "[!] $*"; FAIL_COUNT=$((FAIL_COUNT + 1)); }
+
+# ---------- 0. 部署前自检：本机到 VPS 的路由是否经代理 TUN（docs/feature/feature-usability-v12.md §5.1.6） ----------
+# 与 doctor.sh / chain/setup_chain.sh 的 route_interface / interface_is_tunnel 同一实现。
+route_interface() {
+  if [[ "$(uname -s)" == Darwin ]]; then
+    route -n get "$1" 2>/dev/null | awk '/interface:/{print $2; exit}'
+  else
+    ip route get "$1" 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}'
+  fi
+}
+interface_is_tunnel() {
+  case "$1" in utun*|tun*|wg*) return 0 ;; esac
+  [[ "$(uname -s)" == Linux && -e "/sys/class/net/$1/tun_flags" ]]
+}
+# 经 TUN 时部署途中的 SSH 会被代理切断，默认拒绝；--allow-tun 只警告。只核 IPv4 字面量（主机名会被 fake-ip 解析误判）；
+# 取不到出接口只警告继续。
+tun_precheck() {
+  local ip iface
+  ip="$1"
+  if [[ ! "${ip}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "[*] 目标 ${ip} 不是 IPv4，跳过 TUN 自检"
+    return 0
+  fi
+  iface="$(route_interface "${ip}")"
+  if [[ -z "${iface}" ]]; then
+    echo "[*] 无法判定到 ${ip} 的出接口，跳过 TUN 自检"
+    return 0
+  fi
+  interface_is_tunnel "${iface}" || return 0
+  if [[ "${ALLOW_TUN}" == 1 ]]; then
+    echo "[!] 到 ${ip} 的路由经过 TUN（${iface}），已加 --allow-tun 继续；部署期间 SSH 可能被代理切断"
+    return 0
+  fi
+  die "到 ${ip} 的路由经过 TUN（${iface}），部署期间 SSH 会被代理切断。
+处理办法：关闭代理的 TUN 模式；或让这个 IP 走物理网卡（Clash Verge 见 docs/manual/clash-direct-ips.md）。
+已按手册加了直连规则且 SSH 正常，或确认要继续：加 --allow-tun。"
+}
+tun_precheck "${HOST}"
 
 # ---------- 1. 免密 SSH 与系统信息 ----------
 
@@ -997,6 +1040,13 @@ fi
 cat <<EOF
 
 ==================== 交付结果 ====================
+下一步（最常用）:
+  1. 导入：Clash Verge / mihomo 粘贴 ${CLASH_URL}
+           iPhone Shadowrocket 粘贴 ${SR_URL}（或扫下面的二维码）
+  2. 在设备上打开 https://ipinfo.io，应显示 ${VPS_PUBLIC_IP:-VPS IP}
+  3. 所有设备导入后关掉订阅服务：ownexit subctl stop（以后加设备先 start 再 stop）
+  4. 出问题先跑：ownexit doctor
+
 订阅链接（客户端「新增订阅链接」直接粘贴）:
   Clash Verge / mihomo : ${CLASH_URL}
   Shadowrocket / v2rayN: ${SR_URL}
@@ -1021,6 +1071,13 @@ vless 节点链接（仅故障排查/备份用）:
   - 怀疑订阅泄露时运行：$(basename "$0") --rotate-token
   - 怀疑节点凭据泄露时运行：$(basename "$0") --rotate-keys（所有设备都要重新导入）
 EOF
+if command -v qrencode >/dev/null 2>&1; then
+  echo
+  echo "节点二维码（iPhone Shadowrocket / 安卓客户端扫码导入）:"
+  qrencode -t ANSIUTF8 < "${STAGING}/${TOKEN}/node.txt"
+else
+  echo "[*] 想在终端显示节点二维码：安装 qrencode（macOS: brew install qrencode）后运行 ownexit subctl qr"
+fi
 if [[ -n "${NEW_DEVICE_TOKENS}" ]]; then
   echo
   echo "设备订阅（每台设备只导入自己那一组；default 就是上面的链接）:"
@@ -1042,13 +1099,6 @@ elif [[ "${CHANGED_PARAMS}" == 1 && "${STATE}" != legacy ]]; then
 fi
 echo "=================================================="
 
-if command -v qrencode >/dev/null 2>&1; then
-  echo
-  echo "节点二维码（iPhone Shadowrocket / 安卓客户端扫码导入）:"
-  qrencode -t ANSIUTF8 < "${STAGING}/${TOKEN}/node.txt"
-else
-  echo "[*] 想在终端显示节点二维码：安装 qrencode（macOS: brew install qrencode）后运行 ownexit subctl qr"
-fi
 
 if [[ "${STATE}" != ownexit || "${CHANGED_PARAMS}" == 1 || "${CHANGED_DEVICES}" == 1 ]]; then
   print_chain_hints

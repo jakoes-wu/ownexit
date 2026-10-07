@@ -166,9 +166,14 @@ compare "chain 参数" "${TMP}/a" "${TMP}/b"
 {
   func_body chain/setup_chain.sh parse_args | awk '/case "\$\{COMMAND\}" in/ {f=1; next} f && /^  esac/ {exit} f' | sub_words
   echo init
+  echo up
 } > "${TMP}/a"
 doc_table "${CMDS}" "ownexit chain" 子命令 > "${TMP}/b"
 compare "chain 子命令" "${TMP}/a" "${TMP}/b"
+# 6b. 省略 --id 用的子命令词表（is_chain_subcommand）必须与主 case 的分支词一致，否则有的子命令不能省略 --id。
+func_body chain/setup_chain.sh parse_args | awk '/case "\$\{COMMAND\}" in/ {f=1; next} f && /^  esac/ {exit} f' | sub_words > "${TMP}/a"
+func_body chain/setup_chain.sh is_chain_subcommand | sub_words > "${TMP}/b"
+compare "chain 子命令词表（is_chain_subcommand 对照主 case）" "${TMP}/a" "${TMP}/b"
 
 # 7. chain status 取值
 # 约束：status 行只在 status_chain() 与 main() 的 status 分支里输出，动态 reason 只来自 probe_state_file() 的

@@ -12,6 +12,8 @@
 #     ed25519 条目，且新 IP 与 state 的主机指纹一致（同一台出口机）。
 #   - migrate-exit 要求链已 deploy 且健康、旧出口机仍可经中转登录；新出口机由本命令配免密（非终端时需要
 #     OWNEXIT_SSH_PASSWORD），且与中转同架构、没有本链的文件。
+#   - up = init + deploy + 二维码，一条命令从零到可用，可重跑；本机只有一条链时所有子命令都可以省略 --id。
+#   - deploy / up 以及直连部署前会自检本机到服务器的路由是否经代理 TUN：经 TUN 默认拒绝（退出 3），--allow-tun 放行。
 # 调用方：由维护者在本仓库或任意目录直接执行；不应被 source。
 
 set -euo pipefail
@@ -83,6 +85,20 @@ TARGET_IP=''
 BLACKLIST_FILE=''
 # migrate-exit 是否显式给了 --to-port（只用于参数互斥校验）。
 MIGRATE_TO_PORT_GIVEN=0
+# 部署前 TUN 自检：到服务器的路由经代理 TUN 时默认拒绝；--allow-tun 置 1 后只 WARN 继续。
+ALLOW_TUN=0
+# qr 子命令要显示的设备名；空 = default（client/node.txt）。
+QR_DEVICE=''
+# up 子命令进行中：init_chain 不打印“next=deploy”提示并在配免密前做 TUN 自检，deploy_chain 不再重复自检。
+UP_MODE=0
+# init / up 的参数是否显式给出：up 对已有配置只比较显式给出的项，未给的以配置为准（否则只敲 chain up 就会被判“地址不同”）。
+INIT_RELAY_GIVEN=0
+INIT_EXIT_GIVEN=0
+INIT_RELAY_PORT_GIVEN=0
+INIT_EXIT_PORT_GIVEN=0
+INIT_SNI_GIVEN=0
+INIT_FILTER_GIVEN=0
+INIT_ID_GIVEN=0
 # 中转受管 drop-in 文件名；verify/rollback 只放行这一个文件，其余 drop-in 一律判 drifted。
 readonly RELAY_BLACKLIST_DROPIN='50-ownexit-chain-blacklist.conf'
 CONFIG_SHA256=''
@@ -161,9 +177,12 @@ usage() {
 用法:
   $(basename "${SCRIPT_PATH}") init [--relay <ipv4>] [--exit <ipv4>] [--id <名字>] [--relay-port <n>] [--exit-port <n>] [--sni <域名>]
                     [--exit-source-filter managed|provider|none]
+  $(basename "${SCRIPT_PATH}") up [--relay <ipv4>] [--exit <ipv4>] [--id <名字>] [init 的其它参数] [--allow-tun]
   $(basename "${SCRIPT_PATH}") --id <名字> <子命令>          # 等价于 --config ~/.config/ownexit/chains/<名字>.env
+  $(basename "${SCRIPT_PATH}") <子命令> [参数]              # 本机只有一条链时可以省略 --id
   $(basename "${SCRIPT_PATH}") --config <绝对路径> preflight
-  $(basename "${SCRIPT_PATH}") --config <绝对路径> deploy
+  $(basename "${SCRIPT_PATH}") --config <绝对路径> deploy [--allow-tun]
+  $(basename "${SCRIPT_PATH}") --config <绝对路径> qr [--device <名字>]
   $(basename "${SCRIPT_PATH}") --config <绝对路径> verify
   $(basename "${SCRIPT_PATH}") --config <绝对路径> verify --with-fail-closed
   $(basename "${SCRIPT_PATH}") --config <绝对路径> status
@@ -184,38 +203,44 @@ usage() {
   $(basename "${SCRIPT_PATH}") --config <绝对路径> migrate-exit --abandon-cleanup
   $(basename "${SCRIPT_PATH}") -h | --help
 
-作用:
-  init       只问两个 IP：给中转机和出口机配免密（第一次各问一次 root 密码），探测出口 IP 与中转现状，
-             生成 ~/.config/ownexit/chains/<名字>.env（默认名字 main）。不修改远端，已存在同名配置时拒绝。
-  preflight  只读核验本机、两台远端、官方资产、出口与碰撞条件。
-  deploy     持锁重跑全部 gate，按出口机出口 -> 中转入口顺序事务部署。
-  verify     按 state 核验资源、既有服务基线和三层真实代理出口。
+作用（按常用程度分组）:
+ 常用
+  up         一条命令从零到可用：没有配置就先 init（配免密、探测出口 IP），然后 deploy，最后打印节点二维码与下一步。
+             可重跑：已有配置且地址一致时直接继续 / 核验；不带 IP 且本机只有一条链时复用它。
   status     返回 healthy/not_deployed/busy/stale_lock/incomplete/unreachable/orphaned/drifted。
-  rollback   先全量预校验，再按中转 -> 出口机顺序事务拆除专属资源。
+  verify     按 state 核验资源、既有服务基线和三层真实代理出口。
+  qr         显示 default 节点的二维码（--device <名字> 显示某台设备的）；只读本机节点文件，不连服务器。
+ 日常
+  add-device   新增一台设备（独立 UUID），节点文件在 <状态目录>/devices/node-<名字>.txt；其它设备不受影响。
+               设备名 [a-z0-9][a-z0-9-]{0,31}，default 保留，每条链最多 32 台（含 default）。
+  remove-device 吊销一台设备，它立即连不上；其它设备不受影响。两者中途失败都可重跑同一条命令收敛。
+  list-devices 只读列出出口机上的设备与本机节点文件路径。
   conns      只读列出中转端口上各来源 IP 的连接数、空闲秒数、是否在黑名单，以及 proxyd fd 用量。
   kick       用 ss -K 销毁指定来源 IP 在中转端口上的全部已建连接（客户端会自动重连）。
   ban        把 IP/网段加入持久黑名单：本地 blacklist.txt + 中转受管 drop-in（IPAddressDeny=），
              daemon-reload 后立即生效并顺带 kick；重复 ban 幂等。
   unban      从黑名单移除；列表为空时删除中转 drop-in，恢复"无 drop-in"契约。
   banlist    只读对照本地黑名单与中转两个 unit 的 IPAddressDeny 回读值，不一致返回 5。
-  rehost-exit  出口机同机换 IP：先在 config 改 EXIT_HOST / EXPECTED_EXIT_IPV4，再原地迁移
-             中转转发目标与两端 owner、本地 state，最后自动完整 verify。要求新 IP 的主机指纹与 state
-             一致（同一台机）；UUID、密钥、端口、客户端订阅都不变；中途失败可重跑，已迁移时输出 noop。
-  rebaseline   中转机上的既有 sing-box 合法变化后（233boy 迁移为 ownexit-direct、直连改参数 / 新装 / 卸载），
-               按现场重新判定 RELAY_COHOSTS_SINGBOX 并重新登记基线；凭据、端口、node.txt 不变
+ 维护
   rotate-keys  在出口机上重新生成全部设备的 UUID 与 Reality 密钥 / short id，重启出口机 sing-box，更新节点文件
                与 state，最后自动完整 verify；中转、端口、部署 ID 不变。所有客户端都要重新导入
                （多链聚合需重新 render）。中途失败直接重跑同一条命令收敛。
-  add-device   新增一台设备（独立 UUID），节点文件在 <状态目录>/devices/node-<名字>.txt；其它设备不受影响。
-               设备名 [a-z0-9][a-z0-9-]{0,31}，default 保留，每条链最多 32 台（含 default）。
-  remove-device 吊销一台设备，它立即连不上；其它设备不受影响。两者中途失败都可重跑同一条命令收敛。
-  list-devices 只读列出出口机上的设备与本机节点文件路径。
+  rehost-exit  出口机同机换 IP：先在 config 改 EXIT_HOST / EXPECTED_EXIT_IPV4，再原地迁移
+             中转转发目标与两端 owner、本地 state，最后自动完整 verify。要求新 IP 的主机指纹与 state
+             一致（同一台机）；UUID、密钥、端口、客户端订阅都不变；中途失败可重跑，已迁移时输出 noop。
   migrate-exit 把出口机迁到另一台机器：给新机器配免密（第一次问一次 root 密码），沿用原配置（UUID、密钥、
                全部设备）在新机器上起服务，中转转发目标切过去，提交 state 后自动清理旧出口机上本链的服务与文件，
                最后完整 verify。客户端不用重新导入。旧出口机必须还能登录（私钥只在它上面）。中途失败重跑同一条
                命令收敛；中转切换前可用 --abort 放弃；旧机器永久失联时用 --abandon-cleanup 放弃清理。
                多条链共用同一台出口机时逐条迁移，全部迁完后重新 multi render。
-
+  rebaseline   中转机上的既有 sing-box 合法变化后（233boy 迁移为 ownexit-direct、直连改参数 / 新装 / 卸载），
+               按现场重新判定 RELAY_COHOSTS_SINGBOX 并重新登记基线；凭据、端口、node.txt 不变
+  rollback   先全量预校验，再按中转 -> 出口机顺序事务拆除专属资源。
+ 高级 / 分步
+  init       只问两个 IP：给中转机和出口机配免密（第一次各问一次 root 密码），探测出口 IP 与中转现状，
+             生成 ~/.config/ownexit/chains/<名字>.env（默认名字 main）。不修改远端，已存在同名配置时拒绝。
+  preflight  只读核验本机、两台远端、官方资产、出口与碰撞条件。
+  deploy     持锁重跑全部 gate，按出口机出口 -> 中转入口顺序事务部署。
 参数:
   --config <路径>       仓库外 600 regular file，格式见 chain.example.env（init 会自动生成）。
   --id <名字>           --config 的简写，与 --config 二选一。
@@ -224,6 +249,9 @@ usage() {
                 --exit-source-filter 出口机 Reality 端口如何只放行中转：managed（默认，本项目加 nft 白名单）、
                 provider（服务商安全组负责）、none（不限制）；managed / provider 时部署严格检查。
   --with-fail-closed    仅可跟在 verify 后；会短暂停止本 chain 并验证新连接失败。
+  --allow-tun           deploy / up：本机到服务器的路由经代理 TUN 时默认拒绝（退出 3，部署途中 SSH 会被切断），
+                        加它只警告继续。已按 docs/manual/clash-direct-ips.md 让这些 IP 走物理网卡时不需要。
+  --device <名字>       qr：显示该设备的节点二维码；不带时显示 default。
   --to <ipv4>           migrate-exit 的新出口机地址；--to-port 新出口机 SSH 端口，默认 22。
   --abort               migrate-exit 在中转切换之前放弃迁移：拆掉新机器上的半成品，恢复原配置。
   --abandon-cleanup     migrate-exit 提交后旧出口机永久失联时放弃清理（本链配置含私钥会留在旧机器上）。
@@ -237,7 +265,10 @@ usage() {
   ban 依赖中转 cgroup v2 + systemd IPAddressDeny=（cgroup BPF，非防火墙）。
 
 典型用法:
-  $(basename "${SCRIPT_PATH}") init --relay 203.0.113.10 --exit 203.0.113.20
+  $(basename "${SCRIPT_PATH}") up --relay 203.0.113.10 --exit 203.0.113.20      # 一步到位
+  $(basename "${SCRIPT_PATH}") status                                             # 只有一条链时不用 --id
+  $(basename "${SCRIPT_PATH}") qr --device phone
+  $(basename "${SCRIPT_PATH}") init --relay 203.0.113.10 --exit 203.0.113.20     # 分步：先生成配置
   $(basename "${SCRIPT_PATH}") --id main deploy
   $(basename "${SCRIPT_PATH}") --id main status
   $(basename "${SCRIPT_PATH}") --id main rollback
@@ -282,7 +313,7 @@ die() {
   if [[ "${code}" != 2 ]]; then
     case "${COMMAND}" in
       preflight) code=3 ;;
-      deploy)
+      deploy|up)
         case "${code}" in 3|4) ;; *) code=4 ;; esac
         ;;
       verify|status) code=5 ;;
@@ -547,24 +578,40 @@ xdg_or_default() {
 parse_init_args() {
   while [[ "$#" -gt 0 ]]; do
     case "$1" in
-      --relay) [[ "$#" -ge 2 ]] || die 2 '--relay 需要 IPv4'; INIT_RELAY="$2"; shift 2 ;;
-      --exit) [[ "$#" -ge 2 ]] || die 2 '--exit 需要 IPv4'; INIT_EXIT="$2"; shift 2 ;;
-      --id) [[ "$#" -ge 2 ]] || die 2 '--id 需要名字'; INIT_ID="$2"; shift 2 ;;
+      --relay) [[ "$#" -ge 2 ]] || die 2 '--relay 需要 IPv4'; INIT_RELAY="$2"; INIT_RELAY_GIVEN=1; shift 2 ;;
+      --exit) [[ "$#" -ge 2 ]] || die 2 '--exit 需要 IPv4'; INIT_EXIT="$2"; INIT_EXIT_GIVEN=1; shift 2 ;;
+      --id) [[ "$#" -ge 2 ]] || die 2 '--id 需要名字'; INIT_ID="$2"; INIT_ID_GIVEN=1; shift 2 ;;
       --relay-port)
         [[ "$#" -ge 2 && "$2" =~ ^[1-9][0-9]{0,4}$ ]] && (( $2 <= 65535 )) || die 2 '--relay-port 必须是 1-65535'
-        INIT_RELAY_PORT="$2"; shift 2 ;;
+        INIT_RELAY_PORT="$2"; INIT_RELAY_PORT_GIVEN=1; shift 2 ;;
       --exit-port)
         [[ "$#" -ge 2 && "$2" =~ ^[1-9][0-9]{0,4}$ ]] && (( $2 <= 65535 )) || die 2 '--exit-port 必须是 1-65535'
-        INIT_EXIT_PORT="$2"; shift 2 ;;
+        INIT_EXIT_PORT="$2"; INIT_EXIT_PORT_GIVEN=1; shift 2 ;;
       --exit-source-filter)
         [[ "$#" -ge 2 && ( "$2" == managed || "$2" == provider || "$2" == none ) ]] || die 2 '--exit-source-filter 只能是 managed、provider 或 none'
-        INIT_EXIT_SOURCE_FILTER="$2"; shift 2 ;;
+        INIT_EXIT_SOURCE_FILTER="$2"; INIT_FILTER_GIVEN=1; shift 2 ;;
       --sni)
         [[ "$#" -ge 2 && "$2" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]] || die 2 '--sni 必须是 ASCII 域名'
-        INIT_SNI="$2"; shift 2 ;;
-      *) die 2 "init 不认识的参数：$1" ;;
+        INIT_SNI="$2"; INIT_SNI_GIVEN=1; shift 2 ;;
+      # init 收到 --allow-tun 只置位、没有效果（init 不做 TUN 自检）；up 用它放行部署前自检。
+      --allow-tun) ALLOW_TUN=1; shift ;;
+      -h|--help)
+        # init --help 按 1.x 已冻结的描述仍退出 2；up 是新命令，打印帮助退出 0。
+        [[ "${COMMAND}" == up ]] || die 2 "${COMMAND} 不认识的参数：$1"
+        usage
+        exit 0 ;;
+      *) die 2 "${COMMAND} 不认识的参数：$1" ;;
     esac
   done
+}
+
+# parse_args 主 case 之外唯一的子命令词表（不含 init / up，它们在配置解析之前分派）。
+# scripts/check_interface.sh 会比对这里的词与 parse_args 主 case 的分支词一致；加子命令时两处都要改。
+is_chain_subcommand() {
+  case "${1:-}" in
+    preflight|deploy|status|rollback|conns|banlist|rehost-exit|rebaseline|rotate-keys|list-devices|add-device|remove-device|verify|migrate-exit|kick|ban|unban|qr) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 parse_args() {
@@ -572,34 +619,66 @@ parse_args() {
     usage
     exit 0
   fi
-  if [[ "${1:-}" == init ]]; then
-    COMMAND=init
+  if [[ "${1:-}" == init || "${1:-}" == up ]]; then
+    COMMAND="$1"
     shift
     parse_init_args "$@"
     return 0
   fi
-  [[ "$#" -ge 3 ]] || {
-    usage >&2
-    die 2 '参数不足；请用 --help 查看完整用法'
-  }
-  case "$1" in
-    --config)
-      [[ -n "$2" ]] || die 2 '--config 需要绝对路径'
-      CONFIG_PATH="$2"
-      ;;
-    --id)
-      # --id 只是 --config <XDG 配置目录>/ownexit/chains/<id>.env 的简写，之后走完全相同的配置校验。
-      [[ "$2" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die 2 '--id 只允许 [a-z0-9][a-z0-9-]{0,31}'
-      CONFIG_PATH="$(xdg_or_default "${XDG_CONFIG_HOME:-}" "${HOME}/.config")/ownexit/chains/$2.env"
-      ;;
-    *) die 2 '首个参数必须是 init、--config 或 --id' ;;
-  esac
-  [[ "$3" != --config && "$3" != --id ]] || die 2 '--config 与 --id 只能二选一'
-  COMMAND="$3"
-  shift 3
+  if is_chain_subcommand "${1:-}"; then
+    # 省略 --id：本机只有一条链时自动选用它（0 条 / 多条都退出 2，提示下一步）。
+    local rc
+    if resolve_single_chain_config; then rc=0; else rc="$?"; fi
+    case "${rc}" in
+      0) ;;
+      10) die 2 '本机没有链配置；先运行 chain up --relay <IP> --exit <IP>（或 chain init）' ;;
+      *) die 2 '本机有多条链，请用 --id <名字> 指定' ;;
+    esac
+    COMMAND="$1"
+    shift 1
+  else
+    [[ "$#" -ge 3 ]] || {
+      usage >&2
+      die 2 '参数不足；请用 --help 查看完整用法'
+    }
+    case "$1" in
+      --config)
+        [[ -n "$2" ]] || die 2 '--config 需要绝对路径'
+        CONFIG_PATH="$2"
+        ;;
+      --id)
+        # --id 只是 --config <XDG 配置目录>/ownexit/chains/<id>.env 的简写，之后走完全相同的配置校验。
+        [[ "$2" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die 2 '--id 只允许 [a-z0-9][a-z0-9-]{0,31}'
+        CONFIG_PATH="$(xdg_or_default "${XDG_CONFIG_HOME:-}" "${HOME}/.config")/ownexit/chains/$2.env"
+        ;;
+      *) die 2 '首个参数必须是 init、up、--config、--id 或子命令名' ;;
+    esac
+    [[ "$3" != --config && "$3" != --id ]] || die 2 '--config 与 --id 只能二选一'
+    COMMAND="$3"
+    shift 3
+  fi
   case "${COMMAND}" in
-    preflight|deploy|status|rollback|conns|banlist|rehost-exit|rebaseline|rotate-keys|list-devices)
+    preflight|status|rollback|conns|banlist|rehost-exit|rebaseline|rotate-keys|list-devices)
       [[ "$#" -eq 0 ]] || die 2 "${COMMAND} 不接受额外参数"
+      ;;
+    deploy)
+      while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+          --allow-tun) ALLOW_TUN=1; shift ;;
+          *) die 2 'deploy 只接受可选的 --allow-tun' ;;
+        esac
+      done
+      ;;
+    qr)
+      while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+          --device)
+            [[ "$#" -ge 2 && "$2" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die 2 '--device 需要设备名 [a-z0-9][a-z0-9-]{0,31}'
+            [[ "$2" != default ]] || die 2 'default 就是不带 --device 时显示的节点'
+            QR_DEVICE="$2"; shift 2 ;;
+          *) die 2 'qr 只接受可选的 --device <名字>' ;;
+        esac
+      done
       ;;
     add-device|remove-device)
       [[ "$#" -eq 1 ]] || die 2 "${COMMAND} 需要且只需要一个设备名"
@@ -2840,6 +2919,15 @@ render_journal_payload() {
   } > "${output}"
 }
 
+# 测试钩子：deploy / up 在指定事务步骤写入之后以退出码 99 结束，用于中断恢复用例；正常使用不要设置。
+# 只对 deploy / up 生效：rollback 事务也走 write_journal，不能被同一个变量误停。
+deploy_test_stop() {
+  [[ "${COMMAND}" == deploy || "${COMMAND}" == up ]] || return 0
+  [[ -n "${OWNEXIT_TEST_DEPLOY_STOP_AFTER:-}" && "${OWNEXIT_TEST_DEPLOY_STOP_AFTER}" == "${LAST_COMPLETED_STEP}" ]] || return 0
+  log_warn "测试钩子：deploy 在 ${LAST_COMPLETED_STEP} 之后停止"
+  exit 99
+}
+
 write_journal() {
   local payload mode
   payload="${OP_TMP}/journal-payload"
@@ -2852,6 +2940,7 @@ write_journal() {
   fi
   write_checksummed_file "${JOURNAL_FILE}" "${mode}" "${payload}" || die 1 'transaction 提交失败'
   validate_checksum_env "${JOURNAL_FILE}" journal || die 1 'transaction 写入后校验失败'
+  deploy_test_stop
 }
 
 write_active_state() {
@@ -4860,6 +4949,8 @@ deploy_chain() {
   [[ "${rc}" -eq 0 ]] || die 1 'chain 正被其它操作占用或锁无法安全回收'
   migrate_gate
   require_local_dependencies
+  # up 已在配免密之前自检过，这里不重复。
+  [[ "${UP_MODE}" == 1 ]] || tun_precheck "${RELAY_HOST}" "${EXIT_HOST}"
   if [[ -e "${JOURNAL_FILE}" || -L "${JOURNAL_FILE}" ]]; then
     # 事务恢复必须作为独立命令执行；放进 `if`/`||` 会让 Bash 关闭整个函数链的 errexit。
     recover_incomplete_transaction
@@ -8383,6 +8474,174 @@ migrate_exit_chain() {
   log_info "migrate-exit 通过；chain=${CHAIN_ID} exit=${EXIT_HOST}:${EXIT_REALITY_PORT} old_exit_cleanup=${MIGRATE_CLEANUP_RESULT} elapsed=$(elapsed_seconds)s"
 }
 
+# ---------- 少敲命令：省略 --id、up、qr、下一步提示、部署前 TUN 自检（docs/feature/feature-usability-v12.md） ----------
+
+# 配置文件解析之后、各子命令之前的公共初始化（从 main 原样搬出，供 main 与 up_chain 共用）：
+# 读配置 → 推导路径 → 生成本次操作 ID 并登记清理 trap → 建操作临时目录。顺序不能变：init_operation_tmp 依赖 CHAIN_ID、
+# CONFIG_SHA256 与 LOCK_OPERATION_ID，trap 必须在任何会留下临时文件的步骤之前装好。
+init_runtime() {
+  parse_config
+  init_paths
+  OPERATION_ID="$(random_hex_128)"
+  LOCK_OPERATION_ID="${OPERATION_ID}"
+  trap 'cleanup_dispatcher $? EXIT' EXIT
+  trap 'cleanup_dispatcher 130 INT' INT
+  trap 'cleanup_dispatcher 143 TERM' TERM
+  init_operation_tmp
+}
+
+# 本机只有一条链配置时把 CONFIG_PATH 指向它并返回 0；没有配置返回 10；多条在 stderr 列出各 id 后返回 11。
+# 目录推导与 --id 分支、init_paths、init_chain 用同一算法。
+resolve_single_chain_config() {
+  local dir file count ids id
+  dir="$(xdg_or_default "${XDG_CONFIG_HOME:-}" "${HOME}/.config")/ownexit/chains"
+  count=0
+  ids=''
+  for file in "${dir}"/*.env; do
+    [[ -f "${file}" ]] || continue
+    count=$((count + 1))
+    ids="${ids} $(basename "${file}" .env)"
+    CONFIG_PATH="${file}"
+  done
+  if [[ "${count}" -eq 0 ]]; then
+    CONFIG_PATH=''
+    return 10
+  fi
+  if [[ "${count}" -gt 1 ]]; then
+    CONFIG_PATH=''
+    for id in ${ids}; do
+      printf '  --id %s\n' "${id}" >&2
+    done
+    return 11
+  fi
+  log_info "自动选用链 $(basename "${CONFIG_PATH}" .env)（本机唯一）"
+}
+
+# 部署前自检：本机到每个服务器 IP 的出接口是不是代理的 TUN。经 TUN 时部署途中的 SSH 会被代理切断（历史上最常见的翻车），
+# 默认拒绝；--allow-tun 只 WARN。只核 IPv4 字面量（主机名在 macOS 上会被 fake-ip 解析成 TUN 路由而误判）；
+# 取不到出接口（缺 route / ip 命令等）按 doctor 的口径 WARN 继续，不拦。
+tun_precheck() {
+  local ip iface
+  for ip in "$@"; do
+    if ! is_ipv4 "${ip}"; then
+      log_warn "目标 ${ip} 不是 IPv4，跳过 TUN 自检"
+      continue
+    fi
+    iface="$(route_interface "${ip}")"
+    if [[ -z "${iface}" ]]; then
+      log_warn "无法判定到 ${ip} 的出接口，跳过 TUN 自检"
+      continue
+    fi
+    interface_is_tunnel "${iface}" || continue
+    if [[ "${ALLOW_TUN}" == 1 ]]; then
+      log_warn "到 ${ip} 的路由经过 TUN（${iface}），已加 --allow-tun 继续；部署期间 SSH 可能被代理切断"
+      continue
+    fi
+    die 3 "到 ${ip} 的路由经过 TUN（${iface}），部署期间 SSH 会被代理切断。
+处理办法：关闭代理的 TUN 模式；或让这些 IP 走物理网卡（Clash Verge 见 docs/manual/clash-direct-ips.md）。
+已按手册加了直连规则且 SSH 正常，或确认要继续：加 --allow-tun。"
+  done
+}
+
+# deploy / up 成功后的“下一步”块（含幂等 no-op 路径）。数据来自 parse_config 的 EXPECTED_EXIT_IPV4 与
+# 已核过哈希的 client/node.txt；二维码经 stdin 交给 qrencode，节点链接不进 argv。
+print_chain_next_steps() {
+  local node uri
+  node="${CHAIN_STATE_DIR}/client/node.txt"
+  require_secure_user_file "${node}" 600 || die 1 "node.txt 不存在或身份异常：${node}"
+  uri="$(head -n 1 "${node}")"
+  printf '==================== 下一步 ====================\n'
+  printf '1. 导入客户端：下面的二维码用 Shadowrocket / 安卓客户端扫；Clash Verge 等复制这一行链接：\n'
+  printf '   %s\n' "${uri}"
+  printf '   （更多设备：ownexit chain add-device <名字>；随时再看二维码：ownexit chain qr）\n'
+  printf '2. 在设备上打开 https://ipinfo.io，应显示 %s\n' "${EXPECTED_EXIT_IPV4}"
+  printf '3. 出问题先跑：ownexit doctor\n'
+  if command -v qrencode >/dev/null 2>&1; then
+    qrencode -t ANSIUTF8 < "${node}"
+  else
+    printf '（安装 qrencode 后可在终端显示二维码：macOS 用 brew install qrencode）\n'
+  fi
+  printf '================================================\n'
+}
+
+# qr：只读本机节点文件显示二维码，不连服务器、不改 state 与节点文件（取只读锁会像 status 一样写 operation.lock）。
+# default 的节点文件由 verify_local_artifacts 核过 NODE_SHA256；设备节点只能核到“UUID 与 devices.env 一致”
+# （devices.env 不在 state 哈希内，属弱保证）。
+qr_chain() {
+  local rc file expected uuid
+  if acquire_chain_lock 0; then rc=0; else rc="$?"; fi
+  case "${rc}" in
+    0) ;;
+    10) die 5 '同一 chain 有活动锁（busy）；稍后重试' ;;
+    11) die 5 '存在 stale lock；先运行 verify 或其它 mutating 命令归档' ;;
+    *) die 5 '无法安全取得 chain lock' ;;
+  esac
+  [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 '链未部署；先运行 chain up（或 deploy）'
+  load_state_file "${STATE_FILE}"
+  verify_local_artifacts || die 5 '本地节点文件与 state 不一致；运行 verify'
+  if [[ -z "${QR_DEVICE}" ]]; then
+    file="${CHAIN_STATE_DIR}/client/node.txt"
+  else
+    file="${CHAIN_STATE_DIR}/devices/node-${QR_DEVICE}.txt"
+    [[ -e "${file}" || -L "${file}" ]] || die 2 "没有设备 ${QR_DEVICE}；运行 chain list-devices 查看"
+    require_secure_user_file "${file}" 600 || die 5 "设备节点文件身份异常：${file}"
+    require_secure_user_file "${CHAIN_STATE_DIR}/devices/devices.env" 600 || die 5 'devices.env 不存在或身份异常；运行 verify'
+    expected="$(kv_get "${CHAIN_STATE_DIR}/devices/devices.env" "${QR_DEVICE}")" || die 2 "设备表里没有 ${QR_DEVICE}；运行 chain list-devices 查看"
+    uuid="$(head -n 1 "${file}")"
+    uuid="${uuid#vless://}"
+    uuid="${uuid%%@*}"
+    [[ "${uuid}" == "${expected}" ]] || die 5 "设备 ${QR_DEVICE} 的节点文件与设备表不一致；运行 verify"
+  fi
+  if command -v qrencode >/dev/null 2>&1; then
+    qrencode -t ANSIUTF8 < "${file}"
+  else
+    printf 'node=%s\n' "${file}"
+    head -n 1 "${file}"
+    printf '安装 qrencode（macOS: brew install qrencode）后可在终端显示二维码\n'
+  fi
+}
+
+# up = init + deploy，可重跑：
+#   - 没给 --id 也没给 IP：本机恰有一条链就复用它（没有则按 init 的方式新建 main，多条退出 2）；
+#   - 配置不存在：走 init_chain（UP_MODE=1：先 TUN 自检，不打印 next=deploy）；
+#   - 配置已存在：只比较显式给出的中转 / 出口地址与端口，不一致退出 2；显式给的 SNI / 过滤方式与配置不同只 WARN
+#     （deploy 后不可改，改了会和 state 对不上）。
+# 然后与 main 相同的初始化，再 deploy（已部署时 deploy 本身就是幂等 no-op + 完整 verify）。
+up_chain() {
+  local rc dir config_file mismatch
+  UP_MODE=1
+  if [[ "${INIT_ID_GIVEN}" == 0 && "${INIT_RELAY_GIVEN}" == 0 && "${INIT_EXIT_GIVEN}" == 0 ]]; then
+    if resolve_single_chain_config; then rc=0; else rc="$?"; fi
+    case "${rc}" in
+      0) INIT_ID="$(basename "${CONFIG_PATH}" .env)" ;;
+      10) INIT_ID=main ;;
+      *) die 2 '本机有多条链，请用 --id <名字> 指定' ;;
+    esac
+  fi
+  dir="$(xdg_or_default "${XDG_CONFIG_HOME:-}" "${HOME}/.config")/ownexit/chains"
+  config_file="${dir}/${INIT_ID}.env"
+  if [[ ! -e "${config_file}" && ! -L "${config_file}" ]]; then
+    log_info "[up] config=new id=${INIT_ID}"
+    init_chain
+  else
+    log_info "[up] config=existing id=${INIT_ID}"
+    CONFIG_PATH="${config_file}"
+    parse_config
+    mismatch=0
+    [[ "${INIT_RELAY_GIVEN}" == 0 || "${INIT_RELAY}" == "${RELAY_HOST}" ]] || mismatch=1
+    [[ "${INIT_RELAY_PORT_GIVEN}" == 0 || "${INIT_RELAY_PORT}" == "${RELAY_SSH_PORT}" ]] || mismatch=1
+    [[ "${INIT_EXIT_GIVEN}" == 0 || "${INIT_EXIT}" == "${EXIT_HOST}" ]] || mismatch=1
+    [[ "${INIT_EXIT_PORT_GIVEN}" == 0 || "${INIT_EXIT_PORT}" == "${EXIT_SSH_PORT}" ]] || mismatch=1
+    [[ "${mismatch}" == 0 ]] || die 2 "链 ${INIT_ID} 已有配置且地址不同（现有 中转=${RELAY_HOST}:${RELAY_SSH_PORT} 出口=${EXIT_HOST}:${EXIT_SSH_PORT}）；换一个 --id，或先 rollback 再删配置"
+    [[ "${INIT_SNI_GIVEN}" == 0 || "${INIT_SNI}" == "${REALITY_SERVER_NAME}" ]] || log_warn "已有配置的 REALITY_SERVER_NAME=${REALITY_SERVER_NAME}，忽略本次给的 ${INIT_SNI}（deploy 后不可改）"
+    [[ "${INIT_FILTER_GIVEN}" == 0 || "${INIT_EXIT_SOURCE_FILTER}" == "${EXIT_SOURCE_FILTER}" ]] || log_warn "已有配置的 EXIT_SOURCE_FILTER=${EXIT_SOURCE_FILTER}，忽略本次给的 ${INIT_EXIT_SOURCE_FILTER}（deploy 后不可改）"
+    tun_precheck "${RELAY_HOST}" "${EXIT_HOST}"
+  fi
+  CONFIG_PATH="${config_file}"
+  init_runtime
+  deploy_chain
+}
+
 status_chain() {
   local rc
   if [[ -e "${JOURNAL_FILE}" || -L "${JOURNAL_FILE}" ]]; then
@@ -8739,6 +8998,8 @@ init_chain() {
   [[ -n "${exit_host}" ]] || exit_host="$(init_prompt_ipv4 出口机 --exit)"
   is_ipv4 "${exit_host}" || die 2 "--exit 必须是 IPv4：${exit_host}"
   [[ "${relay}" != "${exit_host}" ]] || die 2 '中转机和出口机必须是两台不同的主机'
+  # up 在第一次 SSH（配免密）之前就自检 TUN；单独 init 不检（它只是生成配置）。
+  [[ "${UP_MODE}" == 0 ]] || tun_precheck "${relay}" "${exit_host}"
 
   CONFIG_HOME="$(xdg_or_default "${XDG_CONFIG_HOME:-}" "${HOME}/.config")"
   CHAIN_CONFIG_DIR="${CONFIG_HOME}/ownexit/chains"
@@ -8796,7 +9057,8 @@ init_chain() {
   fi
   mv "${tmp_file}" "${config_file}"
   log_info "已生成 ${config_file}"
-  printf '[chain][init] next=%s --id %s deploy\n' "$(basename "${SCRIPT_PATH}")" "${chain_id}"
+  # up 紧接着就 deploy，不提示“下一步 deploy”。
+  [[ "${UP_MODE}" == 1 ]] || printf '[chain][init] next=%s --id %s deploy\n' "$(basename "${SCRIPT_PATH}")" "${chain_id}"
 }
 
 main() {
@@ -8808,14 +9070,12 @@ main() {
     init_chain
     exit 0
   fi
-  parse_config
-  init_paths
-  OPERATION_ID="$(random_hex_128)"
-  LOCK_OPERATION_ID="${OPERATION_ID}"
-  trap 'cleanup_dispatcher $? EXIT' EXIT
-  trap 'cleanup_dispatcher 130 INT' INT
-  trap 'cleanup_dispatcher 143 TERM' TERM
-  init_operation_tmp
+  if [[ "${COMMAND}" == up ]]; then
+    up_chain
+    print_chain_next_steps
+    return 0
+  fi
+  init_runtime
   case "${COMMAND}" in
     status|conns|banlist|list-devices) READONLY_SSH_RETRY=1 ;;
     verify) [[ "${WITH_FAIL_CLOSED}" == 1 ]] || READONLY_SSH_RETRY=1 ;;
@@ -8827,6 +9087,10 @@ main() {
       ;;
     deploy)
       deploy_chain
+      print_chain_next_steps
+      ;;
+    qr)
+      qr_chain
       ;;
     verify)
       verify_command
