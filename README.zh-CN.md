@@ -82,6 +82,8 @@ ownexit                              # 在终端里只敲 ownexit：先选语言
 
 两种装法二选一即可（装的是同一个包）。
 
+输出语言：系统语言（`LC_ALL` / `LC_MESSAGES` / `LANG`）以 `zh` 开头时脚本输出中文，否则输出英文；设 `OWNEXIT_LANG=zh` 或 `OWNEXIT_LANG=en` 可指定，向导里选的语言会用到整个运行过程。从 1.7.0 起，系统语言不是中文的中文用户会看到英文，设 `OWNEXIT_LANG=zh` 即可改回。
+
 `ownexit` 只是包内 bash 脚本的一层薄封装，所以也可以 git clone 后直接运行脚本，两者一一对应：
 
 | `ownexit …` | 仓库里的脚本 |

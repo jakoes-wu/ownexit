@@ -16,6 +16,7 @@ Thank you for your interest in ownexit!
 - `README.md` is also the body of the PyPI project page, so its links must be full URLs (`https://github.com/jakoes-wu/ownexit/blob/main/...`) or in-page anchors, never relative paths, which 404 on PyPI; CI checks this. `README.zh-CN.md` and the other documents are not restricted.
 - Real IPs, domains, UUIDs, Reality parameters, node links and passwords never go into the repository or ordinary logs. Example IPs use only the documentation ranges (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`).
 - Documentation is bilingual: user-facing documents come in pairs (`docs/manual/*.md` with `*.en.md`, `docs/reference/*.md` with `*.en.md`, `chain/README.md` and `direct/README.md` with `README.en.md`, `README.zh-CN.md` with `README.md`). When you change one, change the other in the same pull request. The design records in `docs/feature/` are Chinese only.
+- Script output is bilingual: every message a user can see is written as `L "中文" "English"` (from `direct/i18n_lib.sh`), multi-line help as two heredocs with the Chinese one between `# i18n:zh-begin` / `# i18n:zh-end`; both texts must have the same `%`, `${` and `$(` placeholders. When the English contains an apostrophe, quote the `L` arguments with double quotes (and escape `$` and backticks) or write `'\''`. Frozen machine-readable output (`key=value` lines) is never translated. `scripts/check_ui_lang.sh` checks this in CI.
 
 ### Self-check before committing
 
@@ -25,6 +26,7 @@ for f in chain/*.sh; do /bin/bash -n "$f" || echo "bash 3.2 cannot parse: $f"; d
 shellcheck -S warning direct/*.sh direct/subctl chain/*.sh scripts/*.sh
 scripts/check_interface.sh         # the frozen interface and the reference docs (both languages) agree
 scripts/check_i18n.sh              # Chinese / English document pairs exist and link correctly
+scripts/check_ui_lang.sh           # every Chinese message in the scripts has an English twin
 scripts/check_public.sh            # privacy scan: non-allow-listed IPv4, local denylist words (git add new files first)
 ```
 
@@ -59,6 +61,7 @@ Fix shellcheck warnings; for a genuine false positive, add `# shellcheck disable
 - `README.md` 同时是 PyPI 项目页的正文，里面的链接一律写完整 URL（`https://github.com/jakoes-wu/ownexit/blob/main/...`）或页内锚点，不写相对路径，否则在 PyPI 上会 404；CI 会检查。`README.zh-CN.md` 和其它文档不受此限。
 - 真实 IP、域名、UUID、Reality 参数、节点链接和密码一律不进仓库，也不写进普通日志。示例里的 IP 只用文档专用网段（`192.0.2.0/24`、`198.51.100.0/24`、`203.0.113.0/24`）。
 - 文档中英双语：面向用户的文档成对存在（`docs/manual/*.md` 与 `*.en.md`、`docs/reference/*.md` 与 `*.en.md`、`chain/README.md` 和 `direct/README.md` 与 `README.en.md`、`README.zh-CN.md` 与 `README.md`），改一份就在同一个 PR 里改另一份。`docs/feature/` 下的设计记录只有中文。
+- 脚本输出中英双语：用户看得到的提示一律写成 `L "中文" "English"`（来自 `direct/i18n_lib.sh`），多行帮助写成两份 heredoc，中文那份用 `# i18n:zh-begin` / `# i18n:zh-end` 包住；两种语言的 `%`、`${`、`$(` 个数必须一致。英文里有撇号时，`L` 的参数改用双引号（注意转义 `$` 与反引号）或写成 `'\''`。冻结的机器可读输出（`键=值` 行）不翻译。CI 用 `scripts/check_ui_lang.sh` 检查。
 
 ### 提交前自检
 
@@ -68,6 +71,7 @@ for f in chain/*.sh; do /bin/bash -n "$f" || echo "bash 3.2 无法解析：$f"; 
 shellcheck -S warning direct/*.sh direct/subctl chain/*.sh scripts/*.sh
 scripts/check_interface.sh         # 冻结接口与参考文档（中英两版）一致
 scripts/check_i18n.sh              # 中英成对文档存在、互链与链接正确
+scripts/check_ui_lang.sh           # 脚本里每条中文提示都有对应英文
 scripts/check_public.sh            # 隐私扫描：非白名单 IPv4、本地黑名单词（新文件先 git add）
 ```
 

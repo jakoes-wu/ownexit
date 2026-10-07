@@ -6,7 +6,7 @@ This file lists, item by item, the options, subcommands, exit codes and machine-
 
 Every subcommand prints its help and exits 0 when given `-h` / `--help` alone (help text is not frozen); the chain script shows help only for a lone `--help`, rejects `chain init --help` with exit code 2, and prints help with exit 0 for `chain up --help`. For a git clone, the script behind each subcommand is named under each section heading, and its options are identical to `ownexit <subcommand>`.
 
-The scripts' human-readable progress and log lines are currently in Chinese; none of them are frozen.
+The scripts' human-readable progress and log lines follow `OWNEXIT_LANG` / the system language (see Environment variables); none of them are frozen.
 
 ## ownexit (entry point)
 
@@ -377,6 +377,6 @@ One line per check, starting with `[OK]` / `[WARN]` / `[FAIL]`; the last line is
 | `XDG_CONFIG_HOME` / `XDG_STATE_HOME` / `XDG_CACHE_HOME` | Change the configuration, state and cache directories. Chain and doctor: values that are not absolute paths are ignored and the defaults are used; direct: used as given |
 | `TMPDIR` | Default output directory for `ownexit multi render` QR codes |
 | `OWNEXIT_PYTHON` | The Python interpreter used to type the password during the first key setup (must be able to `import pexpect`). The `ownexit` entry point sets it to its own interpreter (unless already set); when running the scripts directly you can set it yourself, otherwise `python3` and then the system `expect` are tried |
-| `OWNEXIT_LANG` | Sets the language of the entry point's help and guided setup: with `zh` / `en` that language is forced and the guided setup no longer asks for a language; unset or any other value picks the help language by whether `LC_ALL` → `LC_MESSAGES` → `LANG` starts with `zh`, and the guided setup asks for the language first (Enter accepts that detected language). The deployment scripts' output is currently Chinese only and is not affected |
+| `OWNEXIT_LANG` | Sets the language of the entry point's help and guided setup: with `zh` / `en` that language is forced and the guided setup no longer asks for a language; unset or any other value picks the help language by whether `LC_ALL` → `LC_MESSAGES` → `LANG` starts with `zh`, and the guided setup asks for the language first (Enter accepts that detected language). From 1.7.0 it also sets the language of the scripts' help, progress and messages (including the server-side `[vps]` log lines); a language chosen in the guided setup is passed on to the scripts. Machine-readable output (`status=`, `reason=`, `health=` and other frozen keys and values) is the same in both languages |
 
 `~/.ssh/ownexit/` (dedicated keys) is not affected by XDG. Variables starting with `OWNEXIT_TEST_` are test hooks, not part of the public interface; do not set them in normal use.

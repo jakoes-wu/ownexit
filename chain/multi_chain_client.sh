@@ -16,6 +16,9 @@
 
 set -euo pipefail
 
+# 输出语言（中文 / 英文）的判断必须在下面固定 LC_ALL=C 之前完成：之后读到的 locale 都是 C（direct/i18n_lib.sh）。
+# shellcheck source=../direct/i18n_lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/../direct/i18n_lib.sh"
 umask 077
 export LC_ALL=C
 
@@ -67,7 +70,62 @@ TEMP_PID_FILE=''
 DARWIN_BINARY_PATH=''
 
 usage() {
-  cat <<EOF
+  if [[ "${OWNEXIT_UI_LANG}" == en ]]; then
+    cat <<EOF
+Usage:
+  $(basename "${SCRIPT_PATH}") --chains <id>[,<id>...] [--name <bundle name>] verify
+  $(basename "${SCRIPT_PATH}") --chains <id>[,<id>...] [--name <bundle name>] render [--group fallback|url-test] [--test-url <url>]
+                                   [--interval <seconds>] [--qr-out <new dir>] [--no-open] [--no-qr]
+  $(basename "${SCRIPT_PATH}") -h | --help
+
+What it does:
+  verify        from this computer, one real Reality handshake per chain entry plus an exit-IP check against three endpoints
+                (at least 2 succeed and all equal EXPECTED_EXIT_IPV4); a chain is marked skipped when the route to its entry
+                goes through a TUN (the local proxy's TUN mode is on).
+  render        bundles each chain's node.txt: nodes.txt (one vless URI per chain, verbatim), clash-snippet.yaml (proxies plus
+                an automatic group, to merge into Clash Verge by hand), one QR code per chain (iPhone Shadowrocket, in a private
+                temporary directory).
+
+Arguments:
+  --chains <list>      required; comma-separated CHAIN_IDs (each [a-z0-9][a-z0-9-]{0,31}, no duplicates); the order is the
+                       automatic group's priority (first wins). Each id reads
+                       \${XDG_CONFIG_HOME:-~/.config}/ownexit/chains/<id>.env and
+                       \${XDG_STATE_HOME:-~/.local/state}/ownexit/chains/<id>/client/node.txt.
+  --name <bundle name> output directory name, default all ([a-z0-9][a-z0-9-]{0,31}).
+  --group <type>       automatic group type, default fallback (when the current node times out, take the first available in
+                       order); url-test is the alternative.
+  --test-url <url>     health-check URL of the automatic group, default https://www.gstatic.com/generate_204.
+  --interval <seconds> health-check interval of the automatic group, default 300.
+  --qr-out <dir>       QR code output directory; must not exist (an existing path or a broken symlink is refused, nothing is
+                       overwritten); default is a new directory under \${TMPDIR:-/tmp}.
+  --no-open            do not open the directory after generating the QR codes.
+  --no-qr              do not generate QR codes (qrencode not required).
+  -h, --help           show this help and return 0 without reading any configuration.
+
+Output (render):
+  \${XDG_STATE_HOME:-~/.local/state}/ownexit/multi-chain-client/<bundle name>/nodes.txt
+  \${XDG_STATE_HOME:-~/.local/state}/ownexit/multi-chain-client/<bundle name>/clash-snippet.yaml
+  <QR directory>/qr-<n>-<node name>.png (contains plaintext credentials; delete after scanning)
+  Node name = Exit-via-Relay-<id> from each chain's node.txt; automatic group name Exit-Relay-auto. The terminal never
+  prints uuid / pbk / sid / full URIs.
+
+Exit codes:
+  0 success; 2 argument / env / node.txt validation error, or EXPECTED_EXIT_IPV4 differs between chains; 5 verify found an
+  unhealthy chain or all were skipped; 1 runtime failure (missing local dependency, rendering).
+
+Typical use:
+  $(basename "${SCRIPT_PATH}") --chains main,backup verify
+  $(basename "${SCRIPT_PATH}") --chains main,backup render --no-open
+  $(basename "${SCRIPT_PATH}") --chains main,backup render --group url-test --no-qr
+  $(basename "${SCRIPT_PATH}") --chains main,backup --name home render --qr-out ~/Desktop/chain-qr
+
+Safety boundary:
+  connects to neither relay nor exit, does not touch setup_chain.sh state / node.txt / remote resources, does not write known_hosts.
+  Output files 600, directories 700; QR codes contain plaintext credentials, delete the directory after scanning as prompted.
+EOF
+  else
+    # i18n:zh-begin
+    cat <<EOF
 用法:
   $(basename "${SCRIPT_PATH}") --chains <id>[,<id>...] [--name <聚合名>] verify
   $(basename "${SCRIPT_PATH}") --chains <id>[,<id>...] [--name <聚合名>] render [--group fallback|url-test] [--test-url <url>]
@@ -113,6 +171,8 @@ usage() {
   不连中转机与出口机，不改 setup_chain.sh 的 state / node.txt / 远端资源，不写 known_hosts。
   产物 600、目录 700；二维码含明文凭据，扫完请按提示删除目录。
 EOF
+    # i18n:zh-end
+  fi
 }
 
 log_info() { printf '%s INFO %s\n' "${LOG_TAG}" "$*" >&2; }
@@ -289,49 +349,49 @@ parse_args() {
   fi
   [[ "$#" -ge 1 ]] || {
     usage >&2
-    die 2 '参数不足；请用 --help 查看完整用法'
+    die 2 "$(L '参数不足；请用 --help 查看完整用法' 'Not enough arguments; see --help for the full usage')"
   }
   seen_command=0
   while [[ "$#" -gt 0 ]]; do
     case "$1" in
       -h|--help) usage; exit 0 ;;
       --chains)
-        [[ "$#" -ge 2 && -n "${2:-}" ]] || die 2 '--chains 需要逗号分隔的 CHAIN_ID 列表'
+        [[ "$#" -ge 2 && -n "${2:-}" ]] || die 2 "$(L '--chains 需要逗号分隔的 CHAIN_ID 列表' '--chains needs a comma-separated list of CHAIN_IDs')"
         CHAINS_ARG="$2"; shift 2 ;;
       --name)
-        [[ "$#" -ge 2 && "${2:-}" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die 2 '--name 只允许 [a-z0-9][a-z0-9-]{0,31}'
+        [[ "$#" -ge 2 && "${2:-}" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die 2 "$(L '--name 只允许 [a-z0-9][a-z0-9-]{0,31}' '--name only accepts [a-z0-9][a-z0-9-]{0,31}')"
         AGG_NAME="$2"; shift 2 ;;
       --group)
-        [[ "${COMMAND}" == render ]] || die 2 '--group 只能跟在 render 后'
-        [[ "$#" -ge 2 && ( "${2:-}" == fallback || "${2:-}" == url-test ) ]] || die 2 '--group 只接受 fallback 或 url-test'
+        [[ "${COMMAND}" == render ]] || die 2 "$(L '--group 只能跟在 render 后' '--group can only follow render')"
+        [[ "$#" -ge 2 && ( "${2:-}" == fallback || "${2:-}" == url-test ) ]] || die 2 "$(L '--group 只接受 fallback 或 url-test' '--group only accepts fallback or url-test')"
         GROUP_TYPE="$2"; shift 2 ;;
       --test-url)
-        [[ "${COMMAND}" == render ]] || die 2 '--test-url 只能跟在 render 后'
-        [[ "$#" -ge 2 && "${2:-}" =~ ^https?://[A-Za-z0-9._/:@%+=~-]+$ ]] || die 2 '--test-url 必须是 http(s) URL 且不含空白/引号'
+        [[ "${COMMAND}" == render ]] || die 2 "$(L '--test-url 只能跟在 render 后' '--test-url can only follow render')"
+        [[ "$#" -ge 2 && "${2:-}" =~ ^https?://[A-Za-z0-9._/:@%+=~-]+$ ]] || die 2 "$(L '--test-url 必须是 http(s) URL 且不含空白/引号' '--test-url must be an http(s) URL without whitespace or quotes')"
         TEST_URL="$2"; shift 2 ;;
       --interval)
-        [[ "${COMMAND}" == render ]] || die 2 '--interval 只能跟在 render 后'
-        [[ "$#" -ge 2 && "${2:-}" =~ ^[1-9][0-9]{0,5}$ ]] || die 2 '--interval 必须是正整数秒'
+        [[ "${COMMAND}" == render ]] || die 2 "$(L '--interval 只能跟在 render 后' '--interval can only follow render')"
+        [[ "$#" -ge 2 && "${2:-}" =~ ^[1-9][0-9]{0,5}$ ]] || die 2 "$(L '--interval 必须是正整数秒' '--interval must be a positive number of seconds')"
         INTERVAL_SEC="$2"; shift 2 ;;
       --qr-out)
-        [[ "${COMMAND}" == render ]] || die 2 '--qr-out 只能跟在 render 后'
-        [[ "$#" -ge 2 && -n "${2:-}" ]] || die 2 '--qr-out 需要目录'
+        [[ "${COMMAND}" == render ]] || die 2 "$(L '--qr-out 只能跟在 render 后' '--qr-out can only follow render')"
+        [[ "$#" -ge 2 && -n "${2:-}" ]] || die 2 "$(L '--qr-out 需要目录' '--qr-out needs a directory')"
         QR_OUT="$2"; shift 2 ;;
       --no-open)
-        [[ "${COMMAND}" == render ]] || die 2 '--no-open 只能跟在 render 后'
+        [[ "${COMMAND}" == render ]] || die 2 "$(L '--no-open 只能跟在 render 后' '--no-open can only follow render')"
         OPEN_DIR=0; shift ;;
       --no-qr)
-        [[ "${COMMAND}" == render ]] || die 2 '--no-qr 只能跟在 render 后'
+        [[ "${COMMAND}" == render ]] || die 2 "$(L '--no-qr 只能跟在 render 后' '--no-qr can only follow render')"
         NO_QR=1; shift ;;
       verify|render)
-        [[ "${seen_command}" == 0 ]] || die 2 "重复的子命令：$1"
+        [[ "${seen_command}" == 0 ]] || die 2 "$(L "重复的子命令：$1" "Duplicate subcommand: $1")"
         COMMAND="$1"; seen_command=1; shift ;;
-      -*) die 2 "未知参数：$1（用 --help 查看用法）" ;;
-      *) die 2 "未知子命令：$1（只支持 verify / render）" ;;
+      -*) die 2 "$(L "未知参数：$1（用 --help 查看用法）" "Unknown option: $1 (see --help)")" ;;
+      *) die 2 "$(L "未知子命令：$1（只支持 verify / render）" "Unknown subcommand: $1 (only verify / render are supported)")" ;;
     esac
   done
-  [[ -n "${COMMAND}" ]] || die 2 '缺少子命令（verify / render）'
-  [[ -n "${CHAINS_ARG}" ]] || die 2 '缺少 --chains'
+  [[ -n "${COMMAND}" ]] || die 2 "$(L '缺少子命令（verify / render）' 'Missing subcommand (verify / render)')"
+  [[ -n "${CHAINS_ARG}" ]] || die 2 "$(L '缺少 --chains' 'Missing --chains')"
 }
 
 # ---------- 本地依赖与配置 ----------
@@ -341,15 +401,15 @@ require_local_dependencies() {
   case "$(uname -s)" in
     Darwin) platform_commands='route nc' ;;
     Linux) platform_commands='ip timeout' ;;
-    *) die 1 "控制端只支持 macOS 与 Linux（当前：$(uname -s)）" ;;
+    *) die 1 "$(L "控制端只支持 macOS 与 Linux（当前：$(uname -s)）" "The control machine must be macOS or Linux (current: $(uname -s))")" ;;
   esac
   # git 不在这份清单里：只有 git clone 形态需要它，由 init_repo_root 按安装形态自行检查；pip 安装的副本没有 git 也能运行。
   for command_name in ${platform_commands} curl openssl tar awk sed grep sort tr head tail mktemp stat cut cat date sleep uname kill dirname basename id chmod mkdir rm cp mv wc; do
-    command -v "${command_name}" >/dev/null 2>&1 || die 1 "本机缺少依赖：${command_name}"
+    command -v "${command_name}" >/dev/null 2>&1 || die 1 "$(L "本机缺少依赖：${command_name}" "Missing local dependency: ${command_name}")"
   done
-  command -v shasum >/dev/null 2>&1 || command -v openssl >/dev/null 2>&1 || die 1 '本机缺少 SHA-256 工具'
+  command -v shasum >/dev/null 2>&1 || command -v openssl >/dev/null 2>&1 || die 1 "$(L '本机缺少 SHA-256 工具' 'No SHA-256 tool on this computer')"
   if [[ "${COMMAND}" == render && "${NO_QR}" == 0 ]]; then
-    command -v qrencode >/dev/null 2>&1 || die 1 '缺少 qrencode（brew install qrencode），或改用 --no-qr'
+    command -v qrencode >/dev/null 2>&1 || die 1 "$(L '缺少 qrencode（brew install qrencode），或改用 --no-qr' 'qrencode is missing (brew install qrencode); or use --no-qr')"
   fi
 }
 
@@ -360,16 +420,16 @@ init_repo_root() {
     REPO_ROOT=''
     return 0
   fi
-  command -v git >/dev/null 2>&1 || die 1 '本机缺少 bootstrap 依赖：git'
-  REPO_ROOT="$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel 2>/dev/null)" || die 1 '无法确定脚本所属 Git worktree'
-  [[ -n "${REPO_ROOT}" && -d "${REPO_ROOT}" && ! -L "${REPO_ROOT}" ]] || die 1 '脚本所属 Git worktree 身份异常'
+  command -v git >/dev/null 2>&1 || die 1 "$(L '本机缺少 bootstrap 依赖：git' 'Missing bootstrap dependency on this computer: git')"
+  REPO_ROOT="$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel 2>/dev/null)" || die 1 "$(L '无法确定脚本所属 Git worktree' 'Cannot determine the Git worktree the script belongs to')"
+  [[ -n "${REPO_ROOT}" && -d "${REPO_ROOT}" && ! -L "${REPO_ROOT}" ]] || die 1 "$(L '脚本所属 Git worktree 身份异常' 'The Git worktree the script belongs to has an unexpected identity')"
 }
 
 reject_path_inside_repo() {
   # REPO_ROOT 为空（pip 安装形态）时不判断，否则 "${REPO_ROOT}"/* 会变成 /* 而拒绝一切路径。
   [[ -n "${REPO_ROOT}" ]] || return 0
   case "$1" in
-    "${REPO_ROOT}"|"${REPO_ROOT}"/*) die 2 "$2 必须位于 Git worktree 外：$1" ;;
+    "${REPO_ROOT}"|"${REPO_ROOT}"/*) die 2 "$(L "$2 必须位于 Git worktree 外：$1" "$2 must be outside any Git worktree: $1")" ;;
   esac
 }
 
@@ -390,32 +450,32 @@ read_chain_env() {
   local id path resolved line key value seen chain_id relay_host exit_ip
   id="$1"
   path="${CONFIG_HOME}/ownexit/chains/${id}.env"
-  resolved="$(resolve_regular_path "${path}")" || die 2 "链 ${id} 的配置不存在或不是 regular file：${path}"
-  require_secure_user_file "${resolved}" 600 || die 2 "链 ${id} 的配置必须由当前用户拥有且 mode 精确为 600：${resolved}"
-  reject_path_inside_repo "${resolved}" "链 ${id} 的真实配置"
+  resolved="$(resolve_regular_path "${path}")" || die 2 "$(L "链 ${id} 的配置不存在或不是 regular file：${path}" "Chain ${id}: the configuration does not exist or is not a regular file: ${path}")"
+  require_secure_user_file "${resolved}" 600 || die 2 "$(L "链 ${id} 的配置必须由当前用户拥有且 mode 精确为 600：${resolved}" "Chain ${id}: the configuration must be owned by the current user with mode exactly 600: ${resolved}")"
+  reject_path_inside_repo "${resolved}" "$(L "链 ${id} 的真实配置" "the real configuration of chain ${id}")"
   seen=''
   chain_id=''
   relay_host=''
   exit_ip=''
   while IFS= read -r line || [[ -n "${line}" ]]; do
-    [[ "${line}" != *$'\r'* ]] || die 2 "链 ${id} 的配置含 CR 控制字符"
+    [[ "${line}" != *$'\r'* ]] || die 2 "$(L "链 ${id} 的配置含 CR 控制字符" "Chain ${id}: the configuration contains CR control characters")"
     case "${line}" in
       '') continue ;;
       \#*) continue ;;
       *=*)
         key="${line%%=*}"
         value="${line#*=}"
-        [[ "${key}" =~ ^[A-Z][A-Z0-9_]*$ ]] || die 2 "链 ${id} 的配置键格式错误"
-        [[ -n "${value}" ]] || die 2 "链 ${id} 的配置值不能为空：${key}"
+        [[ "${key}" =~ ^[A-Z][A-Z0-9_]*$ ]] || die 2 "$(L "链 ${id} 的配置键格式错误" "Chain ${id}: malformed configuration key")"
+        [[ -n "${value}" ]] || die 2 "$(L "链 ${id} 的配置值不能为空：${key}" "Chain ${id}: configuration value must not be empty: ${key}")"
         if printf '%s' "${value}" | grep -q '[[:cntrl:][:space:]]'; then
-          die 2 "链 ${id} 的配置值包含空白或控制字符：${key}"
+          die 2 "$(L "链 ${id} 的配置值包含空白或控制字符：${key}" "Chain ${id}: configuration value contains whitespace or control characters: ${key}")"
         fi
         case "
 ${seen}
 " in
           *"
 ${key}
-"*) die 2 "链 ${id} 的配置键重复：${key}" ;;
+"*) die 2 "$(L "链 ${id} 的配置键重复：${key}" "Chain ${id}: duplicate configuration key: ${key}")" ;;
         esac
         seen="${seen}
 ${key}"
@@ -426,12 +486,12 @@ ${key}"
           *) ;;
         esac
         ;;
-      *) die 2 "链 ${id} 的配置只允许空行、井号注释和 KEY=VALUE" ;;
+      *) die 2 "$(L "链 ${id} 的配置只允许空行、井号注释和 KEY=VALUE" "Chain ${id}: the configuration may only contain blank lines, # comments and KEY=VALUE")" ;;
     esac
   done < "${resolved}"
-  [[ "${chain_id}" == "${id}" ]] || die 2 "链 ${id} 的配置里 CHAIN_ID 不等于文件名对应的 id（读到了别的链）"
-  is_ipv4 "${relay_host}" || die 2 "链 ${id} 的 RELAY_HOST 缺失或不是 IPv4 字面量"
-  is_ipv4 "${exit_ip}" || die 2 "链 ${id} 的 EXPECTED_EXIT_IPV4 缺失或不是 IPv4 字面量"
+  [[ "${chain_id}" == "${id}" ]] || die 2 "$(L "链 ${id} 的配置里 CHAIN_ID 不等于文件名对应的 id（读到了别的链）" "Chain ${id}: CHAIN_ID in the configuration does not match the id from the file name (read another chain)")"
+  is_ipv4 "${relay_host}" || die 2 "$(L "链 ${id} 的 RELAY_HOST 缺失或不是 IPv4 字面量" "Chain ${id}: RELAY_HOST is missing or not an IPv4 literal")"
+  is_ipv4 "${exit_ip}" || die 2 "$(L "链 ${id} 的 EXPECTED_EXIT_IPV4 缺失或不是 IPv4 字面量" "Chain ${id}: EXPECTED_EXIT_IPV4 is missing or not an IPv4 literal")"
   printf '%s|%s\n' "${relay_host}" "${exit_ip}"
 }
 
@@ -443,12 +503,12 @@ read_chain_node() {
   relay_host="$2"
   state_dir="${STATE_HOME}/ownexit/chains/${id}"
   node_file="${state_dir}/client/node.txt"
-  [[ -d "${state_dir}" && ! -L "${state_dir}" ]] || die 2 "链 ${id} 尚未 deploy（state 目录不存在）：${state_dir}"
-  require_secure_user_file "${node_file}" 600 || die 2 "链 ${id} 的 node.txt 不存在或不是 600 regular file（已 rollback？）：${node_file}"
-  [[ "$(wc -l < "${node_file}" | tr -d ' ')" == 1 ]] || die 2 "链 ${id} 的 node.txt 必须恰好一行"
+  [[ -d "${state_dir}" && ! -L "${state_dir}" ]] || die 2 "$(L "链 ${id} 尚未 deploy（state 目录不存在）：${state_dir}" "Chain ${id} is not deployed yet (state directory missing): ${state_dir}")"
+  require_secure_user_file "${node_file}" 600 || die 2 "$(L "链 ${id} 的 node.txt 不存在或不是 600 regular file（已 rollback？）：${node_file}" "Chain ${id}: node.txt is missing or not a mode-600 regular file (rolled back?): ${node_file}")"
+  [[ "$(wc -l < "${node_file}" | tr -d ' ')" == 1 ]] || die 2 "$(L "链 ${id} 的 node.txt 必须恰好一行" "Chain ${id}: node.txt must be exactly one line")"
   line="$(head -n 1 "${node_file}")"
   rest="${line#vless://}"
-  [[ "${rest}" != "${line}" ]] || die 2 "链 ${id} 的 node.txt 不是 vless:// URI"
+  [[ "${rest}" != "${line}" ]] || die 2 "$(L "链 ${id} 的 node.txt 不是 vless:// URI" "Chain ${id}: node.txt is not a vless:// URI")"
   uuid="${rest%%@*}"
   rest="${rest#*@}"
   hostport="${rest%%\?*}"
@@ -457,18 +517,18 @@ read_chain_node() {
   port="${hostport#*:}"
   query="${rest%%#*}"
   fragment="${rest#*#}"
-  [[ "${host}" == "${relay_host}" ]] || die 2 "链 ${id} 的 node.txt host 不等于其配置的 RELAY_HOST（产物已被改动或读错链）"
-  [[ "${fragment}" == "Exit-via-Relay-${id}" ]] || die 2 "链 ${id} 的节点名不等于 Exit-via-Relay-${id}"
-  [[ "${port}" =~ ^[1-9][0-9]{0,4}$ ]] && (( port <= 65535 )) || die 2 "链 ${id} 的 node.txt 端口格式错误"
+  [[ "${host}" == "${relay_host}" ]] || die 2 "$(L "链 ${id} 的 node.txt host 不等于其配置的 RELAY_HOST（产物已被改动或读错链）" "Chain ${id}: the host in node.txt differs from RELAY_HOST in its configuration (the artifact was changed or the wrong chain was read)")"
+  [[ "${fragment}" == "Exit-via-Relay-${id}" ]] || die 2 "$(L "链 ${id} 的节点名不等于 Exit-via-Relay-${id}" "Chain ${id}: the node name is not Exit-via-Relay-${id}")"
+  [[ "${port}" =~ ^[1-9][0-9]{0,4}$ ]] && (( port <= 65535 )) || die 2 "$(L "链 ${id} 的 node.txt 端口格式错误" "Chain ${id}: malformed port in node.txt")"
   # 与 setup_chain.sh 的 state 格式校验同步。
-  [[ "${uuid}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || die 2 "链 ${id} 的 uuid 格式错误"
+  [[ "${uuid}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || die 2 "$(L "链 ${id} 的 uuid 格式错误" "Chain ${id}: malformed uuid")"
   [[ "${query}" =~ ^encryption=none\&flow=xtls-rprx-vision\&security=reality\&sni=([A-Za-z0-9.-]+)\&fp=chrome\&pbk=([A-Za-z0-9_-]+)\&sid=([0-9a-f]{16})\&type=tcp$ ]] \
-    || die 2 "链 ${id} 的 node.txt query 与 render_node_artifact 模板不一致"
+    || die 2 "$(L "链 ${id} 的 node.txt query 与 render_node_artifact 模板不一致" "Chain ${id}: the node.txt query does not match the render_node_artifact template")"
   sni="${BASH_REMATCH[1]}"
   pbk="${BASH_REMATCH[2]}"
   sid="${BASH_REMATCH[3]}"
   expected_query="encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${sid}&type=tcp"
-  [[ "${query}" == "${expected_query}" ]] || die 2 "链 ${id} 的 node.txt query 与 render_node_artifact 模板不一致"
+  [[ "${query}" == "${expected_query}" ]] || die 2 "$(L "链 ${id} 的 node.txt query 与 render_node_artifact 模板不一致" "Chain ${id}: the node.txt query does not match the render_node_artifact template")"
   printf '%s|%s|%s|%s|%s|%s\n' "${port}" "${uuid}" "${sni}" "${pbk}" "${sid}" "${fragment}"
 }
 
@@ -481,12 +541,12 @@ load_chains() {
   CHAIN_RECORDS=''
   count=0
   for id in "$@"; do
-    [[ "${id}" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die 2 "CHAIN_ID 格式错误：${id}"
+    [[ "${id}" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die 2 "$(L "CHAIN_ID 格式错误：${id}" "Malformed CHAIN_ID: ${id}")"
     case "
 ${CHAIN_RECORDS}
 " in
       *"
-${id}|"*) die 2 "--chains 里 CHAIN_ID 重复：${id}" ;;
+${id}|"*) die 2 "$(L "--chains 里 CHAIN_ID 重复：${id}" "Duplicate CHAIN_ID in --chains: ${id}")" ;;
     esac
     env_fields="$(read_chain_env "${id}")"
     host="${env_fields%%|*}"
@@ -494,7 +554,7 @@ ${id}|"*) die 2 "--chains 里 CHAIN_ID 重复：${id}" ;;
     if [[ -z "${EXPECTED_EXIT_IPV4}" ]]; then
       EXPECTED_EXIT_IPV4="${exit_ip}"
     elif [[ "${exit_ip}" != "${EXPECTED_EXIT_IPV4}" ]]; then
-      die 2 "链 ${id} 的 EXPECTED_EXIT_IPV4 与前面的链不一致；本脚本只聚合共用同一出口机出口的链"
+      die 2 "$(L "链 ${id} 的 EXPECTED_EXIT_IPV4 与前面的链不一致；本脚本只聚合共用同一出口机出口的链" "Chain ${id}: EXPECTED_EXIT_IPV4 differs from the previous chains; this script only combines chains that share the same exit IP")"
     fi
     node_fields="$(read_chain_node "${id}" "${host}")"
     if [[ -z "${CHAIN_RECORDS}" ]]; then
@@ -505,7 +565,7 @@ ${id}|${host}|${node_fields}"
     fi
     count="$((count + 1))"
   done
-  (( count >= 1 )) || die 2 '--chains 为空'
+  (( count >= 1 )) || die 2 "$(L '--chains 为空' '--chains is empty')"
   CHAIN_COUNT="${count}"
 }
 
@@ -592,7 +652,7 @@ prepare_local_binary() {
     darwin-amd64) archive_sha="${ARCHIVE_SHA256_DARWIN_AMD64}"; binary_sha="${BINARY_SHA256_DARWIN_AMD64}" ;;
     linux-amd64) archive_sha="${ARCHIVE_SHA256_LINUX_AMD64}"; binary_sha="${BINARY_SHA256_LINUX_AMD64}" ;;
     linux-arm64) archive_sha="${ARCHIVE_SHA256_LINUX_ARM64}"; binary_sha="${BINARY_SHA256_LINUX_ARM64}" ;;
-    *) die 1 "本机平台（$(uname -s) $(uname -m)）没有 sing-box 官方包，无法做本机握手验证" ;;
+    *) die 1 "$(L "本机平台（$(uname -s) $(uname -m)）没有 sing-box 官方包，无法做本机握手验证" "There is no official sing-box package for this platform ($(uname -s) $(uname -m)), so the local handshake check cannot run")" ;;
   esac
   archive="sing-box-${SING_BOX_VERSION}-${platform}.tar.gz"
   archive_path=''
@@ -608,19 +668,19 @@ prepare_local_binary() {
   done
   if [[ -z "${archive_path}" ]]; then
     archive_path="${OP_TMP}/${archive}"
-    log_warn "各链缓存里都没有本机平台（${platform}）的 sing-box 官方包，从官方地址下载到临时目录（国内直连 GitHub 可能很慢）"
-    curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 --max-time 600 "${RELEASE_BASE_URL}/${archive}" -o "${archive_path}" || die 1 "下载 sing-box 官方包失败：${archive}"
-    [[ "$(sha256_file "${archive_path}")" == "${archive_sha}" ]] || die 1 "sing-box 官方包摘要不符：${archive}"
+    log_warn "$(L "各链缓存里都没有本机平台（${platform}）的 sing-box 官方包，从官方地址下载到临时目录（国内直连 GitHub 可能很慢）" "No chain cache has the official sing-box package for this platform (${platform}); downloading it from the official URL to a temporary directory (GitHub may be slow from mainland China)")"
+    curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 --max-time 600 "${RELEASE_BASE_URL}/${archive}" -o "${archive_path}" || die 1 "$(L "下载 sing-box 官方包失败：${archive}" "Downloading the official sing-box package failed: ${archive}")"
+    [[ "$(sha256_file "${archive_path}")" == "${archive_sha}" ]] || die 1 "$(L "sing-box 官方包摘要不符：${archive}" "Official sing-box package digest mismatch: ${archive}")"
   fi
   extract_root="${OP_TMP}/assets"
   mkdir "${extract_root}"
   tar -xzf "${archive_path}" -C "${extract_root}"
   DARWIN_BINARY_PATH="${extract_root}/sing-box-${SING_BOX_VERSION}-${platform}/sing-box"
-  [[ -f "${DARWIN_BINARY_PATH}" && ! -L "${DARWIN_BINARY_PATH}" ]] || die 1 "官方包布局异常：${platform}"
-  [[ "$(sha256_file "${DARWIN_BINARY_PATH}")" == "${binary_sha}" ]] || die 1 "binary 摘要不符：${platform}"
+  [[ -f "${DARWIN_BINARY_PATH}" && ! -L "${DARWIN_BINARY_PATH}" ]] || die 1 "$(L "官方包布局异常：${platform}" "Unexpected official package layout: ${platform}")"
+  [[ "$(sha256_file "${DARWIN_BINARY_PATH}")" == "${binary_sha}" ]] || die 1 "$(L "binary 摘要不符：${platform}" "Binary digest mismatch: ${platform}")"
   chmod 700 "${DARWIN_BINARY_PATH}"
   version_output="$("${DARWIN_BINARY_PATH}" version | awk '/^sing-box version / {print $3; exit}')"
-  [[ "${version_output}" == "${SING_BOX_VERSION}" ]] || die 1 '本机 binary 版本不符'
+  [[ "${version_output}" == "${SING_BOX_VERSION}" ]] || die 1 "$(L '本机 binary 版本不符' 'Local binary version mismatch')"
 }
 
 # 与 setup_chain.sh choose_local_port同步。
@@ -728,11 +788,11 @@ cmd_verify() {
     index="$((index + 1))"
   done
   if (( skipped == CHAIN_COUNT )); then
-    die 5 '本机到全部链入口的路由都经过 TUN（代理软件的 TUN 模式开着），本次未验证任何链；关闭 TUN 后重跑 verify'
+    die 5 "$(L '本机到全部链入口的路由都经过 TUN（代理软件的 TUN 模式开着），本次未验证任何链；关闭 TUN 后重跑 verify' 'The routes from this computer to every chain entry go through TUN (the proxy'\''s TUN mode is on), so no chain was verified; turn TUN off and rerun verify')"
   fi
-  (( skipped == 0 )) || log_warn "${skipped} 条链因路由经 TUN 未验证（skipped 不计入失败，但也不算通过）"
-  (( unhealthy == 0 )) || die 5 "${unhealthy} 条链不健康（见上方逐行结果）"
-  log_info "verify 通过；链 ${CHAIN_COUNT} 条（skipped ${skipped}）"
+  (( skipped == 0 )) || log_warn "$(L "${skipped} 条链因路由经 TUN 未验证（skipped 不计入失败，但也不算通过）" "${skipped} chain(s) not verified because their route goes through TUN (skipped is not a failure, but not a pass either)")"
+  (( unhealthy == 0 )) || die 5 "$(L "${unhealthy} 条链不健康（见上方逐行结果）" "${unhealthy} chain(s) unhealthy (see the per-chain results above)")"
+  log_info "$(L "verify 通过；链 ${CHAIN_COUNT} 条（skipped ${skipped}）" "verify passed; ${CHAIN_COUNT} chain(s) (skipped ${skipped})")"
 }
 
 # ---------- render ----------
@@ -800,7 +860,7 @@ EOF
 
 render_clash_snippet() {
   {
-    printf '# 由 multi_chain_client.sh render 生成：聚合 %s 条链（%s）。合并进 Clash Verge 配置前先删除同名的旧单节点。\n' "${CHAIN_COUNT}" "${CHAINS_ARG}"
+    printf "$(L '# 由 multi_chain_client.sh render 生成：聚合 %s 条链（%s）。合并进 Clash Verge 配置前先删除同名的旧单节点。\n' '# Generated by multi_chain_client.sh render: combines %s chain(s) (%s). Delete the old single nodes with the same names before merging into your Clash Verge configuration.\n')" "${CHAIN_COUNT}" "${CHAINS_ARG}"
     printf 'proxies:\n'
     render_proxies_block
     printf '\nproxy-groups:\n'
@@ -815,7 +875,7 @@ render_qr_codes() {
   local target index name png uri
   if [[ -n "${QR_OUT}" ]]; then
     # mkdir 对已存在的目录项（包括断开的符号链接）直接失败，且不做任何路径预处理，交给内核逐段解析——这就是"拒绝覆盖"的全部实现。
-    mkdir -m 700 "${QR_OUT}" 2>/dev/null || die 1 "二维码输出目录已存在或无法创建（不覆盖）：${QR_OUT}"
+    mkdir -m 700 "${QR_OUT}" 2>/dev/null || die 1 "$(L "二维码输出目录已存在或无法创建（不覆盖）：${QR_OUT}" "The QR code output directory already exists or cannot be created (not overwriting): ${QR_OUT}")"
     target="${QR_OUT}"
   else
     target="$(mktemp -d "${TMPDIR:-/tmp}/multi-chain-client-qr.XXXXXX")"
@@ -828,10 +888,10 @@ render_qr_codes() {
     uri="$(node_uri "${index}")"
     if ! printf '%s' "${uri}" | qrencode -s 10 -m 3 -o "${png}" 2>"${OP_TMP}/qrencode.err"; then
       rm -rf "${target}"
-      die 1 "qrencode 生成链 $(chain_field "${index}" 1) 失败：$(head -c 200 "${OP_TMP}/qrencode.err")"
+      die 1 "$(L "qrencode 生成链 $(chain_field "${index}" 1) 失败：$(head -c 200 "${OP_TMP}/qrencode.err")" "qrencode failed for chain $(chain_field "${index}" 1): $(head -c 200 "${OP_TMP}/qrencode.err")")"
     fi
     chmod 600 "${png}"
-    log_info "已生成二维码 链=$(chain_field "${index}" 1) 节点=${name} → ${png}"
+    log_info "$(L "已生成二维码 链=$(chain_field "${index}" 1) 节点=${name} → ${png}" "QR code generated chain=$(chain_field "${index}" 1) node=${name} → ${png}")"
     index="$((index + 1))"
   done
   printf '%s\n' "${target}"
@@ -839,7 +899,7 @@ render_qr_codes() {
 
 cmd_render() {
   local nodes snippet index qr_dir
-  ensure_private_dir "${OUT_DIR}" || die 1 "产物目录身份或权限不安全：${OUT_DIR}"
+  ensure_private_dir "${OUT_DIR}" || die 1 "$(L "产物目录身份或权限不安全：${OUT_DIR}" "The output directory's ownership or permissions are unsafe: ${OUT_DIR}")"
   nodes="${OUT_DIR}/nodes.txt"
   snippet="${OUT_DIR}/clash-snippet.yaml"
   {
@@ -851,13 +911,13 @@ cmd_render() {
   } > "${nodes}"
   chmod 600 "${nodes}"
   render_clash_snippet "${snippet}"
-  log_info "render 完成；name=${AGG_NAME} 链 ${CHAIN_COUNT} 条（${CHAINS_ARG}） group=${GROUP_TYPE}"
+  log_info "$(L "render 完成；name=${AGG_NAME} 链 ${CHAIN_COUNT} 条（${CHAINS_ARG}） group=${GROUP_TYPE}" "render finished; name=${AGG_NAME} chains ${CHAIN_COUNT} (${CHAINS_ARG}) group=${GROUP_TYPE}")"
   printf '%s render nodes=%s\n' "${LOG_TAG}" "${nodes}"
   printf '%s render clash_snippet=%s\n' "${LOG_TAG}" "${snippet}"
   if [[ "${NO_QR}" == 0 ]]; then
     qr_dir="$(render_qr_codes)"
     printf '%s render qr_dir=%s\n' "${LOG_TAG}" "${qr_dir}"
-    log_info "iPhone Shadowrocket 逐张扫码导入；扫完删除（PNG 含明文凭据）：rm -rf '${qr_dir}'"
+    log_info "$(L "iPhone Shadowrocket 逐张扫码导入；扫完删除（PNG 含明文凭据）：rm -rf '${qr_dir}'" "Scan the QR codes one by one in iPhone Shadowrocket, then delete them (the PNGs contain plain-text credentials): rm -rf '${qr_dir}'")"
     if [[ "${OPEN_DIR}" == 1 ]] && command -v open >/dev/null 2>&1; then
       open "${qr_dir}" || true
     fi

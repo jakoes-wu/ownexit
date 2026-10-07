@@ -375,6 +375,6 @@ stdout 上带 `[multi-chain-client]` 前缀的下列行冻结（其余为日志�
 | `XDG_CONFIG_HOME` / `XDG_STATE_HOME` / `XDG_CACHE_HOME` | 改变配置、状态、缓存目录。链式与 doctor：值不是绝对路径时忽略、回落默认值；直连：按原值使用 |
 | `TMPDIR` | `ownexit multi render` 二维码的默认输出目录 |
 | `OWNEXIT_PYTHON` | 首次配免密时用来自动输入密码的 Python 解释器（需能 `import pexpect`）。`ownexit` 入口自动设为它自己的解释器（已设置时不覆盖）；直接运行脚本时可自己设置，未设置则依次尝试 `python3` 与系统 `expect` |
-| `OWNEXIT_LANG` | 决定入口帮助与向导的语言：`zh` / `en` 时强制该语言，向导也不再问语言；未设或其它值时按 `LC_ALL` → `LC_MESSAGES` → `LANG` 是否以 `zh` 开头选择帮助语言，向导照常先问语言（回车默认取这个判断结果）。部署脚本的输出目前只有中文，不受它影响 |
+| `OWNEXIT_LANG` | 决定入口帮助与向导的语言：`zh` / `en` 时强制该语言，向导也不再问语言；未设或其它值时按 `LC_ALL` → `LC_MESSAGES` → `LANG` 是否以 `zh` 开头选择帮助语言，向导照常先问语言（回车默认取这个判断结果）。从 1.7.0 起也决定脚本的帮助、进度与报错（含服务器端 `[vps]` 日志行）的语言；向导里选的语言会传给脚本。机器可读输出（`status=`、`reason=`、`health=` 等冻结的键与值）两种语言相同 |
 
 `~/.ssh/ownexit/`（专用密钥）不受 XDG 影响。以 `OWNEXIT_TEST_` 开头的变量是测试钩子，不属于公开接口，正常使用不要设置。

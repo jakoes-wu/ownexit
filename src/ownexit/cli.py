@@ -111,7 +111,6 @@ _WIZARD = {
         "bad_port": "端口要是 1-65535 的数字，请重输。",
         "same": "中转机和出口机必须是两台不同的机器，请重输出口机。",
         "run": "即将运行：ownexit {}",
-        "scripts_zh": "",
         "cancel": "已取消",
     },
     "en": {
@@ -128,7 +127,6 @@ _WIZARD = {
         "bad_port": "The port must be a number from 1 to 65535, try again.",
         "same": "The relay and the exit must be two different servers; enter the exit again.",
         "run": "About to run: ownexit {}",
-        "scripts_zh": "Note: the setup scripts print their progress in Chinese for now; the commands and results are the same.",
         "cancel": "Cancelled",
     },
 }
@@ -213,6 +211,8 @@ def _wizard(lang):
 
 def main(argv=None):
     args = sys.argv[1:] if argv is None else list(argv)
+    # 向导里选定的语言；None 表示没走向导，脚本自己按 OWNEXIT_LANG / locale 判断（与 _lang() 同一规则）。
+    lang = None
     if not args and sys.stdin.isatty() and sys.stdout.isatty():
         # 只有在交互终端里不带参数才进向导；脚本、管道、CI 里照旧打印帮助，行为与 1.3.0 相同。
         # 语言选定之前取消只能打印中英并列的文字，选定之后用所选语言；退出码两种情况都一样。
@@ -230,8 +230,6 @@ def main(argv=None):
             print(t["cancel"] if t else _LANG_CANCEL)
             return 1
         print(t["run"].format(" ".join(args)))
-        if t["scripts_zh"]:
-            print(t["scripts_zh"])
         if os.environ.get("OWNEXIT_TEST_WIZARD_PRINT") == "1":
             # 测试钩子：只打印将要转发的参数，不执行（OWNEXIT_TEST_ 前缀不属于公开接口）。
             for arg in args:
@@ -259,6 +257,9 @@ def main(argv=None):
     # 不必再依赖系统的 expect；用户已自己设置时不覆盖。
     env = dict(os.environ)
     env.setdefault("OWNEXIT_PYTHON", sys.executable)
+    if lang is not None:
+        # 向导选的语言要延续到脚本输出：脚本只看 OWNEXIT_LANG 与 locale，不传的话选了 English 也可能出中文。
+        env["OWNEXIT_LANG"] = lang
     # execve 替换当前进程：退出码、信号与交互式终端都直接属于脚本，不经过 Python。
     os.execve(bash, [bash, script] + args[1:], env)
 

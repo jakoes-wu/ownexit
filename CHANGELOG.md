@@ -6,6 +6,24 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-10-07
+
+### Added / 新增
+
+- The scripts now speak English as well as Chinese: `--help`, progress, warnings, errors, the "next steps" summary, the server-side `[vps]` log lines of direct, the relay chain's remote preflight messages and doctor's camouflage-domain scan. The language follows the entry point's rule: `OWNEXIT_LANG=zh|en` wins; otherwise Chinese when `LC_ALL` / `LC_MESSAGES` / `LANG` starts with `zh`, English otherwise. The language picked in the guided setup is passed on to the scripts, so the English setup note "the scripts print in Chinese for now" is gone.
+- 脚本输出中英双语：`--help`、进度、警告、报错、“下一步”汇总、直连的服务器端 `[vps]` 日志、链式远端预检的报错、doctor 的伪装域名扫描都有英文。语言规则与入口相同：`OWNEXIT_LANG=zh|en` 优先；否则 `LC_ALL` / `LC_MESSAGES` / `LANG` 以 `zh` 开头为中文，其余英文。向导里选的语言会传给脚本，英文向导里“脚本输出目前是中文”的提示随之删除。
+- Generated comments follow the language too: the header of a chain configuration written by `chain init` and of `clash-snippet.yaml` written by `multi render`.
+- 生成文件里的注释也跟随语言：`chain init` 写的链配置头部、`multi render` 写的 `clash-snippet.yaml` 头部。
+- `scripts/check_ui_lang.sh` (run in CI) fails when a Chinese message in the scripts has no English twin, or when the two texts have different `%`, `${` or `$(` placeholders.
+- 新增 `scripts/check_ui_lang.sh`（接入 CI）：脚本里有中文提示没写英文，或两种语言的 `%`、`${`、`$(` 个数不同时报错。
+
+### Changed / 变更
+
+- Chinese-speaking users whose system language is not Chinese now see English output; set `OWNEXIT_LANG=zh` to switch back. Machine-readable output (`status=`, `reason=`, `health=`, `rotate=`, `migrate=` and the other frozen keys and values) is identical in both languages; the `INFO` / `WARN` / `ERROR` level words are not translated.
+- 系统语言不是中文的中文用户，现在看到的是英文输出；设 `OWNEXIT_LANG=zh` 即可改回。机器可读输出（`status=`、`reason=`、`health=`、`rotate=`、`migrate=` 等冻结的键与值）两种语言完全相同；`INFO` / `WARN` / `ERROR` 级别词不翻译。
+- English documentation quotes the scripts' English messages instead of Chinese originals with a gloss.
+- 英文文档引用报错时改用脚本的英文原文，不再附中文原文加释义。
+
 ## [1.6.0] - 2026-10-06
 
 ### Added / 新增

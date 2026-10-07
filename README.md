@@ -82,6 +82,8 @@ ownexit                              # no arguments in a terminal: pick a langua
 
 Pick one of the two (it is the same package).
 
+Output language: the scripts print in Chinese when the system language (`LC_ALL` / `LC_MESSAGES` / `LANG`) starts with `zh`, otherwise in English; `OWNEXIT_LANG=zh` or `OWNEXIT_LANG=en` overrides it, and the language picked in the guided setup is used for the whole run.
+
 `ownexit` is a thin wrapper around the bundled bash scripts, so you can also run them straight from a clone — the commands map one to one:
 
 | `ownexit …` | script in a clone |
@@ -158,7 +160,7 @@ If your computer runs a proxy in TUN mode (Clash and similar), SSH to the server
 
 ## Stability
 
-From 1.0.0 the command-line interface, configuration keys and on-disk formats are frozen for the whole 1.x series: releases only add things, nothing is renamed or removed, and existing deployments keep working after an upgrade without redeploying or re-importing clients. Breaking changes are reserved for 2.0 and will come with a migration. The frozen surface is listed in [docs/reference/commands.en.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/reference/commands.en.md) and [docs/reference/files.en.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/reference/files.en.md); the rules are in [docs/reference/compatibility.en.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/reference/compatibility.en.md). The scripts' progress messages are currently in Chinese, and the design records under `docs/feature/` are Chinese only; every user-facing document has an English edition.
+From 1.0.0 the command-line interface, configuration keys and on-disk formats are frozen for the whole 1.x series: releases only add things, nothing is renamed or removed, and existing deployments keep working after an upgrade without redeploying or re-importing clients. Breaking changes are reserved for 2.0 and will come with a migration. The frozen surface is listed in [docs/reference/commands.en.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/reference/commands.en.md) and [docs/reference/files.en.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/reference/files.en.md); the rules are in [docs/reference/compatibility.en.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/reference/compatibility.en.md). The design records under `docs/feature/` are Chinese only; every user-facing document has an English edition.
 
 ## Security notes
 

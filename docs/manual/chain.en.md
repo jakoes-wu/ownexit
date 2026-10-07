@@ -6,7 +6,7 @@ Use a relay chain when the exit's IP is blocked, or when you want clients to ent
 
 The full reference for commands and mechanisms is in [`chain/README.en.md`](../../chain/README.en.md); this guide walks once through the steps from nothing to a working chain. Commands are written for a git clone; with `pipx install ownexit`, replace `chain/setup_chain.sh` with `ownexit chain` and `chain/multi_chain_client.sh` with `ownexit multi` — the options are identical.
 
-> The scripts currently print their progress and messages in Chinese. Where this guide quotes such a message, the original text is kept with an English gloss.
+> From 1.7.0 the scripts print in English unless the system language is Chinese; set `OWNEXIT_LANG=en` or `OWNEXIT_LANG=zh` to choose. The messages quoted below are the English ones.
 
 ## 1. What you need
 
@@ -112,13 +112,13 @@ It first works out whether the new address is the same machine, then:
 | Problem | Fix |
 | ---- | ---- |
 | `init` reports `reason=bad-password` / `password-disabled` / `unreachable` | Wrong password, password login turned off on the server, or unreachable, respectively; handle as in the [direct guide's troubleshooting](direct.en.md#7-troubleshooting) |
-| `init` reports "没有可用的 ed25519 host key" (no usable ed25519 host key) | Check that the machine's sshd `HostKey` settings include ed25519 |
-| `init` reports "中转机上的 sing-box 状态不完整" (incomplete sing-box state on the relay) | Get the existing sing-box fully running (service, configuration and process all present), or remove it completely, then rerun |
-| `init` reports "配置已存在" (configuration already exists) | A chain with that name already exists; use another `--id`, or make sure the old chain is no longer needed (rollback first) and delete its configuration file |
+| `init` reports "Cannot get an ed25519 host key from the …" | Check that the machine's sshd `HostKey` settings include ed25519 |
+| `init` reports "The sing-box state on the relay is incomplete" | Get the existing sing-box fully running (service, configuration and process all present), or remove it completely, then rerun |
+| `init` reports "The configuration already exists" | A chain with that name already exists; use another `--id`, or make sure the old chain is no longer needed (rollback first) and delete its configuration file |
 | `preflight` reports firewall or `sockets.target.wants` problems | Follow the commands in the error message; the scripts will not change your firewall or create standard systemd directories for you |
 | TUN is on locally and `status` / `verify` print `[ssh-retry]` | Read-only commands retry up to 3 times when SSH drops; if it happens often, turn off TUN or route the relay's and exit's IPs directly (for Clash Verge see [Keeping specific IPs out of Clash Verge's proxy](clash-direct-ips.en.md); `ownexit doctor` shows which IPs go through TUN) |
 | SSH drops in the middle of an operation and `verify` reports drift | Local TUN may have taken over SSH to the relay; turn TUN off (or route the relay's and exit's IPs directly as in [clash-direct-ips.en.md](clash-direct-ips.en.md)) and rerun |
-| "配置目录身份或权限不安全" (configuration directory ownership or permissions unsafe) | Some parent of the configuration / state directory is writable by the group or others (for example mode 775); move to a directory tree with modes 755 / 700 |
-| "中转机与出口机的 CPU 架构必须相同" (relay and exit must have the same CPU architecture) | One machine is amd64 and the other arm64, which is not supported yet |
-| `status` prints `reason=exit-op-pending`, or `verify` / `rollback` report "有未完成的凭据或设备操作" (an unfinished credential or device operation) | The last `rotate-keys` / `add-device` / `remove-device` did not finish and left helper files on the exit; rerun the interrupted command |
-| `verify` / `status` / `rollback` report "角色声明预检失败" (role declaration precheck failed) or "既有 sing-box 零回归基线发生变化" (the baseline of the existing sing-box changed), and the relay also runs direct | Direct was just migrated, reconfigured, freshly installed or uninstalled; run `chain/setup_chain.sh --id <name> rebaseline` to register it again (see [`chain/README.en.md`](../../chain/README.en.md#re-registering-an-existing-sing-box-on-the-relay-rebaseline)) |
+| "The configuration directory's ownership or permissions are unsafe" | Some parent of the configuration / state directory is writable by the group or others (for example mode 775); move to a directory tree with modes 755 / 700 |
+| "The relay and the exit must have the same CPU architecture" | One machine is amd64 and the other arm64, which is not supported yet |
+| `status` prints `reason=exit-op-pending`, or `verify` / `rollback` report "… unfinished credential or device operation …" | The last `rotate-keys` / `add-device` / `remove-device` did not finish and left helper files on the exit; rerun the interrupted command |
+| `verify` / `status` / `rollback` report "The relay's dependency, firewall or role declaration preflight failed" or "The zero-regression baseline of the relay's existing sing-box changed", and the relay also runs direct | Direct was just migrated, reconfigured, freshly installed or uninstalled; run `chain/setup_chain.sh --id <name> rebaseline` to register it again (see [`chain/README.en.md`](../../chain/README.en.md#re-registering-an-existing-sing-box-on-the-relay-rebaseline)) |
