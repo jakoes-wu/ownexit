@@ -4,6 +4,23 @@
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-10-06
+
+### 新增
+
+- 直连改用子命令，与链式一致：`ownexit direct up`（部署；不带子命令仍等同 up）、`rotate-keys`、`rotate-token`、`add-device <名>`、`remove-device <名>`、`migrate`、`uninstall`，以及原 `ownexit subctl` 的日常操作 `sub start [--ttl]` / `sub stop` / `status` / `log` / `qr` / `devices` / `login`。
+- `ownexit chain migrate-exit --to <新 IP>` 能自动处理“同一台出口机换了 IP”：经中转确认主机指纹相同后，自己登记新 IP 的主机密钥、备份并改写配置，原地切换，输出 `migrate=rehosted`；旧 IP 连不上也可以，中断后重跑同一条命令续上。
+
+### 变更
+
+- `migrate-exit` 以前在两种情形退出 2，现在会成功：`--to` 就是当前出口机（已切换完成，输出 `rehost=noop`）；新地址与当前出口机是同一台（原地切换）。
+- `ownexit --help` 不再列出 `subctl`、`connect`（两者照常可用）；向导部署直连时执行 `ownexit direct up`。
+- 所有提示文字、帮助、README 与手册改用新写法。
+
+### 废弃
+
+- `ownexit direct --rotate-keys` / `--rotate-token` / `--add-device` / `--remove-device` / `--migrate` / `--uninstall`、`ownexit subctl …`、`ownexit chain rehost-exit`：照常可用，使用时在 stderr 提示新写法，最早在 2.0 移除（见 docs/reference/compatibility.md “已废弃项”）。
+
 ## [1.4.0] - 2026-10-06
 
 ### 新增

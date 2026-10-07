@@ -135,7 +135,7 @@ exit
 
 ```sh
 # 直连：1 台
-ownexit direct --host 203.0.113.7               # SSH 端口不是 22 时加 --port 2222
+ownexit direct up --host 203.0.113.7            # SSH 端口不是 22 时加 --port 2222
 
 # 链式：中转机 + 出口机
 ownexit chain init --relay 203.0.113.10 --exit 203.0.113.20   # 端口不是 22 时加 --relay-port / --exit-port

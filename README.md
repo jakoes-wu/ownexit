@@ -13,7 +13,7 @@ Turn a VPS you rent into your own fixed exit IP — connect directly, or through
 
 ```sh
 pipx install ownexit
-ownexit direct --host 203.0.113.7   # asks for the VPS root password once
+ownexit direct up --host 203.0.113.7   # asks for the VPS root password once
 ```
 
 When it finishes, paste the printed subscription URL into Clash Verge or Shadowrocket. That's it.
@@ -87,7 +87,7 @@ Pick one of the two (it is the same package).
 | `ownexit …` | script in a clone |
 | ---- | ---- |
 | `ownexit direct` | `direct/setup_direct.sh` |
-| `ownexit subctl` | `direct/subctl` |
+| `ownexit subctl` (deprecated, use `ownexit direct sub …` / `status` / `log` …) | `direct/subctl` |
 | `ownexit connect` | `direct/connect_to.sh` |
 | `ownexit chain` | `chain/setup_chain.sh` |
 | `ownexit multi` | `chain/multi_chain_client.sh` |
@@ -105,7 +105,7 @@ When run from a clone, the chain scripts additionally refuse configuration files
 1. **Deploy**
 
    ```sh
-   ownexit direct --host 203.0.113.7          # add --port 2222 if SSH is not on 22
+   ownexit direct up --host 203.0.113.7       # add --port 2222 if SSH is not on 22
    ```
 
    It sets up key login, checks the system, enables BBR, has the server download a pinned official sing-box release and check its SHA-256, generates the Reality keys on the server, renders subscriptions, uploads them and verifies every layer. No questions asked. Pass `--sni <domain>` or `--proxy-port <port>` to choose them yourself; run it again with new values to change them later (the UUID and keys stay the same).
@@ -122,12 +122,12 @@ When run from a clone, the chain scripts additionally refuse configuration files
 3. **Check and close up** — open `https://ipinfo.io` on a device: it should show your VPS's IP. Then turn the subscription endpoint off until you need it again:
 
    ```sh
-   ownexit subctl stop
+   ownexit direct sub stop
    ```
 
-The VPS is remembered, so later runs need no arguments: `ownexit direct` to redeploy, `ownexit subctl status|start|stop|log|qr`, `ownexit direct --uninstall` to remove it. `ownexit direct --rotate-keys` replaces the UUIDs, Reality key pair and short id on the server (every device must re-import the subscription). `ownexit direct --add-device phone` gives one device its own UUID and subscription URLs; `--remove-device phone` revokes it without touching the others; `ownexit subctl devices` lists them.
+The VPS is remembered, so later runs need no `--host`: `ownexit direct up` to redeploy, `ownexit direct sub start|stop`, `ownexit direct status|log|qr`, `ownexit direct uninstall` to remove it. `ownexit direct rotate-keys` replaces the UUIDs, Reality key pair and short id on the server (every device must re-import the subscription). `ownexit direct add-device phone` gives one device its own UUID and subscription URLs; `ownexit direct remove-device phone` revokes it without touching the others; `ownexit direct devices` lists them. (The older spellings `ownexit subctl …` and `ownexit direct --rotate-keys` etc. still work in 1.x and print the new form.)
 
-**Set up with the 233boy script by an earlier version?** Run `ownexit direct --migrate` once. It keeps the existing UUID, keys, port and SNI, switches to ownexit's own service and removes the 233boy files (backed up first) — your clients and subscription URLs keep working.
+**Set up with the 233boy script by an earlier version?** Run `ownexit direct migrate` once. It keeps the existing UUID, keys, port and SNI, switches to ownexit's own service and removes the 233boy files (backed up first) — your clients and subscription URLs keep working.
 
 Step-by-step guide: [docs/manual/direct.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/manual/direct.md) (Chinese).
 
@@ -164,7 +164,7 @@ From 1.0.0 the command-line interface, configuration keys and on-disk formats ar
 
 - No real IP, password or key ever goes into this repository. There is no "edit the IP at the top of the script" step and no `--password` option. Passwords are typed interactively (or passed via `OWNEXIT_SSH_PASSWORD` for non-interactive use), submitted once per try, and never written to disk.
 - A wrong password is retried at most 3 times, and each try is submitted to the server only once, so you are unlikely to trip fail2ban. Failures end with `reason=bad-password`, `reason=password-disabled` or `reason=unreachable`.
-- The direct subscription endpoint is plain HTTP protected by a random path. Keep it stopped (`ownexit subctl stop`) except while importing, and use `ownexit direct --rotate-token` if a URL leaks, `--rotate-keys` if the node credentials leak.
+- The direct subscription endpoint is plain HTTP protected by a random path. Keep it stopped (`ownexit direct sub stop`) except while importing, and use `ownexit direct rotate-token` if a URL leaks, `ownexit direct rotate-keys` if the node credentials leak.
 - The relay only runs `systemd-socket-proxyd`; the Reality private key lives only on the exit server, in a mode-600 file. By default the exit's Reality port only accepts connections from the relay (an nftables table that starts and stops with the exit service).
 - Both setups download a pinned official sing-box release on each server and check the SHA-256 of both the archive and the binary; if a server cannot reach GitHub, your computer downloads and uploads it instead. Reality private keys are generated on the server and never leave it.
 
@@ -176,9 +176,9 @@ See [SECURITY.md](https://github.com/jakoes-wu/ownexit/blob/main/SECURITY.md) fo
 
 **Can I change the SSH port or user?** Direct: `--port`, `--user`. Relay: `--relay-port`, `--exit-port`; the relay setup requires root.
 
-**I manage several VPSes.** Pass `--host` to pick one. Without it, `ownexit direct` and `ownexit subctl` list the remembered servers and exit.
+**I manage several VPSes.** Pass `--host` to pick one. Without it, `ownexit direct` lists the remembered servers and exits.
 
-**How do I undo it?** Relay: `ownexit chain rollback`. Direct: `ownexit direct --uninstall` (keeps your SSH key login and any migration backup).
+**How do I undo it?** Relay: `ownexit chain rollback`. Direct: `ownexit direct uninstall` (keeps your SSH key login and any migration backup).
 
 **Where are my files?** Keys: `~/.ssh/ownexit/`. Configuration: `~/.config/ownexit/`. State and subscriptions: `~/.local/state/ownexit/`.
 

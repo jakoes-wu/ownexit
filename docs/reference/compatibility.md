@@ -27,6 +27,16 @@
 
 要移除的项先废弃：在至少一个次版本里继续可用，并在输出里提示替代写法，最早在下一个主版本移除。
 
+## 3a. 已废弃项
+
+下列写法照常可用，使用时在 stderr 提示替代写法；最早在 2.0 移除。
+
+| 已废弃 | 替代写法 | 废弃版本 |
+| ---- | ---- | ---- |
+| `ownexit direct --rotate-keys` / `--rotate-token` / `--add-device <名>` / `--remove-device <名>` / `--migrate` / `--uninstall` | `ownexit direct rotate-keys` / `rotate-token` / `add-device <名>` / `remove-device <名>` / `migrate` / `uninstall` | 1.5.0 |
+| `ownexit subctl start` / `stop` / `status` / `log` / `qr` / `devices` / `login` | `ownexit direct sub start` / `sub stop` / `status` / `log` / `qr` / `devices` / `login` | 1.5.0 |
+| `ownexit chain rehost-exit` | `ownexit chain migrate-exit --to <新 IP>`（同一台机器自动识别） | 1.5.0 |
+
 ## 4. 不承诺的内容
 
 以下内容可以在任何版本里改变：
@@ -47,6 +57,6 @@
 
 ## 6. 如何守住这些承诺
 
-- `scripts/check_interface.sh`（CI 的 Interface freeze 步骤，lint 与 bash 3.2 两个 job 都运行）自动比对下列清单与本目录的参考文档，不一致时 CI 失败：`ownexit` 子命令；direct / connect / subctl / doctor / multi / chain 的长参数；subctl / multi / chain 的子命令；链式 status 取值与其它命令输出行；connect 的 reason 取值；链配置键（并与配置解析代码对照）；链 state.env 键；直连 client.env 键；订阅文件名。
+- `scripts/check_interface.sh`（CI 的 Interface freeze 步骤，lint 与 bash 3.2 两个 job 都运行）自动比对下列清单与本目录的参考文档，不一致时 CI 失败：`ownexit` 子命令；direct / connect / subctl / doctor / multi / chain 的长参数；direct / subctl / multi / chain 的子命令；链式 status 取值与其它命令输出行；connect 的 reason 取值；链配置键（并与配置解析代码对照）；链 state.env 键；直连 client.env 键；订阅文件名。
 - 其余承诺（退出码、服务器路径与单元名、nft 表名、节点名与组名、multi 的输出与产物、doctor 的输出格式、conns 输出、环境变量、本机目录规则）由代码评审对照本目录人工核对。
 - 改动任何被承诺的接口时，同一个提交里必须更新本目录的参考文档与 CHANGELOG。

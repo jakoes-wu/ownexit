@@ -29,19 +29,18 @@ COMMANDS = {
 }
 
 # 帮助里的分组：新用户只需要认识“常用”三个；其余按需查。
-_GROUPS = (("common", ("direct", "chain", "doctor")), ("other", ("subctl", "multi", "connect")))
+# subctl（已并入 direct）与 connect（direct / chain init 自动调用）从 1.5.0 起不在帮助里列出，但照常可以转发。
+_GROUPS = (("common", ("direct", "chain", "doctor")), ("other", ("multi",)))
 
 _TEXT = {
     "zh": {
         "usage": "用法: ownexit <命令> [参数...]",
         "common": "常用:",
         "other": "其它:",
-        "direct": "把一台 VPS 部署成直连出口（第一次问一次 root 密码）",
+        "direct": "直连出口：up 部署 / sub start|stop / status / rotate-keys ...（第一次问一次 root 密码）",
         "chain": "中转 + 出口链：up 一步部署 / status / qr / verify / rollback ...",
         "doctor": "检查本机、服务器和链；--ip-check 体检出口 IP",
-        "subctl": "直连订阅服务的开关、状态、日志、二维码，或免密登录 VPS",
         "multi": "把多条链合成一份客户端配置",
-        "connect": "给一台服务器配免密 SSH（direct / chain 会自动调用）",
         "tail": "命令后面的参数原样交给对应脚本；用 `ownexit <命令> --help` 看它的参数。\n在终端里只敲 `ownexit`（不带参数）进入向导，一步步问清楚再部署。",
         "examples": "示例:",
     },
@@ -49,19 +48,17 @@ _TEXT = {
         "usage": "usage: ownexit <command> [arguments...]",
         "common": "common:",
         "other": "other:",
-        "direct": "deploy a VPS as your direct exit (asks the root password once)",
+        "direct": "direct exit: up (deploy) / sub start|stop / status / rotate-keys ... (asks the root password once)",
         "chain": "relay + exit chain: up (one-step deploy) / status / qr / verify / rollback ...",
         "doctor": "check this computer, your servers and chains; --ip-check tests the exit IP",
-        "subctl": "subscription service start / stop / status, service log, node QR code, or log in",
         "multi": "combine several chains into one client config",
-        "connect": "set up key-based SSH login to a server (called by direct / chain automatically)",
         "tail": "Arguments after the command go to the script unchanged; use `ownexit <command> --help` for its options.\nRun `ownexit` with no arguments in a terminal for a guided setup.",
         "examples": "examples:",
     },
 }
 
 _EXAMPLES = (
-    "ownexit direct --host 203.0.113.7",
+    "ownexit direct up --host 203.0.113.7",
     "ownexit chain up --relay 203.0.113.10 --exit 203.0.113.20",
     "ownexit chain status",
     "ownexit doctor --ip-check",
@@ -168,7 +165,7 @@ def _wizard():
     if mode == "1":
         host = _ask(t["vps"], _is_ipv4, t["bad_ip"])
         port = _ask_port(t["port"].format(host), t["bad_port"])
-        args = ["direct", "--host", host]
+        args = ["direct", "up", "--host", host]
         if port != "22":
             args += ["--port", port]
         return args

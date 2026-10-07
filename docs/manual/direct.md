@@ -43,15 +43,15 @@
 
 ```sh
 pipx install ownexit
-ownexit direct --host 203.0.113.7
+ownexit direct up --host 203.0.113.7
 ```
 
-SSH 端口不是 22 时加 `--port 2222`。本手册下文的命令按 git clone 的写法给出；用 pipx 安装时把 `./direct/setup_direct.sh` 换成 `ownexit direct`、`./direct/subctl` 换成 `ownexit subctl`，参数完全相同。
+SSH 端口不是 22 时加 `--port 2222`。本手册下文的命令按 git clone 的写法给出；用 pipx 安装时把 `./direct/setup_direct.sh` 换成 `ownexit direct`，子命令与参数完全相同。
 
 运行过程：
 
 1. **配免密**：第一次会问一次 VPS 的 root 密码（不回显）。密码错了可以再输，最多 3 次；之后全程用专用密钥登录，密钥在 `~/.ssh/ownexit/`。
-2. **检查系统并记住这台 VPS**：之后再运行 `setup_direct.sh` 或 `subctl` 不用再带 `--host`。
+2. **检查系统并记住这台 VPS**：之后再运行 `setup_direct.sh`（含 `status`、`sub stop` 等日常操作）不用再带 `--host`。
 3. **开启 BBR**，然后**安装 sing-box**：VPS 自己从 GitHub 下载固定版本的 sing-box 官方包并校验 SHA-256（VPS 访问不了 GitHub 时由你的电脑下载后上传），在 VPS 上生成 Reality 密钥、UUID 和 short id，写好 `ownexit-direct` 服务并启动。全程不用回答问题。伪装域名默认 `www.amazon.com`、代理端口默认在 20000～59999 随机，想自己指定加 `--sni <域名>`、`--proxy-port <端口>`。
    这一步由 VPS 上的一个 systemd 临时任务执行：中途网络断开不影响它，VPS 断电重启后再运行一次本命令会从中断处接着做完。
 4. **生成订阅并验证**：从 VPS 读回节点参数，在本地渲染四种订阅，上传到 VPS 并起一个只读订阅服务，然后逐项验证。本机装了 `qrencode` 时，最后还会在终端显示节点二维码。
@@ -109,33 +109,34 @@ curl -x http://127.0.0.1:7890 https://ipinfo.io   # 另开终端验证
 
 ## 6. 日常维护
 
-部署时加 `--sub-ttl 30m`（例：`ownexit direct --host <IP> --sub-ttl 30m`），订阅服务会在 30 分钟后自动关闭；不加则一直开着，导入后手动 `subctl stop`。自动关闭的计时只在当前开机周期内有效：VPS 重启后订阅服务会按开机自启重新起来并一直开着，需要再 `subctl stop` 或 `subctl start --ttl …`。
+部署时加 `--sub-ttl 30m`（例：`ownexit direct up --host <IP> --sub-ttl 30m`），订阅服务会在 30 分钟后自动关闭；不加则一直开着，导入后手动 `sub stop`。自动关闭的计时只在当前开机周期内有效：VPS 重启后订阅服务会按开机自启重新起来并一直开着，需要再 `sub stop` 或 `sub start --ttl …`。
 
 ```sh
-./direct/subctl status      # 代理服务和订阅服务的状态
-./direct/subctl log         # 代理服务最近 100 行日志（log 300 看 300 行）
-./direct/subctl qr          # 在终端显示节点二维码（需要 qrencode）
-./direct/subctl stop        # 所有设备导入后关掉订阅服务（推荐常态）
-./direct/subctl start       # 给新设备导入前临时打开，用完再 stop
-./direct/subctl start --ttl 30m   # 打开并在 30 分钟后自动关闭，不用记得 stop
-./direct/subctl             # 免密登录这台 VPS
-./direct/setup_direct.sh --rotate-token   # 怀疑订阅链接泄露时换一个新地址
-./direct/setup_direct.sh --rotate-keys    # 怀疑节点凭据泄露时换一套 UUID / Reality 密钥 / short id
-./direct/setup_direct.sh --add-device phone     # 给一台设备单独一套凭据和订阅地址
-./direct/setup_direct.sh --remove-device phone  # 吊销这台设备，它的订阅地址同时删除
-./direct/subctl devices                   # 列出设备与各自的订阅地址
-./direct/setup_direct.sh --uninstall      # 卸载 VPS 上的代理服务和订阅服务
+./direct/setup_direct.sh status            # 代理服务和订阅服务的状态
+./direct/setup_direct.sh log               # 代理服务最近 100 行日志（log 300 看 300 行）
+./direct/setup_direct.sh qr                # 在终端显示节点二维码（需要 qrencode）
+./direct/setup_direct.sh sub stop          # 所有设备导入后关掉订阅服务（推荐常态）
+./direct/setup_direct.sh sub start         # 给新设备导入前临时打开，用完再 sub stop
+./direct/setup_direct.sh sub start --ttl 30m   # 打开并在 30 分钟后自动关闭，不用记得 stop
+./direct/setup_direct.sh login             # 免密登录这台 VPS
+./direct/setup_direct.sh rotate-token      # 怀疑订阅链接泄露时换一个新地址
+./direct/setup_direct.sh rotate-keys       # 怀疑节点凭据泄露时换一套 UUID / Reality 密钥 / short id
+./direct/setup_direct.sh add-device phone      # 给一台设备单独一套凭据和订阅地址
+./direct/setup_direct.sh remove-device phone   # 吊销这台设备，它的订阅地址同时删除
+./direct/setup_direct.sh devices           # 列出设备与各自的订阅地址
+./direct/setup_direct.sh uninstall         # 卸载 VPS 上的代理服务和订阅服务
 ./direct/doctor.sh                        # 诊断本机与服务器，逐项给出处理办法（ownexit doctor）
 ./direct/doctor.sh --ip-check             # 另在 VPS 上体检出口 IP（AI 服务、流媒体、常用网站）
 ./direct/doctor.sh --scan-sni             # 在 VPS 上逐个测试候选伪装域名能否真正用于 Reality
 ```
 
 - 订阅服务是明文 HTTP 的公网端口，平时保持关闭，只在导入时临时打开。
-- 换一台 VPS：对新机器运行 `setup_direct.sh --host <新IP>`，再到客户端更新订阅。记住了多台 VPS 时，`subctl` 和 `setup_direct.sh` 不带 `--host` 会列出可选目标并退出。
-- 改伪装域名或代理端口：`setup_direct.sh --sni <域名>` 或 `--proxy-port <端口>`，UUID 和密钥不变，改完客户端要重新拉一次订阅。不是每个 HTTPS 站点都能当伪装域名：实测 `www.amazon.com`（默认）、`www.apple.com` 可用，`www.microsoft.com` 不可用（客户端握手被服务器判为无效）；换域名后先用一台设备确认能连上，连不上就换回。正在通过这条隧道上网时改握手参数会把自己锁在外面：先切到别的网络，再改。
-- 多设备：`--add-device <名字>` 给一台设备单独一个 UUID 和一组订阅地址（交付信息里单独列出，只发给这台设备），`--remove-device <名字>` 吊销它，它立即连不上、订阅地址也被删除，其它设备不受影响。现有的那套凭据就是 `default`，订阅地址不变。设备名只允许小写字母、数字和 `-`，最多 32 个字符，每台 VPS 最多 32 台（含 default）。`ownexit subctl devices` 列出设备与订阅地址。换了电脑后本机没有某台设备的订阅记录时，重跑一次 `setup_direct.sh` 会补生成；旧电脑上生成的设备订阅目录不会被自动删除。有设备后请保持本机为 0.7.0 及以上：旧版本改参数时会丢掉设备。
-- 换凭据：`setup_direct.sh --rotate-keys` 在 VPS 上重新生成全部设备的 UUID、Reality 密钥对和 short id，端口、SNI、订阅地址不变；新配置起不来会自动恢复原配置。旧节点立刻失效，所有设备都要重新拉订阅。可以和 `--rotate-token` 一起用，同时换掉订阅地址；不能和 `--migrate` / `--uninstall` 同用（233boy 旧版先迁移再换）。中途断开时重跑同一条命令即可，已经换过的不会再换一次。
-- 卸载：`setup_direct.sh --uninstall` 删除 VPS 上的 `ownexit-direct` 服务、订阅服务和相关目录；保留 SSH 免密、记住的目标、BBR 设置和迁移备份。
+- 旧写法（`./direct/subctl …`、`--rotate-keys` / `--rotate-token` / `--add-device` / `--remove-device` / `--migrate` / `--uninstall`）在 1.x 里照常可用，会提示对应的新写法，最早 2.0 移除。
+- 换一台 VPS：对新机器运行 `setup_direct.sh up --host <新IP>`，再到客户端更新订阅。记住了多台 VPS 时，`setup_direct.sh` 不带 `--host` 会列出可选目标并退出（日常操作也一样）。
+- 改伪装域名或代理端口：`setup_direct.sh up --sni <域名>` 或 `up --proxy-port <端口>`，UUID 和密钥不变，改完客户端要重新拉一次订阅。不是每个 HTTPS 站点都能当伪装域名：实测 `www.amazon.com`（默认）、`www.apple.com` 可用，`www.microsoft.com` 不可用（客户端握手被服务器判为无效）；换域名后先用一台设备确认能连上，连不上就换回。正在通过这条隧道上网时改握手参数会把自己锁在外面：先切到别的网络，再改。
+- 多设备：`add-device <名字>` 给一台设备单独一个 UUID 和一组订阅地址（交付信息里单独列出，只发给这台设备），`remove-device <名字>` 吊销它，它立即连不上、订阅地址也被删除，其它设备不受影响。现有的那套凭据就是 `default`，订阅地址不变。设备名只允许小写字母、数字和 `-`，最多 32 个字符，每台 VPS 最多 32 台（含 default）。`ownexit direct devices` 列出设备与订阅地址。换了电脑后本机没有某台设备的订阅记录时，重跑一次 `setup_direct.sh` 会补生成；旧电脑上生成的设备订阅目录不会被自动删除。有设备后请保持本机为 0.7.0 及以上：旧版本改参数时会丢掉设备。
+- 换凭据：`setup_direct.sh rotate-keys` 在 VPS 上重新生成全部设备的 UUID、Reality 密钥对和 short id，端口、SNI、订阅地址不变；新配置起不来会自动恢复原配置。旧节点立刻失效，所有设备都要重新拉订阅。可以和 `rotate-token` 一起用（`rotate-keys rotate-token`），同时换掉订阅地址；不能和 `migrate` / `uninstall` 同用（233boy 旧版先迁移再换）。中途断开时重跑同一条命令即可，已经换过的不会再换一次。
+- 卸载：`setup_direct.sh uninstall` 删除 VPS 上的 `ownexit-direct` 服务、订阅服务和相关目录；保留 SSH 免密、记住的目标、BBR 设置和迁移备份。
 - 这台 VPS 同时是链式部署的中转机时，直连新装、迁移、改参数、卸载之后，按脚本提示运行 `ownexit chain --id <名字> rebaseline`。
 - 重要文件都在本机仓库外：密钥在 `~/.ssh/ownexit/`，目标配置在 `~/.config/ownexit/direct/`，订阅 TOKEN 在 `~/.local/state/ownexit/direct/`。
 
@@ -149,9 +150,9 @@ curl -x http://127.0.0.1:7890 https://ipinfo.io   # 另开终端验证
 | `reason=password-disabled` | 服务器关闭了密码登录 | 在控制台开启密码登录，或手工把 `~/.ssh/ownexit/` 下对应的 `.pub` 内容加进 VPS 的 `~/.ssh/authorized_keys` |
 | `reason=unreachable` | IP、SSH 端口不对，或安全组没放行 | 核对 IP 和端口；SSH 本身连不上时用服务商的网页终端（VNC）排查 |
 | 公钥推送成功但免密仍失败 | 服务商模板把 sshd 的公钥认证关了 | `connect_to.sh` 会自动把 `PubkeyAuthentication no` 改回 `yes` 并重启 sshd（需 root）；仍失败就在网页终端里手工改 |
-| 客户端能连上但上不了网 | 代理端口没放行，或 SNI 域名不通 | 检查服务商安全组；运行 `subctl log` 看日志，必要时用 `--sni` / `--proxy-port` 换 SNI 或端口 |
-| 提示“服务器上是用 233boy 脚本装的旧版”（退出码 2） | 这台 VPS 是用旧版 ownexit（233boy 脚本）部署的 | 运行 `setup_direct.sh --migrate`，见第 9 节 |
-| 提示“上次未完成的操作恢复失败” | 迁移等操作中途 VPS 断电，恢复时新服务也起不来 | 按提示看 `subctl log`；迁移备份在 `/var/backups/ownexit-direct/` |
+| 客户端能连上但上不了网 | 代理端口没放行，或 SNI 域名不通 | 检查服务商安全组；运行 `setup_direct.sh log` 看日志，必要时用 `up --sni` / `up --proxy-port` 换 SNI 或端口 |
+| 提示“服务器上是用 233boy 脚本装的旧版”（退出码 2） | 这台 VPS 是用旧版 ownexit（233boy 脚本）部署的 | 运行 `setup_direct.sh migrate`，见第 9 节 |
+| 提示“上次未完成的操作恢复失败” | 迁移等操作中途 VPS 断电，恢复时新服务也起不来 | 按提示看 `setup_direct.sh log`；迁移备份在 `/var/backups/ownexit-direct/` |
 | 国内网站也走了代理 | 客户端的 GeoIP / GeoSite 数据库没下载完 | 在客户端设置里手动更新一次数据库 |
 | 测试端口时“秒通”或结果互相矛盾 | 本机开着 TUN，所有连接被本地代理接管 | 关掉 TUN 再测，或让 VPS 的 IP 不经过 Clash（见 [让指定 IP 不走 Clash Verge 的代理](clash-direct-ips.md)） |
 | SSH 时刷 `setlocale: LC_ALL: cannot change locale` | 本机把中文 locale 转发给了 VPS | 无害；本仓库脚本已强制发送 `C.UTF-8` |
@@ -169,7 +170,7 @@ curl -x http://127.0.0.1:7890 https://ipinfo.io   # 另开终端验证
 ownexit 0.3 及更早的版本用第三方脚本 233boy/sing-box 安装 sing-box。新版检测到这种安装时会停下来（退出码 2），服务器不做任何改动。运行一次：
 
 ```sh
-./direct/setup_direct.sh --migrate
+./direct/setup_direct.sh migrate
 ```
 
 它会：
@@ -180,5 +181,5 @@ ownexit 0.3 及更早的版本用第三方脚本 233boy/sing-box 安装 sing-box
 4. 停掉旧服务、启动新服务（代理中断约 1～3 秒）；新服务起不来就自动回到旧服务。
 5. 确认新服务正常后删除 233boy 的文件（含 `sb` 命令和 `.bashrc` 里的两行 alias）。
 
-客户端和订阅链接都不用动。迁移后原来用 `sb` 做的事改用 `subctl log`、`subctl qr`、`setup_direct.sh --sni / --proxy-port`。
+客户端和订阅链接都不用动。迁移后原来用 `sb` 做的事改用 `setup_direct.sh log`、`setup_direct.sh qr`、`setup_direct.sh up --sni / --proxy-port`。
 

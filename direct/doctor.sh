@@ -546,22 +546,22 @@ check_direct() {
       if [[ "${active}" == active && "${listening}" == yes ]]; then
         ok "直连 ${label} ownexit-direct 运行中，代理端口 ${pport} 在监听"
       else
-        fail "直连 ${label} ownexit-direct 状态=${active:-未知}，代理端口 ${pport:-未知} 监听=${listening:-未知}" "ownexit subctl --host ${host} log 查看原因，或重跑 ownexit direct 修复"
+        fail "直连 ${label} ownexit-direct 状态=${active:-未知}，代理端口 ${pport:-未知} 监听=${listening:-未知}" "ownexit direct --host ${host} log 查看原因，或重跑 ownexit direct up 修复"
       fi
       ;;
     legacy)
       if [[ "${active}" == active ]]; then
-        warn "直连 ${label} 运行的是 233boy 旧版" "ownexit direct --host ${host} --migrate 换成本项目的服务（参数不变）"
+        warn "直连 ${label} 运行的是 233boy 旧版" "ownexit direct --host ${host} migrate 换成本项目的服务（参数不变）"
       else
         fail "直连 ${label} 233boy 旧版的服务没有运行（状态=${active:-未知}）" "在 VPS 上用 sb 恢复，或迁移 / 重新部署"
       fi
       ;;
     none) fail "直连 ${label} 没有安装代理服务" "ownexit direct --host ${host}" ;;
-    *) fail "直连 ${label} 无法读取服务状态" "ownexit subctl --host ${host} status" ;;
+    *) fail "直连 ${label} 无法读取服务状态" "ownexit direct --host ${host} status" ;;
   esac
   # D4
   if [[ "$(printf '%s\n' "${out}" | kv_get /dev/stdin SUB_ACTIVE)" == active ]]; then
-    warn "直连 ${label} 订阅服务开着（明文 HTTP 公网端口）" "所有设备导入后运行 ownexit subctl --host ${host} stop"
+    warn "直连 ${label} 订阅服务开着（明文 HTTP 公网端口）" "所有设备导入后运行 ownexit direct --host ${host} sub stop"
   else
     ok "直连 ${label} 订阅服务已关闭"
   fi

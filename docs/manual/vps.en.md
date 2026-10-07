@@ -135,7 +135,7 @@ Put what you wrote down into the commands (the IPs below are examples):
 
 ```sh
 # Direct: one server
-ownexit direct --host 203.0.113.7               # add --port 2222 if SSH is not on 22
+ownexit direct up --host 203.0.113.7            # add --port 2222 if SSH is not on 22
 
 # Relay: relay + exit
 ownexit chain init --relay 203.0.113.10 --exit 203.0.113.20   # add --relay-port / --exit-port if not 22

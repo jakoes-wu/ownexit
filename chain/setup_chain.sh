@@ -8,8 +8,10 @@
 #   - 连接治理命令（conns/kick/ban/unban/banlist）要求链已 deploy；kick 依赖中转内核支持 ss -K，
 #     ban 依赖中转 cgroup v2 + systemd IPAddressDeny=（BPF），二者实测于 Debian 12 / systemd 252。
 #   - rebaseline 要求链已 deploy；只允许配置里 RELAY_COHOSTS_SINGBOX 一键与 state 不同（由它自己改写）。
-#   - rehost-exit 要求链已 deploy、config 已改好新 EXIT_HOST / EXPECTED_EXIT_IPV4、known_hosts 已有新 IP 的
-#     ed25519 条目，且新 IP 与 state 的主机指纹一致（同一台出口机）。
+#   - rehost-exit（已废弃，改用 migrate-exit）要求链已 deploy、config 已改好新 EXIT_HOST / EXPECTED_EXIT_IPV4、
+#     known_hosts 已有新 IP 的 ed25519 条目，且新 IP 与 state 的主机指纹一致（同一台出口机）。
+#   - migrate-exit 遇同一台出口机（新地址的 ed25519 主机指纹等于 state）时自动原地切换：经中转用当前出口机私钥探测，
+#     自己登记 known_hosts、改写配置，不要求旧 IP 可达；SSH 端口必须不变。
 #   - migrate-exit 要求链已 deploy 且健康、旧出口机仍可经中转登录；新出口机由本命令配免密（非终端时需要
 #     OWNEXIT_SSH_PASSWORD），且与中转同架构、没有本链的文件。
 #   - up = init + deploy + 二维码，一条命令从零到可用，可重跑；本机只有一条链时所有子命令都可以省略 --id。
@@ -192,7 +194,7 @@ usage() {
   $(basename "${SCRIPT_PATH}") --config <绝对路径> ban <ipv4|ipv4/prefix>
   $(basename "${SCRIPT_PATH}") --config <绝对路径> unban <ipv4|ipv4/prefix>
   $(basename "${SCRIPT_PATH}") --config <绝对路径> banlist
-  $(basename "${SCRIPT_PATH}") --config <绝对路径> rehost-exit
+  $(basename "${SCRIPT_PATH}") --config <绝对路径> rehost-exit          （已废弃，改用 migrate-exit）
   $(basename "${SCRIPT_PATH}") --config <绝对路径> rebaseline
   $(basename "${SCRIPT_PATH}") --config <绝对路径> rotate-keys
   $(basename "${SCRIPT_PATH}") --config <绝对路径> add-device <名字>
@@ -225,15 +227,16 @@ usage() {
   rotate-keys  在出口机上重新生成全部设备的 UUID 与 Reality 密钥 / short id，重启出口机 sing-box，更新节点文件
                与 state，最后自动完整 verify；中转、端口、部署 ID 不变。所有客户端都要重新导入
                （多链聚合需重新 render）。中途失败直接重跑同一条命令收敛。
-  （出口机变了，先用 migrate-exit；同一台机器只换了 IP 时它会提示改用 rehost-exit。）
-  rehost-exit  出口机同机换 IP：先在 config 改 EXIT_HOST / EXPECTED_EXIT_IPV4，再原地迁移
-             中转转发目标与两端 owner、本地 state，最后自动完整 verify。要求新 IP 的主机指纹与 state
-             一致（同一台机）；UUID、密钥、端口、客户端订阅都不变；中途失败可重跑，已迁移时输出 noop。
-  migrate-exit 把出口机迁到另一台机器：给新机器配免密（第一次问一次 root 密码），沿用原配置（UUID、密钥、
-               全部设备）在新机器上起服务，中转转发目标切过去，提交 state 后自动清理旧出口机上本链的服务与文件，
-               最后完整 verify。客户端不用重新导入。旧出口机必须还能登录（私钥只在它上面）。中途失败重跑同一条
-               命令收敛；中转切换前可用 --abort 放弃；旧机器永久失联时用 --abandon-cleanup 放弃清理。
-               多条链共用同一台出口机时逐条迁移，全部迁完后重新 multi render。
+  migrate-exit 出口机变了（换了 IP 或换了机器）都用它，客户端不用重新导入：
+               - 新地址还是同一台机器（只是服务商换了 IP）：自动识别，登记新 IP 的主机密钥、改写配置，原地切换
+                 中转转发目标与本地 state，最后完整 verify。旧 IP 连不上也行；SSH 端口要保持不变。
+               - 换了一台机器：给新机器配免密（第一次问一次 root 密码），沿用原配置（UUID、密钥、全部设备）在新机器
+                 上起服务，中转转发目标切过去，提交 state 后自动清理旧出口机上本链的服务与文件，最后完整 verify。
+                 旧出口机必须还能登录（私钥只在它上面）；中转切换前可用 --abort 放弃；旧机器永久失联时用
+                 --abandon-cleanup 放弃清理。多条链共用同一台出口机时逐条迁移，全部迁完后重新 multi render。
+               中途失败重跑同一条命令收敛；已经切换完成时输出 rehost=noop。
+  rehost-exit  已废弃（仍可用，最早 2.0 移除）：同机换 IP 的旧写法，要先手改 config 的 EXIT_HOST /
+               EXPECTED_EXIT_IPV4 并补 known_hosts；改用 migrate-exit --to <新 IP>。
   rebaseline   中转机上的既有 sing-box 合法变化后（233boy 迁移为 ownexit-direct、直连改参数 / 新装 / 卸载），
                按现场重新判定 RELAY_COHOSTS_SINGBOX 并重新登记基线；凭据、端口、node.txt 不变
   rollback   先全量预校验，再按中转 -> 出口机顺序事务拆除专属资源。
@@ -286,7 +289,6 @@ usage() {
   $(basename "${SCRIPT_PATH}") --config "${HOME}/.config/ownexit/chains/demo.env" ban 198.51.100.0/24
   $(basename "${SCRIPT_PATH}") --config "${HOME}/.config/ownexit/chains/demo.env" unban 203.0.113.7
   $(basename "${SCRIPT_PATH}") --config "${HOME}/.config/ownexit/chains/demo.env" banlist
-  $(basename "${SCRIPT_PATH}") --config "${HOME}/.config/ownexit/chains/demo.env" rehost-exit
   $(basename "${SCRIPT_PATH}") --id main migrate-exit --to 203.0.113.30
   $(basename "${SCRIPT_PATH}") --id main migrate-exit --to 203.0.113.30 --to-port 2222
   $(basename "${SCRIPT_PATH}") --id main migrate-exit --abort
@@ -6421,7 +6423,7 @@ load_state_for_rehost() {
   # 与 parse_config 同一算法重算旧配置摘要；只有其余 10 个键都与 state 一致时，它才会等于 state 里的 CONFIG_SHA256。
   CONFIG_SHA256="$(normalized_config | sha256_text)"
   if probe_state_file "${STATE_FILE}"; then rc=0; else rc="$?"; fi
-  [[ "${rc}" -eq 0 ]] || die 2 '除 EXIT_HOST / EXPECTED_EXIT_IPV4 外还有配置键与 state 不一致；rehost-exit 只迁移这两个键'
+  [[ "${rc}" -eq 0 ]] || die 2 '除 EXIT_HOST / EXPECTED_EXIT_IPV4 外还有配置键与 state 不一致；同机切换只迁移这两个键'
   REHOST_OLD_EXIT_HOST="${old_host}"
   REHOST_OLD_EXPECTED_EXIT_IPV4="${old_exit}"
   REHOST_OLD_CONFIG_SHA256="${CONFIG_SHA256}"
@@ -6620,8 +6622,16 @@ rehost_exit_chain() {
     *) die 5 '无法安全取得 chain lock' ;;
   esac
   migrate_gate
+  rehost_exit_body
+}
+
+# 同机换 IP 的原地切换主体：rehost-exit 与 migrate-exit 的同机分支（migrate_rehost_same_host、续跑分支）共用。
+# 调用方负责取锁；进入时配置里的 EXIT_HOST / EXPECTED_EXIT_IPV4 已是新值。state 已绑定当前配置时打印 rehost=noop 并返回；
+# 否则按“出口机 owner → 中转 → 本地 state → 完整 verify”收敛，每一步都可重跑。报错文字不写命令名：两条入口都会走到这里。
+rehost_exit_body() {
+  local rc
   require_local_dependencies
-  [[ ! -e "${JOURNAL_FILE}" && ! -L "${JOURNAL_FILE}" ]] || die 5 '存在 incomplete transaction，rehost-exit 拒绝'
+  [[ ! -e "${JOURNAL_FILE}" && ! -L "${JOURNAL_FILE}" ]] || die 5 '存在 incomplete transaction，拒绝同机切换'
   [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 'chain 尚未部署'
   load_state_for_rehost
   if [[ "${REHOST_IS_NOOP}" == 1 ]]; then
@@ -6650,7 +6660,143 @@ rehost_exit_chain() {
   commit_rehost_state
   ensure_local_assets_match_state
   full_verify
-  log_info "rehost-exit 通过；chain=${CHAIN_ID} elapsed=$(elapsed_seconds)s"
+  log_info "同机切换通过；chain=${CHAIN_ID} elapsed=$(elapsed_seconds)s"
+}
+
+# ---------- migrate-exit 遇同一台出口机：自动原地切换（docs/feature/feature-grammar-v15.md §5.1.3） ----------
+# 服务商给同一台出口机换了 IP 时，用户只需 migrate-exit --to <新 IP>：本组函数确认新地址确实是同一台机器
+# （ed25519 主机指纹等于 state 记录值），登记新 IP 的主机密钥、改写配置的 EXIT_HOST / EXPECTED_EXIT_IPV4，
+# 再走 rehost_exit_body。旧 IP 是否可达都不影响；改写配置后中断，重跑同一条命令走续跑分支。
+
+# 同机探测的结果：公钥一行（"ssh-ed25519 <base64>"）与出口机上测到的公网 IPv4（可能为空）。
+MIGRATE_PROBE_PUB=''
+MIGRATE_PROBE_EXIT_IP=''
+
+# 同机切换只改地址：SSH 端口必须不变（rehost 只迁移 EXIT_HOST / EXPECTED_EXIT_IPV4 两个键，端口变了 state 对不上）。
+migrate_same_host_port_check() {
+  [[ "${MIGRATE_TO_PORT_GIVEN}" != 1 || "${MIGRATE_TO_PORT}" == "${EXIT_SSH_PORT}" ]] \
+    || die 2 "新地址 ${MIGRATE_TO} 是同一台出口机，SSH 端口要保持 ${EXIT_SSH_PORT}（同机切换只改地址）"
+}
+
+# 经中转用当前出口机私钥连 --to，在同一条会话里取协商到的主机指纹、主机公钥与公网 IP。
+# 返回 0 = 同一台（并填好 MIGRATE_PROBE_*）；1 = 指纹不同（换了机器）；2 = 取不到指纹（连不上）。
+# 目标段关掉主机密钥校验是有意的：新 IP 还没进 known_hosts。安全性靠“只有这条会话的指纹等于 state 值才采用它的输出”——
+# 指纹是公钥摘要，中间人伪造不了；公钥再用 ssh-keygen 复核摘要后才会写进 known_hosts。
+# 不复用 negotiated_hostkey_fingerprint：它要求命令成功，而这里 curl 失败也要先拿到指纹。
+# 也不走 run_managed_external：它只接受 ssh_config / ssh_direct_config 两份受管配置。
+migrate_probe_same_host() {
+  local port conf log out fp pub_file pub_fp
+  port="${EXIT_SSH_PORT}"
+  [[ "${MIGRATE_TO_PORT_GIVEN}" != 1 ]] || port="${MIGRATE_TO_PORT}"
+  render_ssh_config
+  conf="${OP_TMP}/ssh-probe-same-host.${LOCK_OPERATION_ID}.conf"
+  log="${OP_TMP}/ssh-probe-same-host.${LOCK_OPERATION_ID}.log"
+  out="${OP_TMP}/ssh-probe-same-host.${LOCK_OPERATION_ID}.out"
+  pub_file="${OP_TMP}/ssh-probe-same-host.${LOCK_OPERATION_ID}.pub"
+  rm -f "${conf}" "${log}" "${out}" "${pub_file}" || die 1 '同机探测临时文件清理失败'
+  # ssh 配置按“先匹配到的值生效”：chain-probe 段必须写在 Host * 之前，否则 Host * 的严格校验会盖掉这里的宽松项；
+  # 后面原样接上受管配置里的 chain-relay 段与 Host * 加固段，中转那一跳仍按 known_hosts 严格校验。
+  {
+    printf 'Host chain-probe\n'
+    printf '    HostName %s\n' "${MIGRATE_TO}"
+    printf '    User root\n'
+    printf '    Port %s\n' "${port}"
+    printf '    IdentityFile %s\n' "${EXIT_SSH_KEY}"
+    printf '    ProxyJump chain-relay\n'
+    printf '    StrictHostKeyChecking no\n'
+    printf '    UserKnownHostsFile /dev/null\n'
+    printf '    GlobalKnownHostsFile /dev/null\n'
+    printf '    UpdateHostKeys no\n\n'
+    sed -n '/^Host chain-relay/,$p' "${SSH_CONFIG}"
+  } > "${conf}" || die 1 '同机探测 ssh 配置写入失败'
+  chmod 600 "${conf}" || die 1 '同机探测 ssh 配置权限设置失败'
+  # 不看退出码：远端 curl 失败也要拿到指纹与公钥；连不上时日志里没有 Server host key 行，下面按“连不上”处理。
+  ssh -vv -E "${log}" -n -F "${conf}" chain-probe \
+    'cat /etc/ssh/ssh_host_ed25519_key.pub; echo ---ownexit---; curl -4 -fsS -m 15 ipinfo.io/ip || true' > "${out}" 2>/dev/null || true
+  fp="$(awk '$2 == "Server" && $3 == "host" && $4 == "key:" && $5 == "ssh-ed25519" && $6 ~ /^SHA256:/ {fingerprint=$6; count++} END {if (count != 1) exit 1; print fingerprint}' "${log}" 2>/dev/null)" || fp=''
+  fp="${fp%$'\r'}"
+  if [[ ! "${fp}" =~ ^SHA256:[A-Za-z0-9+/]+$ ]]; then
+    rm -f "${conf}" "${log}" "${out}" || true
+    return 2
+  fi
+  if [[ "${fp}" != "${EXIT_HOSTKEY_FINGERPRINT}" ]]; then
+    rm -f "${conf}" "${log}" "${out}" || true
+    return 1
+  fi
+  awk '$0 == "---ownexit---" {exit} $1 == "ssh-ed25519" && $2 ~ /^[A-Za-z0-9+\/]+=*$/ {print $1, $2; exit}' "${out}" > "${pub_file}" || die 1 '同机探测公钥解析失败'
+  [[ -s "${pub_file}" ]] || die 3 "新地址 ${MIGRATE_TO} 指纹相同，但读不到 /etc/ssh/ssh_host_ed25519_key.pub"
+  pub_fp="$(ssh-keygen -lf "${pub_file}" -E sha256 2>/dev/null | awk '{print $2; exit}')" || pub_fp=''
+  [[ "${pub_fp}" == "${EXIT_HOSTKEY_FINGERPRINT}" ]] || die 3 "新地址 ${MIGRATE_TO} 返回的主机公钥摘要与协商指纹不符，拒绝登记"
+  MIGRATE_PROBE_PUB="$(cat "${pub_file}")"
+  MIGRATE_PROBE_EXIT_IP="$(awk 'f {print} $0 == "---ownexit---" {f=1}' "${out}" | tr -d '[:space:]')"
+  rm -f "${conf}" "${log}" "${out}" "${pub_file}" || true
+  log_info "[migrate] 新地址 ${MIGRATE_TO} 与当前出口机是同一台（指纹 ${EXIT_HOSTKEY_FINGERPRINT}）"
+  return 0
+}
+
+# 把 MIGRATE_PROBE_PUB 登记进 ~/.ssh/known_hosts（端口不是 22 时条目写 [IP]:端口）。
+# 只看 ssh-ed25519 行：OpenSSH 会顺手记 rsa / ecdsa（见 init_probe_ed25519 上方注释），那些行与本链无关，
+# 拿它们和 ed25519 指纹比会误判“不符”。已有相同的 ed25519 条目不重复追加；已有不同的 ed25519 条目拒绝覆盖，交人核对。
+migrate_register_hostkey() {
+  local port entry line_file fp has_ed25519 type key
+  port="${EXIT_SSH_PORT}"
+  if [[ "${port}" == 22 ]]; then entry="${MIGRATE_TO}"; else entry="[${MIGRATE_TO}]:${port}"; fi
+  line_file="${OP_TMP}/known-hosts-check.${LOCK_OPERATION_ID}.pub"
+  has_ed25519=0
+  while read -r _ type key; do
+    [[ "${type}" == ssh-ed25519 ]] || continue
+    has_ed25519=1
+    printf '%s %s\n' "${type}" "${key}" > "${line_file}" || die 1 'known_hosts 比对临时文件写入失败'
+    fp="$(ssh-keygen -lf "${line_file}" -E sha256 2>/dev/null | awk '{print $2; exit}')" || fp=''
+    rm -f "${line_file}" || true
+    if [[ "${fp}" == "${EXIT_HOSTKEY_FINGERPRINT}" ]]; then
+      log_info "[migrate] known_hosts 已有 ${entry} 的 ed25519 主机密钥，不重复登记"
+      return 0
+    fi
+  done < <(ssh-keygen -F "${entry}" -f "${HOME}/.ssh/known_hosts" 2>/dev/null | awk '$1 !~ /^#/' || true)
+  [[ "${has_ed25519}" == 0 ]] || die 3 "known_hosts 里 ${entry} 的 ed25519 主机密钥与该出口机不符，请人工核对"
+  [[ "${MIGRATE_PROBE_PUB}" == ssh-ed25519\ * ]] || die 1 '内部错误：没有可登记的主机公钥'
+  printf '%s %s\n' "${entry}" "${MIGRATE_PROBE_PUB}" >> "${HOME}/.ssh/known_hosts" || die 1 'known_hosts 写入失败'
+  log_info "[migrate] 已登记 ${entry} 的 ed25519 主机密钥"
+}
+
+# rc=0 时的同机路径：确认出口 IP、登记主机密钥、备份并改写配置，再原地切换。调用方已持有全局锁与链锁。
+# 失败边界：改写配置之前失败，配置与 state 都没动（known_hosts 可能已追加正确条目，无害）；之后失败，重跑同一条
+# migrate-exit --to 走续跑分支（配置已改、state 未改）。
+migrate_rehost_same_host() {
+  local answer backup tmp key count
+  log_info "[migrate] 新地址 ${MIGRATE_TO} 与当前出口机是同一台，原地切换（不换凭据，客户端不用动）"
+  migrate_same_host_port_check
+  is_ipv4 "${MIGRATE_PROBE_EXIT_IP}" || die 3 "无法在出口机上取得新的公网 IPv4（需要 curl 能访问 ipinfo.io）；读到：${MIGRATE_PROBE_EXIT_IP:-空}；配置未改动"
+  log_info "[migrate] 出口机经新地址测到的公网 IP：${MIGRATE_PROBE_EXIT_IP}"
+  if [[ -t 0 ]]; then
+    read -r -p "确认切换后客户端经这条链出去的 IP 应当是 ${MIGRATE_PROBE_EXIT_IP}？[y/N] " answer
+    [[ "${answer}" == y || "${answer}" == Y ]] || die 2 '未确认出口 IP，配置与 state 未改动'
+  fi
+  migrate_register_hostkey
+  for key in EXIT_HOST EXPECTED_EXIT_IPV4; do
+    count="$(awk -v k="${key}=" 'index($0, k) == 1 {n++} END {print n + 0}' "${CONFIG_PATH}")"
+    [[ "${count}" == 1 ]] || die 2 "配置文件中 ${key}= 不是恰好 1 行：${CONFIG_PATH}"
+  done
+  backup="${CONFIG_PATH}.bak.$(date '+%Y%m%d_%H%M%S')"
+  [[ ! -e "${backup}" && ! -L "${backup}" ]] || die 1 "配置备份路径碰撞：${backup}"
+  ( set -o noclobber; cat "${CONFIG_PATH}" > "${backup}" ) || die 1 '配置备份失败'
+  chmod 600 "${backup}" || die 1 '配置备份权限设置失败'
+  # 临时文件 + mv 原子替换：中途被打断时配置要么是旧版、要么是新版，不会是半份。
+  tmp="$(dirname "${CONFIG_PATH}")/.$(basename "${CONFIG_PATH}").rehost.$$.tmp"
+  awk -v h="EXIT_HOST=${MIGRATE_TO}" -v e="EXPECTED_EXIT_IPV4=${MIGRATE_PROBE_EXIT_IP}" '{
+    if (index($0, "EXIT_HOST=") == 1) print h
+    else if (index($0, "EXPECTED_EXIT_IPV4=") == 1) print e
+    else print
+  }' "${CONFIG_PATH}" > "${tmp}" || die 1 '配置改写失败'
+  chmod 600 "${tmp}" || die 1 '配置临时文件权限设置失败'
+  mv -f "${tmp}" "${CONFIG_PATH}" || die 1 '配置原子替换失败'
+  EXIT_HOST="${MIGRATE_TO}"
+  EXPECTED_EXIT_IPV4="${MIGRATE_PROBE_EXIT_IP}"
+  CONFIG_SHA256="$(normalized_config | sha256_text)"
+  log_info "[migrate] same-host config rewritten backup=${backup}"
+  rehost_exit_body
+  printf 'migrate=rehosted chain=%s exit=%s:%s\n' "${CHAIN_ID}" "${EXIT_HOST}" "${EXIT_REALITY_PORT}"
 }
 
 # ---------- 中转机既有 sing-box 重新登记：rebaseline（docs/feature/feature-direct-native-install.md §5.1.10） ----------
@@ -7413,7 +7559,7 @@ exit_op_prepare() {
   case "${rc}" in
     0) ;;
     # rc=12：schema 与 checksum 通过、只是配置与 state 绑定不一致；这些命令不迁移任何配置键。
-    12) die 2 "配置与 state 不一致；${COMMAND} 要求配置未改动（换出口 IP 用 rehost-exit，中转现状变化用 rebaseline）" ;;
+    12) die 2 "配置与 state 不一致；${COMMAND} 要求配置未改动（换出口 IP 用 migrate-exit，中转现状变化用 rebaseline）" ;;
     *) die 5 "state.env 校验失败：${STATE_PROBE_REASON}" ;;
   esac
   render_ssh_config
@@ -7873,9 +8019,7 @@ migrate_prepare() {
     12) die 2 '配置与 state 不一致；migrate-exit 要求配置未改动（出口机参数由本命令自己改写）' ;;
     *) die 5 "state.env 校验失败：${STATE_PROBE_REASON}" ;;
   esac
-  is_ipv4 "${MIGRATE_TO}" || die 2 "--to 必须是 IPv4：${MIGRATE_TO}"
-  [[ "${MIGRATE_TO}" != "${RELAY_HOST}" ]] || die 2 '--to 不能是中转机'
-  [[ "${MIGRATE_TO}" != "${EXIT_HOST}" ]] || die 2 '--to 就是当前出口机；同一台机器换 IP 用 rehost-exit'
+  # --to 的 IPv4 / 不是中转机两项校验已在 migrate_exit_chain 里先做；--to 等于当前出口机的情形也在那里按同机处理。
   # 旧链健康核验，顺序与 rollback 前置一致；同时让 remote_platform_preflight 给 SOCKET_PROXYD_PATH 赋值。
   render_ssh_config
   if probe_loaded_binding; then rc=0; else rc="$?"; fi
@@ -7884,9 +8028,9 @@ migrate_prepare() {
     11) die 5 '中转 SSH key 指纹漂移' ;;
     12) die 5 '出口机 SSH key 指纹漂移' ;;
     21) die 3 '中转实际协商 host-key 探针不可达' ;;
-    # 最常见的原因是服务商给同一台机器换了 IP、旧 IP 已失效：这时应该用 rehost-exit（不需要旧 IP 可达），
-    # 不能把用户引去 rollback + deploy（会换凭据、所有客户端重新导入）。
-    22) die 3 '经中转访问旧出口机失败。若还是同一台机器、只是 IP 变了：改用 rehost-exit（先把配置里的 EXIT_HOST，出口 IP 也变了就连同 EXPECTED_EXIT_IPV4，改成新值，给新 IP 补 known_hosts 的 ed25519 条目；见 chain/README.md 的「出口机换 IP」一节）。若确实换了机器而旧机器已经登录不了：私钥只在旧机器上，无法迁移，只能 rollback + deploy' ;;
+    # 走到这里时同机探测已判定新地址不是同一台（或经中转连不上）。同一台机器换 IP 的情形已在 migrate_exit_chain
+    # 自动处理，不能把用户引去 rollback + deploy（会换凭据、所有客户端重新导入）。
+    22) die 3 "经中转访问旧出口机失败，新地址 ${MIGRATE_TO} 也不是同一台出口机（或经中转连不上）。若新旧是同一台：确认中转能 SSH 到新地址后重跑本命令；若确实换了机器而旧机器登录不了：私钥只在旧机器上，只能 rollback + deploy" ;;
     31) die 3 '中转实际协商 host-key 指纹漂移' ;;
     32) die 3 '旧出口机实际协商 host-key 指纹漂移' ;;
     *) die 5 '主机/密钥绑定核验异常' ;;
@@ -7914,7 +8058,7 @@ migrate_prepare() {
   # 新机器指纹经中转取得：同时证明中转到新机器的 SSH 可达（迁移后的所有管理都走这条路）。
   migrate_use_exit new
   new_fp="$(negotiated_hostkey_fingerprint chain-exit)" || die 3 "经中转访问新出口机 ${MIGRATE_TO}:${MIGRATE_TO_PORT} 失败；确认中转到新机器的 SSH 可达"
-  [[ "${new_fp}" != "${MIGRATE_OLD_EXIT_HOSTKEY_FINGERPRINT}" ]] || die 2 "新出口机 ${MIGRATE_TO} 的主机指纹与当前出口机相同：是同一台机器，只是换了 IP。请改用 rehost-exit：先把配置里的 EXIT_HOST（出口 IP 也变了就连同 EXPECTED_EXIT_IPV4）改成新值，给新 IP 补 known_hosts 的 ed25519 条目，再运行 rehost-exit（见 chain/README.md 的「出口机换 IP」一节）"
+  [[ "${new_fp}" != "${MIGRATE_OLD_EXIT_HOSTKEY_FINGERPRINT}" ]] || die 2 "新出口机 ${MIGRATE_TO} 与当前出口机是同一台机器：重跑 migrate-exit --to ${MIGRATE_TO}（不带 --to-port 或保持原 SSH 端口）即可原地切换"
   MIGRATE_NEW_EXIT_HOSTKEY_FINGERPRINT="${new_fp}"
   EXIT_HOSTKEY_FINGERPRINT="${new_fp}"
   remote_platform_preflight
@@ -8440,6 +8584,40 @@ migrate_exit_chain() {
   if [[ ! -e "${MIGRATE_FILE}" && ! -L "${MIGRATE_FILE}" ]]; then
     [[ "${MIGRATE_MODE}" == run ]] || die 2 "链 ${CHAIN_ID} 没有进行中的出口机迁移"
     [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 'chain 尚未部署'
+    # 先校验 --to 再做任何 ssh：值会写进临时 ssh 配置的 HostName 行，未校验的值（主机名、含换行）不能进去。
+    is_ipv4 "${MIGRATE_TO}" || die 2 "--to 必须是 IPv4：${MIGRATE_TO}"
+    [[ "${MIGRATE_TO}" != "${RELAY_HOST}" ]] || die 2 '--to 不能是中转机'
+    # 同一台出口机只换了 IP 时原地切换（不搬配置、不换凭据），三个同机分支都在打印结果后直接返回，
+    # 不能落到下面跨机迁移的阶段推导与清理（那里要求有迁移记录）。
+    if probe_state_file "${STATE_FILE}"; then rc=0; else rc="$?"; fi
+    if [[ "${rc}" == 0 && "${EXIT_HOST}" == "${MIGRATE_TO}" ]]; then
+      # 已经切换完成（例如上次在 verify 之后才中断）：rehost_exit_body 判定 noop，打印 rehost=noop。
+      migrate_same_host_port_check
+      rehost_exit_body
+      return 0
+    elif [[ "${rc}" == 0 ]]; then
+      if migrate_probe_same_host; then rc=0; else rc="$?"; fi
+      if [[ "${rc}" == 0 ]]; then
+        migrate_rehost_same_host
+        return 0
+      fi
+      if [[ "${rc}" == 1 ]]; then
+        log_info "[migrate] 新地址 ${MIGRATE_TO} 的主机指纹与当前出口机不同（换了机器），按跨机迁移处理"
+      else
+        log_info "[migrate] 经中转连不上新地址 ${MIGRATE_TO}（取不到主机指纹），按跨机迁移处理"
+      fi
+    elif [[ "${rc}" == 12 && "${EXIT_HOST}" == "${MIGRATE_TO}" ]]; then
+      # 配置已指向新地址、state 还是旧地址：上次同机切换在改写配置后中断，或用户按旧做法手改了配置。
+      # load_state_for_rehost 核实只有两个键不同，并从 state 加载 EXIT_HOSTKEY_FINGERPRINT，探测要用它。
+      migrate_same_host_port_check
+      load_state_for_rehost
+      if migrate_probe_same_host; then rc=0; else rc="$?"; fi
+      [[ "${rc}" == 0 ]] || die 3 "新地址 ${MIGRATE_TO} 经中转连不上或不是同一台出口机；配置已指向它但 state 未改，请改回配置里的 EXIT_HOST 或换对地址后重跑"
+      migrate_register_hostkey
+      rehost_exit_body
+      printf 'migrate=rehosted chain=%s exit=%s:%s\n' "${CHAIN_ID}" "${EXIT_HOST}" "${EXIT_REALITY_PORT}"
+      return 0
+    fi
     migrate_prepare
   else
     [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 "迁移记录存在但链没有 state；请人工确认后删除 ${CHAIN_STATE_DIR}/migrate-exit.env"
@@ -9135,6 +9313,7 @@ main() {
       relay_banlist
       ;;
     rehost-exit)
+      log_warn "[deprecated] rehost-exit 已废弃（仍可用）：改用 migrate-exit --to <新 IP>，同一台机器会自动识别，不必手改配置"
       rehost_exit_chain
       ;;
     rebaseline)
