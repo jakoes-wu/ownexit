@@ -20,6 +20,9 @@
 
 set -euo pipefail
 
+# 输出语言（中文 / 英文）的判断必须在下面固定 LC_ALL=C 之前完成：之后读到的 locale 都是 C（direct/i18n_lib.sh）。
+# shellcheck source=../direct/i18n_lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/../direct/i18n_lib.sh"
 umask 077
 export LC_ALL=C
 
@@ -175,7 +178,155 @@ LOCAL_PROCESS_GATE=''
 STATE_PROBE_REASON=''
 
 usage() {
-  cat <<EOF
+  if [[ "${OWNEXIT_UI_LANG}" == en ]]; then
+    cat <<EOF
+Usage:
+  $(basename "${SCRIPT_PATH}") init [--relay <ipv4>] [--exit <ipv4>] [--id <name>] [--relay-port <n>] [--exit-port <n>] [--sni <domain>]
+                    [--exit-source-filter managed|provider|none]
+  $(basename "${SCRIPT_PATH}") up [--relay <ipv4>] [--exit <ipv4>] [--id <name>] [other init options] [--allow-tun]
+  $(basename "${SCRIPT_PATH}") --id <name> <subcommand>          # same as --config ~/.config/ownexit/chains/<name>.env
+  $(basename "${SCRIPT_PATH}") <subcommand> [args]               # --id can be omitted when this computer has only one chain
+  $(basename "${SCRIPT_PATH}") --config <absolute path> preflight
+  $(basename "${SCRIPT_PATH}") --config <absolute path> deploy [--allow-tun]
+  $(basename "${SCRIPT_PATH}") --config <absolute path> qr [--device <name>]
+  $(basename "${SCRIPT_PATH}") --config <absolute path> verify
+  $(basename "${SCRIPT_PATH}") --config <absolute path> verify --with-fail-closed
+  $(basename "${SCRIPT_PATH}") --config <absolute path> status
+  $(basename "${SCRIPT_PATH}") --config <absolute path> rollback
+  $(basename "${SCRIPT_PATH}") --config <absolute path> conns
+  $(basename "${SCRIPT_PATH}") --config <absolute path> kick <ipv4>
+  $(basename "${SCRIPT_PATH}") --config <absolute path> ban <ipv4|ipv4/prefix>
+  $(basename "${SCRIPT_PATH}") --config <absolute path> unban <ipv4|ipv4/prefix>
+  $(basename "${SCRIPT_PATH}") --config <absolute path> banlist
+  $(basename "${SCRIPT_PATH}") --config <absolute path> rehost-exit          (deprecated, use migrate-exit)
+  $(basename "${SCRIPT_PATH}") --config <absolute path> rebaseline
+  $(basename "${SCRIPT_PATH}") --config <absolute path> rotate-keys
+  $(basename "${SCRIPT_PATH}") --config <absolute path> add-device <name>
+  $(basename "${SCRIPT_PATH}") --config <absolute path> remove-device <name>
+  $(basename "${SCRIPT_PATH}") --config <absolute path> list-devices
+  $(basename "${SCRIPT_PATH}") --config <absolute path> migrate-exit --to <ipv4> [--to-port <n>]
+  $(basename "${SCRIPT_PATH}") --config <absolute path> migrate-exit --abort
+  $(basename "${SCRIPT_PATH}") --config <absolute path> migrate-exit --abandon-cleanup
+  $(basename "${SCRIPT_PATH}") -h | --help
+
+What each does (grouped by how often it is used):
+ Common
+  up         from nothing to working in one command: init first when there is no configuration (key login, detect the exit
+             IP), then deploy, then print the node QR code and the next steps.
+             Safe to rerun: with an existing configuration and the same addresses it continues / verifies; without IPs and with
+             only one chain on this computer it reuses that chain.
+  status     returns healthy/not_deployed/busy/stale_lock/incomplete/unreachable/orphaned/drifted.
+  verify     checks resources against state, the baseline of pre-existing services, and the real proxy exit at three layers.
+  qr         shows the QR code of the default node (--device <name> shows that device's); reads only the local node file,
+             no server connection.
+ Day to day
+  add-device   add a device (its own UUID); the node file is <state dir>/devices/node-<name>.txt; other devices are unaffected.
+               Device names are [a-z0-9][a-z0-9-]{0,31}, default is reserved, at most 32 devices per chain (default included).
+  remove-device revoke a device; it cannot connect any more; other devices are unaffected. If either fails midway, rerun
+               the same command to converge.
+  list-devices read-only list of the devices on the exit and the local node file paths.
+  conns      read-only list of connection counts per source IP on the relay port, idle seconds, blacklist status, and
+             proxyd fd usage.
+  kick       destroys all established connections of a source IP on the relay port with ss -K (clients reconnect on their own).
+  ban        adds an IP/range to the persistent blacklist: local blacklist.txt plus a managed relay drop-in (IPAddressDeny=),
+             effective right after daemon-reload, and kicks as well; repeating ban is idempotent.
+  unban      removes from the blacklist; when the list becomes empty the relay drop-in is deleted, restoring the
+             "no drop-in" contract.
+  banlist    read-only comparison of the local blacklist with the IPAddressDeny values read back from the two relay units;
+             returns 5 when they differ.
+ Maintenance
+  rotate-keys  regenerates the UUID and Reality key / short id of every device on the exit, restarts sing-box on the exit,
+               updates node files and state, and finishes with a full verify; relay, ports and deployment ID stay the same.
+               Every client must re-import (multi-chain bundles need a new render). If it fails midway, rerun the same
+               command to converge.
+  migrate-exit use it whenever the exit changed (new IP or new machine); clients do not need to re-import:
+               - same machine at a new address (the provider changed the IP): detected automatically; registers the host key
+                 of the new IP, rewrites the configuration, switches the relay's forwarding target and local state in place,
+                 then runs a full verify. The old IP may be unreachable; the SSH port must stay the same.
+               - a different machine: sets up key login on it (asks for the root password once the first time), starts the
+                 service there with the existing configuration (UUID, keys, all devices), switches the relay's forwarding
+                 target, commits state, then cleans this chain's services and files off the old exit and runs a full verify.
+                 The old exit must still be reachable (the private key exists only there); before the relay switch --abort
+                 gives up; when the old machine is gone for good, --abandon-cleanup skips the cleanup. When several chains
+                 share one exit, migrate them one by one and run multi render again when all are done.
+               If it fails midway, rerun the same command to converge; when the switch is already complete it prints
+               rehost=noop.
+  rehost-exit  deprecated (still works, removed in 2.0 at the earliest): the old way to handle a new IP on the same machine,
+               which required editing EXIT_HOST / EXPECTED_EXIT_IPV4 in the config and adding known_hosts by hand; use
+               migrate-exit --to <new IP> instead.
+  rebaseline   after a legitimate change to the pre-existing sing-box on the relay (233boy migrated to ownexit-direct, direct
+               reconfigured / newly installed / uninstalled), re-decides RELAY_COHOSTS_SINGBOX from the live system and
+               re-registers the baseline; credentials, ports and node.txt stay the same
+  rollback   validates everything first, then removes the dedicated resources transactionally, relay first, then exit.
+ Advanced / step by step
+  init       asks only for two IPs: sets up key login on relay and exit (asks for each root password once the first time),
+             detects the exit IP and the relay's current state, and writes ~/.config/ownexit/chains/<name>.env (default name
+             main). Changes nothing remotely; refuses when a configuration with that name exists.
+  preflight  read-only check of this computer, both remote machines, official assets, the exit and collision conditions.
+  deploy     reruns every gate under the lock and deploys transactionally, exit's egress first, then relay's entry.
+Arguments:
+  --config <path>       a 600 regular file outside the repository, format in chain.example.env (init writes it for you).
+  --id <name>           shorthand for --config; use one of the two.
+  init options: --relay / --exit IPv4 of the two machines (asked interactively when missing); --id configuration name,
+                default main; --relay-port / --exit-port SSH ports, default 22; --sni Reality camouflage domain, default
+                www.amazon.com; --exit-source-filter how the exit's Reality port admits only the relay: managed (default,
+                this project adds an nft allowlist), provider (the provider's security group does it), none (no restriction);
+                deployment checks strictly for managed / provider.
+  --with-fail-closed    only after verify; briefly stops this chain and verifies that new connections fail.
+  --allow-tun           deploy / up: refused by default when the route from this computer to the servers goes through a proxy
+                        TUN (exit 3; SSH would be cut off during deployment); with it, only warn and continue. Not needed once
+                        these IPs go through the physical interface as in docs/manual/clash-direct-ips.en.md.
+  --device <name>       qr: show that device's node QR code; without it show default.
+  --to <ipv4>           new exit address for migrate-exit; --to-port the new exit's SSH port, default 22.
+  --abort               migrate-exit gives up before the relay switch: removes the half-built service on the new machine
+                        and restores the original configuration.
+  --abandon-cleanup     skip the cleanup when the old exit is gone for good after migrate-exit committed (this chain's
+                        configuration, including private keys, stays on the old machine).
+  <ipv4>                kick accepts only dotted IPv4; ban/unban also accept CIDR with zero host bits (e.g. 198.51.100.0/24).
+  -h, --help            show this help and return 0 without reading any configuration or connecting anywhere.
+
+Prerequisites:
+  controller on macOS or Linux (WSL included), Bash 3.2+; both remote machines Linux, both amd64 or both arm64; root SSH with
+  key login; ed25519 host keys in known_hosts (init sets up both);
+  the exit's security group admits the relay (with provider it must also deny everything else); the exit has no firewall rules
+  other than the ownexit_* allowlist tables; remote firewalls are empty and the required commands are installed.
+  Connection management commands need the chain deployed with no incomplete transaction; kick relies on ss -K in the relay
+  kernel, ban relies on cgroup v2 + systemd IPAddressDeny= on the relay (cgroup BPF, not a firewall).
+
+Typical use:
+  $(basename "${SCRIPT_PATH}") up --relay 203.0.113.10 --exit 203.0.113.20      # all in one step
+  $(basename "${SCRIPT_PATH}") status                                             # no --id needed with only one chain
+  $(basename "${SCRIPT_PATH}") qr --device phone
+  $(basename "${SCRIPT_PATH}") init --relay 203.0.113.10 --exit 203.0.113.20     # step by step: write the configuration first
+  $(basename "${SCRIPT_PATH}") --id main deploy
+  $(basename "${SCRIPT_PATH}") --id main status
+  $(basename "${SCRIPT_PATH}") --id main rollback
+  # writing the configuration by hand (advanced):
+  cp chain.example.env ~/.config/ownexit/chains/demo.env
+  chmod 600 ~/.config/ownexit/chains/demo.env
+  $(basename "${SCRIPT_PATH}") --config "${HOME}/.config/ownexit/chains/demo.env" preflight
+  $(basename "${SCRIPT_PATH}") --config "${HOME}/.config/ownexit/chains/demo.env" deploy
+  $(basename "${SCRIPT_PATH}") --config "${HOME}/.config/ownexit/chains/demo.env" verify --with-fail-closed
+  $(basename "${SCRIPT_PATH}") --config "${HOME}/.config/ownexit/chains/demo.env" rollback
+  $(basename "${SCRIPT_PATH}") --config "${HOME}/.config/ownexit/chains/demo.env" conns
+  $(basename "${SCRIPT_PATH}") --config "${HOME}/.config/ownexit/chains/demo.env" kick 203.0.113.7
+  $(basename "${SCRIPT_PATH}") --config "${HOME}/.config/ownexit/chains/demo.env" ban 203.0.113.7
+  $(basename "${SCRIPT_PATH}") --config "${HOME}/.config/ownexit/chains/demo.env" ban 198.51.100.0/24
+  $(basename "${SCRIPT_PATH}") --config "${HOME}/.config/ownexit/chains/demo.env" unban 203.0.113.7
+  $(basename "${SCRIPT_PATH}") --config "${HOME}/.config/ownexit/chains/demo.env" banlist
+  $(basename "${SCRIPT_PATH}") --id main migrate-exit --to 203.0.113.30
+  $(basename "${SCRIPT_PATH}") --id main migrate-exit --to 203.0.113.30 --to-port 2222
+  $(basename "${SCRIPT_PATH}") --id main migrate-exit --abort
+
+Safety boundary:
+  the script does not change firewalls, cloud security groups, or existing sing-box configurations.
+  The blacklist lives only in a managed drop-in of the two dedicated relay units (50-ownexit-chain-blacklist.conf);
+  rollback removes it too; verify/status allow only this one drop-in, any other drop-in is still drifted.
+  A collision on a deterministic dedicated path is refused; shared directories and fixed binaries are reused only when identical.
+EOF
+  else
+    # i18n:zh-begin
+    cat <<EOF
 用法:
   $(basename "${SCRIPT_PATH}") init [--relay <ipv4>] [--exit <ipv4>] [--id <名字>] [--relay-port <n>] [--exit-port <n>] [--sni <域名>]
                     [--exit-source-filter managed|provider|none]
@@ -299,6 +450,8 @@ usage() {
   rollback 会一并删除；verify/status 只放行这一个 drop-in，其余 drop-in 仍判 drifted。
   确定性专属路径发生碰撞即拒绝；共享目录和固定 binary 只在完全一致时复用。
 EOF
+    # i18n:zh-end
+  fi
 }
 
 log_info() {
@@ -581,29 +734,29 @@ xdg_or_default() {
 parse_init_args() {
   while [[ "$#" -gt 0 ]]; do
     case "$1" in
-      --relay) [[ "$#" -ge 2 ]] || die 2 '--relay 需要 IPv4'; INIT_RELAY="$2"; INIT_RELAY_GIVEN=1; shift 2 ;;
-      --exit) [[ "$#" -ge 2 ]] || die 2 '--exit 需要 IPv4'; INIT_EXIT="$2"; INIT_EXIT_GIVEN=1; shift 2 ;;
-      --id) [[ "$#" -ge 2 ]] || die 2 '--id 需要名字'; INIT_ID="$2"; INIT_ID_GIVEN=1; shift 2 ;;
+      --relay) [[ "$#" -ge 2 ]] || die 2 "$(L '--relay 需要 IPv4' '--relay needs an IPv4')"; INIT_RELAY="$2"; INIT_RELAY_GIVEN=1; shift 2 ;;
+      --exit) [[ "$#" -ge 2 ]] || die 2 "$(L '--exit 需要 IPv4' '--exit needs an IPv4')"; INIT_EXIT="$2"; INIT_EXIT_GIVEN=1; shift 2 ;;
+      --id) [[ "$#" -ge 2 ]] || die 2 "$(L '--id 需要名字' '--id needs a name')"; INIT_ID="$2"; INIT_ID_GIVEN=1; shift 2 ;;
       --relay-port)
-        [[ "$#" -ge 2 && "$2" =~ ^[1-9][0-9]{0,4}$ ]] && (( $2 <= 65535 )) || die 2 '--relay-port 必须是 1-65535'
+        [[ "$#" -ge 2 && "$2" =~ ^[1-9][0-9]{0,4}$ ]] && (( $2 <= 65535 )) || die 2 "$(L '--relay-port 必须是 1-65535' '--relay-port must be 1-65535')"
         INIT_RELAY_PORT="$2"; INIT_RELAY_PORT_GIVEN=1; shift 2 ;;
       --exit-port)
-        [[ "$#" -ge 2 && "$2" =~ ^[1-9][0-9]{0,4}$ ]] && (( $2 <= 65535 )) || die 2 '--exit-port 必须是 1-65535'
+        [[ "$#" -ge 2 && "$2" =~ ^[1-9][0-9]{0,4}$ ]] && (( $2 <= 65535 )) || die 2 "$(L '--exit-port 必须是 1-65535' '--exit-port must be 1-65535')"
         INIT_EXIT_PORT="$2"; INIT_EXIT_PORT_GIVEN=1; shift 2 ;;
       --exit-source-filter)
-        [[ "$#" -ge 2 && ( "$2" == managed || "$2" == provider || "$2" == none ) ]] || die 2 '--exit-source-filter 只能是 managed、provider 或 none'
+        [[ "$#" -ge 2 && ( "$2" == managed || "$2" == provider || "$2" == none ) ]] || die 2 "$(L '--exit-source-filter 只能是 managed、provider 或 none' '--exit-source-filter must be managed, provider or none')"
         INIT_EXIT_SOURCE_FILTER="$2"; INIT_FILTER_GIVEN=1; shift 2 ;;
       --sni)
-        [[ "$#" -ge 2 && "$2" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]] || die 2 '--sni 必须是 ASCII 域名'
+        [[ "$#" -ge 2 && "$2" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]] || die 2 "$(L '--sni 必须是 ASCII 域名' '--sni must be an ASCII domain name')"
         INIT_SNI="$2"; INIT_SNI_GIVEN=1; shift 2 ;;
       # init 收到 --allow-tun 只置位、没有效果（init 不做 TUN 自检）；up 用它放行部署前自检。
       --allow-tun) ALLOW_TUN=1; shift ;;
       -h|--help)
         # init --help 按 1.x 已冻结的描述仍退出 2；up 是新命令，打印帮助退出 0。
-        [[ "${COMMAND}" == up ]] || die 2 "${COMMAND} 不认识的参数：$1"
+        [[ "${COMMAND}" == up ]] || die 2 "$(L "${COMMAND} 不认识的参数：$1" "${COMMAND}: unrecognised argument: $1")"
         usage
         exit 0 ;;
-      *) die 2 "${COMMAND} 不认识的参数：$1" ;;
+      *) die 2 "$(L "${COMMAND} 不认识的参数：$1" "${COMMAND}: unrecognised argument: $1")" ;;
     esac
   done
 }
@@ -634,41 +787,41 @@ parse_args() {
     if resolve_single_chain_config; then rc=0; else rc="$?"; fi
     case "${rc}" in
       0) ;;
-      10) die 2 '本机没有链配置；先运行 chain up --relay <IP> --exit <IP>（或 chain init）' ;;
-      *) die 2 '本机有多条链，请用 --id <名字> 指定' ;;
+      10) die 2 "$(L '本机没有链配置；先运行 chain up --relay <IP> --exit <IP>（或 chain init）' 'No chain configuration on this computer; run chain up --relay <IP> --exit <IP> (or chain init) first')" ;;
+      *) die 2 "$(L '本机有多条链，请用 --id <名字> 指定' 'There are several chains on this computer; choose one with --id <name>')" ;;
     esac
     COMMAND="$1"
     shift 1
   else
     [[ "$#" -ge 3 ]] || {
       usage >&2
-      die 2 '参数不足；请用 --help 查看完整用法'
+      die 2 "$(L '参数不足；请用 --help 查看完整用法' 'Not enough arguments; see --help for the full usage')"
     }
     case "$1" in
       --config)
-        [[ -n "$2" ]] || die 2 '--config 需要绝对路径'
+        [[ -n "$2" ]] || die 2 "$(L '--config 需要绝对路径' '--config needs an absolute path')"
         CONFIG_PATH="$2"
         ;;
       --id)
         # --id 只是 --config <XDG 配置目录>/ownexit/chains/<id>.env 的简写，之后走完全相同的配置校验。
-        [[ "$2" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die 2 '--id 只允许 [a-z0-9][a-z0-9-]{0,31}'
+        [[ "$2" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die 2 "$(L '--id 只允许 [a-z0-9][a-z0-9-]{0,31}' '--id only accepts [a-z0-9][a-z0-9-]{0,31}')"
         CONFIG_PATH="$(xdg_or_default "${XDG_CONFIG_HOME:-}" "${HOME}/.config")/ownexit/chains/$2.env"
         ;;
-      *) die 2 '首个参数必须是 init、up、--config、--id 或子命令名' ;;
+      *) die 2 "$(L '首个参数必须是 init、up、--config、--id 或子命令名' 'The first argument must be init, up, --config, --id or a subcommand name')" ;;
     esac
-    [[ "$3" != --config && "$3" != --id ]] || die 2 '--config 与 --id 只能二选一'
+    [[ "$3" != --config && "$3" != --id ]] || die 2 "$(L '--config 与 --id 只能二选一' 'Use either --config or --id, not both')"
     COMMAND="$3"
     shift 3
   fi
   case "${COMMAND}" in
     preflight|status|rollback|conns|banlist|rehost-exit|rebaseline|rotate-keys|list-devices)
-      [[ "$#" -eq 0 ]] || die 2 "${COMMAND} 不接受额外参数"
+      [[ "$#" -eq 0 ]] || die 2 "$(L "${COMMAND} 不接受额外参数" "${COMMAND} takes no extra arguments")"
       ;;
     deploy)
       while [[ "$#" -gt 0 ]]; do
         case "$1" in
           --allow-tun) ALLOW_TUN=1; shift ;;
-          *) die 2 'deploy 只接受可选的 --allow-tun' ;;
+          *) die 2 "$(L 'deploy 只接受可选的 --allow-tun' 'deploy only accepts the optional --allow-tun')" ;;
         esac
       done
       ;;
@@ -676,24 +829,24 @@ parse_args() {
       while [[ "$#" -gt 0 ]]; do
         case "$1" in
           --device)
-            [[ "$#" -ge 2 && "$2" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die 2 '--device 需要设备名 [a-z0-9][a-z0-9-]{0,31}'
-            [[ "$2" != default ]] || die 2 'default 就是不带 --device 时显示的节点'
+            [[ "$#" -ge 2 && "$2" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die 2 "$(L '--device 需要设备名 [a-z0-9][a-z0-9-]{0,31}' '--device needs a device name [a-z0-9][a-z0-9-]{0,31}')"
+            [[ "$2" != default ]] || die 2 "$(L 'default 就是不带 --device 时显示的节点' 'default is the node shown without --device')"
             QR_DEVICE="$2"; shift 2 ;;
-          *) die 2 'qr 只接受可选的 --device <名字>' ;;
+          *) die 2 "$(L 'qr 只接受可选的 --device <名字>' 'qr only accepts the optional --device <name>')" ;;
         esac
       done
       ;;
     add-device|remove-device)
-      [[ "$#" -eq 1 ]] || die 2 "${COMMAND} 需要且只需要一个设备名"
-      [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die 2 '设备名只允许 [a-z0-9][a-z0-9-]{0,31}'
-      [[ "$1" != default ]] || die 2 'default 指部署时的那套凭据，不能新增或吊销；要整体换凭据用 rotate-keys'
+      [[ "$#" -eq 1 ]] || die 2 "$(L "${COMMAND} 需要且只需要一个设备名" "${COMMAND} needs exactly one device name")"
+      [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die 2 "$(L '设备名只允许 [a-z0-9][a-z0-9-]{0,31}' 'Device names may only match [a-z0-9][a-z0-9-]{0,31}')"
+      [[ "$1" != default ]] || die 2 "$(L 'default 指部署时的那套凭据，不能新增或吊销；要整体换凭据用 rotate-keys' 'default refers to the credentials from deployment and cannot be added or revoked; to replace all credentials use rotate-keys')"
       DEVICE_NAME="$1"
       ;;
     verify)
       if [[ "$#" -eq 1 && "$1" == '--with-fail-closed' ]]; then
         WITH_FAIL_CLOSED=1
       elif [[ "$#" -ne 0 ]]; then
-        die 2 'verify 只接受可选的 --with-fail-closed'
+        die 2 "$(L 'verify 只接受可选的 --with-fail-closed' 'verify only accepts the optional --with-fail-closed')"
       fi
       ;;
     migrate-exit)
@@ -701,25 +854,25 @@ parse_args() {
       MIGRATE_TO_PORT=22
       while [[ "$#" -gt 0 ]]; do
         case "$1" in
-          --to) [[ "$#" -ge 2 && -z "${MIGRATE_MODE}" ]] || die 2 '--to 需要 IPv4，且不能与 --abort / --abandon-cleanup 同用'; MIGRATE_MODE=run; MIGRATE_TO="$2"; shift 2 ;;
+          --to) [[ "$#" -ge 2 && -z "${MIGRATE_MODE}" ]] || die 2 "$(L '--to 需要 IPv4，且不能与 --abort / --abandon-cleanup 同用' '--to needs an IPv4 and cannot be combined with --abort / --abandon-cleanup')"; MIGRATE_MODE=run; MIGRATE_TO="$2"; shift 2 ;;
           --to-port)
-            [[ "$#" -ge 2 && "$2" =~ ^[1-9][0-9]{0,4}$ ]] && (( $2 <= 65535 )) || die 2 '--to-port 必须是 1-65535'
+            [[ "$#" -ge 2 && "$2" =~ ^[1-9][0-9]{0,4}$ ]] && (( $2 <= 65535 )) || die 2 "$(L '--to-port 必须是 1-65535' '--to-port must be 1-65535')"
             MIGRATE_TO_PORT="$2"; MIGRATE_TO_PORT_GIVEN=1; shift 2 ;;
-          --abort) [[ -z "${MIGRATE_MODE}" ]] || die 2 '--abort 不能与 --to / --abandon-cleanup 同用'; MIGRATE_MODE=abort; shift ;;
-          --abandon-cleanup) [[ -z "${MIGRATE_MODE}" ]] || die 2 '--abandon-cleanup 不能与 --to / --abort 同用'; MIGRATE_MODE=abandon; shift ;;
-          *) die 2 "migrate-exit 不认识的参数：$1" ;;
+          --abort) [[ -z "${MIGRATE_MODE}" ]] || die 2 "$(L '--abort 不能与 --to / --abandon-cleanup 同用' '--abort cannot be combined with --to / --abandon-cleanup')"; MIGRATE_MODE=abort; shift ;;
+          --abandon-cleanup) [[ -z "${MIGRATE_MODE}" ]] || die 2 "$(L '--abandon-cleanup 不能与 --to / --abort 同用' '--abandon-cleanup cannot be combined with --to / --abort')"; MIGRATE_MODE=abandon; shift ;;
+          *) die 2 "$(L "migrate-exit 不认识的参数：$1" "migrate-exit: unrecognised argument: $1")" ;;
         esac
       done
-      [[ -n "${MIGRATE_MODE}" ]] || die 2 'migrate-exit 需要 --to <IPv4>（或 --abort / --abandon-cleanup）'
-      [[ "${MIGRATE_MODE}" == run || "${MIGRATE_TO_PORT_GIVEN}" == 0 ]] || die 2 '--to-port 只能与 --to 同用'
+      [[ -n "${MIGRATE_MODE}" ]] || die 2 "$(L 'migrate-exit 需要 --to <IPv4>（或 --abort / --abandon-cleanup）' 'migrate-exit needs --to <IPv4> (or --abort / --abandon-cleanup)')"
+      [[ "${MIGRATE_MODE}" == run || "${MIGRATE_TO_PORT_GIVEN}" == 0 ]] || die 2 "$(L '--to-port 只能与 --to 同用' '--to-port can only be used with --to')"
       ;;
     kick|ban|unban)
       # 目标 IP 在这里只做形态校验；规范化（补 /32、主机位清零校验）在 normalize_ip_entry 内完成。
-      [[ "$#" -eq 1 && -n "$1" ]] || die 2 "${COMMAND} 需要且只需要一个 IPv4 参数"
+      [[ "$#" -eq 1 && -n "$1" ]] || die 2 "$(L "${COMMAND} 需要且只需要一个 IPv4 参数" "${COMMAND} needs exactly one IPv4 argument")"
       TARGET_IP="$1"
       ;;
     *)
-      die 2 "未知命令：${COMMAND}"
+      die 2 "$(L "未知命令：${COMMAND}" "Unknown command: ${COMMAND}")"
       ;;
   esac
 }
@@ -765,25 +918,25 @@ EOF
 }
 
 validate_config_values() {
-  [[ "${CHAIN_ID}" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die 2 'CHAIN_ID 格式错误'
-  is_ipv4 "${RELAY_HOST}" || die 2 'RELAY_HOST 必须是 IPv4 字面量'
-  is_ipv4 "${EXIT_HOST}" || die 2 'EXIT_HOST 必须是 IPv4 字面量'
-  [[ "${RELAY_HOST}" != "${EXIT_HOST}" ]] || die 2 '中转与出口机必须是两台不同 IPv4 主机'
-  is_ipv4 "${EXPECTED_EXIT_IPV4}" || die 2 'EXPECTED_EXIT_IPV4 必须是 IPv4 字面量'
-  [[ "${RELAY_SSH_PORT}" =~ ^[1-9][0-9]*$ && "${#RELAY_SSH_PORT}" -le 5 ]] && (( RELAY_SSH_PORT >= 1 && RELAY_SSH_PORT <= 65535 )) || die 2 'RELAY_SSH_PORT 范围错误'
-  [[ "${EXIT_SSH_PORT}" =~ ^[1-9][0-9]*$ && "${#EXIT_SSH_PORT}" -le 5 ]] && (( EXIT_SSH_PORT >= 1 && EXIT_SSH_PORT <= 65535 )) || die 2 'EXIT_SSH_PORT 范围错误'
-  [[ "${RELAY_SSH_USER}" == 'root' && "${EXIT_SSH_USER}" == 'root' ]] || die 2 '两端 SSH 用户必须固定为 root'
-  [[ "${RELAY_SSH_KEY}" =~ ^/[A-Za-z0-9._/@+,=:~-]+$ ]] || die 2 'RELAY_SSH_KEY 不是允许字符集内的绝对路径'
-  [[ "${EXIT_SSH_KEY}" =~ ^/[A-Za-z0-9._/@+,=:~-]+$ ]] || die 2 'EXIT_SSH_KEY 不是允许字符集内的绝对路径'
-  require_private_key_file "${RELAY_SSH_KEY}" || die 2 'RELAY_SSH_KEY 必须是当前用户拥有、非 symlink 且 group/other 无权限的 regular file'
-  require_private_key_file "${EXIT_SSH_KEY}" || die 2 'EXIT_SSH_KEY 必须是当前用户拥有、非 symlink 且 group/other 无权限的 regular file'
-  RELAY_SSH_KEY_FINGERPRINT="$(fingerprint_private_key "${RELAY_SSH_KEY}")" || die 2 '无法读取 RELAY_SSH_KEY 公钥指纹'
-  EXIT_SSH_KEY_FINGERPRINT="$(fingerprint_private_key "${EXIT_SSH_KEY}")" || die 2 '无法读取 EXIT_SSH_KEY 公钥指纹'
-  [[ "${RELAY_SSH_KEY_FINGERPRINT}" == SHA256:* && "${EXIT_SSH_KEY_FINGERPRINT}" == SHA256:* ]] || die 2 'SSH 私钥指纹格式错误'
-  [[ "${RELAY_SSH_KEY_FINGERPRINT}" != "${EXIT_SSH_KEY_FINGERPRINT}" ]] || die 2 '中转与出口机必须使用两把不同公钥指纹的私钥'
-  [[ "${REALITY_SERVER_NAME}" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]] || die 2 'REALITY_SERVER_NAME 必须是 ASCII FQDN'
-  [[ "${RELAY_COHOSTS_SINGBOX}" == 'yes' || "${RELAY_COHOSTS_SINGBOX}" == 'no' || "${RELAY_COHOSTS_SINGBOX}" == 'ownexit-direct' ]] || die 2 'RELAY_COHOSTS_SINGBOX 只能是 yes、no 或 ownexit-direct'
-  [[ "${EXIT_SOURCE_FILTER}" == 'managed' || "${EXIT_SOURCE_FILTER}" == 'provider' || "${EXIT_SOURCE_FILTER}" == 'none' ]] || die 2 'EXIT_SOURCE_FILTER 只能是 managed、provider 或 none'
+  [[ "${CHAIN_ID}" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die 2 "$(L 'CHAIN_ID 格式错误' 'Malformed CHAIN_ID')"
+  is_ipv4 "${RELAY_HOST}" || die 2 "$(L 'RELAY_HOST 必须是 IPv4 字面量' 'RELAY_HOST must be an IPv4 literal')"
+  is_ipv4 "${EXIT_HOST}" || die 2 "$(L 'EXIT_HOST 必须是 IPv4 字面量' 'EXIT_HOST must be an IPv4 literal')"
+  [[ "${RELAY_HOST}" != "${EXIT_HOST}" ]] || die 2 "$(L '中转与出口机必须是两台不同 IPv4 主机' 'The relay and the exit must be two different IPv4 hosts')"
+  is_ipv4 "${EXPECTED_EXIT_IPV4}" || die 2 "$(L 'EXPECTED_EXIT_IPV4 必须是 IPv4 字面量' 'EXPECTED_EXIT_IPV4 must be an IPv4 literal')"
+  [[ "${RELAY_SSH_PORT}" =~ ^[1-9][0-9]*$ && "${#RELAY_SSH_PORT}" -le 5 ]] && (( RELAY_SSH_PORT >= 1 && RELAY_SSH_PORT <= 65535 )) || die 2 "$(L 'RELAY_SSH_PORT 范围错误' 'RELAY_SSH_PORT out of range')"
+  [[ "${EXIT_SSH_PORT}" =~ ^[1-9][0-9]*$ && "${#EXIT_SSH_PORT}" -le 5 ]] && (( EXIT_SSH_PORT >= 1 && EXIT_SSH_PORT <= 65535 )) || die 2 "$(L 'EXIT_SSH_PORT 范围错误' 'EXIT_SSH_PORT out of range')"
+  [[ "${RELAY_SSH_USER}" == 'root' && "${EXIT_SSH_USER}" == 'root' ]] || die 2 "$(L '两端 SSH 用户必须固定为 root' 'The SSH user on both ends must be root')"
+  [[ "${RELAY_SSH_KEY}" =~ ^/[A-Za-z0-9._/@+,=:~-]+$ ]] || die 2 "$(L 'RELAY_SSH_KEY 不是允许字符集内的绝对路径' 'RELAY_SSH_KEY is not an absolute path within the allowed character set')"
+  [[ "${EXIT_SSH_KEY}" =~ ^/[A-Za-z0-9._/@+,=:~-]+$ ]] || die 2 "$(L 'EXIT_SSH_KEY 不是允许字符集内的绝对路径' 'EXIT_SSH_KEY is not an absolute path within the allowed character set')"
+  require_private_key_file "${RELAY_SSH_KEY}" || die 2 "$(L 'RELAY_SSH_KEY 必须是当前用户拥有、非 symlink 且 group/other 无权限的 regular file' 'RELAY_SSH_KEY must be a regular file owned by the current user, not a symlink, with no group/other permissions')"
+  require_private_key_file "${EXIT_SSH_KEY}" || die 2 "$(L 'EXIT_SSH_KEY 必须是当前用户拥有、非 symlink 且 group/other 无权限的 regular file' 'EXIT_SSH_KEY must be a regular file owned by the current user, not a symlink, with no group/other permissions')"
+  RELAY_SSH_KEY_FINGERPRINT="$(fingerprint_private_key "${RELAY_SSH_KEY}")" || die 2 "$(L '无法读取 RELAY_SSH_KEY 公钥指纹' 'Cannot read the RELAY_SSH_KEY public key fingerprint')"
+  EXIT_SSH_KEY_FINGERPRINT="$(fingerprint_private_key "${EXIT_SSH_KEY}")" || die 2 "$(L '无法读取 EXIT_SSH_KEY 公钥指纹' 'Cannot read the EXIT_SSH_KEY public key fingerprint')"
+  [[ "${RELAY_SSH_KEY_FINGERPRINT}" == SHA256:* && "${EXIT_SSH_KEY_FINGERPRINT}" == SHA256:* ]] || die 2 "$(L 'SSH 私钥指纹格式错误' 'Malformed SSH private key fingerprint')"
+  [[ "${RELAY_SSH_KEY_FINGERPRINT}" != "${EXIT_SSH_KEY_FINGERPRINT}" ]] || die 2 "$(L '中转与出口机必须使用两把不同公钥指纹的私钥' 'The relay and the exit must use two private keys with different public key fingerprints')"
+  [[ "${REALITY_SERVER_NAME}" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]] || die 2 "$(L 'REALITY_SERVER_NAME 必须是 ASCII FQDN' 'REALITY_SERVER_NAME must be an ASCII FQDN')"
+  [[ "${RELAY_COHOSTS_SINGBOX}" == 'yes' || "${RELAY_COHOSTS_SINGBOX}" == 'no' || "${RELAY_COHOSTS_SINGBOX}" == 'ownexit-direct' ]] || die 2 "$(L 'RELAY_COHOSTS_SINGBOX 只能是 yes、no 或 ownexit-direct' 'RELAY_COHOSTS_SINGBOX must be yes, no or ownexit-direct')"
+  [[ "${EXIT_SOURCE_FILTER}" == 'managed' || "${EXIT_SOURCE_FILTER}" == 'provider' || "${EXIT_SOURCE_FILTER}" == 'none' ]] || die 2 "$(L 'EXIT_SOURCE_FILTER 只能是 managed、provider 或 none' 'EXIT_SOURCE_FILTER must be managed, provider or none')"
 }
 
 normalized_config() {
@@ -804,45 +957,45 @@ normalized_config() {
 
 parse_config() {
   local resolved line key value seen count
-  resolved="$(resolve_regular_path "${CONFIG_PATH}")" || die 2 '配置必须是可解析的绝对 regular file，且不能是 symlink'
+  resolved="$(resolve_regular_path "${CONFIG_PATH}")" || die 2 "$(L '配置必须是可解析的绝对 regular file，且不能是 symlink' 'The configuration must be a resolvable absolute regular file and not a symlink')"
   CONFIG_PATH="${resolved}"
-  require_secure_user_file "${CONFIG_PATH}" 600 || die 2 '配置必须由当前用户拥有且 mode 精确为 600'
+  require_secure_user_file "${CONFIG_PATH}" 600 || die 2 "$(L '配置必须由当前用户拥有且 mode 精确为 600' 'The configuration must be owned by the current user with mode exactly 600')"
   if [[ -n "${REPO_ROOT}" ]]; then
     case "${CONFIG_PATH}" in
-      "${REPO_ROOT}"|"${REPO_ROOT}"/*) die 2 '真实配置必须位于 Git worktree 外' ;;
+      "${REPO_ROOT}"|"${REPO_ROOT}"/*) die 2 "$(L '真实配置必须位于 Git worktree 外' 'The real configuration must be outside any Git worktree')" ;;
     esac
   fi
   seen=''
   count=0
   while IFS= read -r line || [[ -n "${line}" ]]; do
-    [[ "${line}" != *$'\r'* ]] || die 2 '配置含 CR 控制字符'
+    [[ "${line}" != *$'\r'* ]] || die 2 "$(L '配置含 CR 控制字符' 'The configuration contains CR control characters')"
     case "${line}" in
       '') continue ;;
       \#*) continue ;;
       *=*)
         key="${line%%=*}"
         value="${line#*=}"
-        [[ "${key}" =~ ^[A-Z][A-Z0-9_]*$ ]] || die 2 '配置键格式错误'
-        [[ -n "${value}" ]] || die 2 "配置值不能为空：${key}"
+        [[ "${key}" =~ ^[A-Z][A-Z0-9_]*$ ]] || die 2 "$(L '配置键格式错误' 'Malformed configuration key')"
+        [[ -n "${value}" ]] || die 2 "$(L "配置值不能为空：${key}" "Configuration value must not be empty: ${key}")"
         if printf '%s' "${value}" | grep -q '[[:cntrl:][:space:]]'; then
-          die 2 "配置值包含空白或控制字符：${key}"
+          die 2 "$(L "配置值包含空白或控制字符：${key}" "Configuration value contains whitespace or control characters: ${key}")"
         fi
         case "
 ${seen}
 " in
           *"
 ${key}
-"*) die 2 "配置键重复：${key}" ;;
+"*) die 2 "$(L "配置键重复：${key}" "Duplicate configuration key: ${key}")" ;;
         esac
-        set_config_value "${key}" "${value}" || die 2 "未知配置键：${key}"
+        set_config_value "${key}" "${value}" || die 2 "$(L "未知配置键：${key}" "Unknown configuration key: ${key}")"
         seen="${seen}
 ${key}"
         count="$((count + 1))"
         ;;
-      *) die 2 '配置只允许空行、井号注释和 KEY=VALUE' ;;
+      *) die 2 "$(L '配置只允许空行、井号注释和 KEY=VALUE' 'The configuration may only contain blank lines, # comments and KEY=VALUE')" ;;
     esac
   done < "${CONFIG_PATH}"
-  [[ "${count}" -eq 13 ]] || die 2 '配置必须且只能包含 chain.example.env 的 13 个键'
+  [[ "${count}" -eq 13 ]] || die 2 "$(L '配置必须且只能包含 chain.example.env 的 13 个键' 'The configuration must contain exactly the 13 keys of chain.example.env')"
   validate_config_values
   CONFIG_SHA256="$(normalized_config | sha256_text)"
 }
@@ -1546,7 +1699,7 @@ release_lock_file() {
   [[ -f "${target}" && ! -L "${target}" ]] || return 0
   expected="$(kv_get "${target}" OPERATION_ID 2>/dev/null || true)"
   [[ "${expected}" == "${LOCK_OPERATION_ID}" ]] || {
-    log_warn "不释放身份已变化的锁：${target}"
+    log_warn "$(L "不释放身份已变化的锁：${target}" "Not releasing a lock whose identity changed: ${target}")"
     return 1
   }
   inode_before="$(stat_inode "${target}")"
@@ -1612,7 +1765,7 @@ acquire_chain_lock() {
     0) LOCK_CHAIN_HELD=1 ;;
     10) return 10 ;;
     11) return 11 ;;
-    *) die 1 '无法安全取得 chain lock' ;;
+    *) die 1 "$(L '无法安全取得 chain lock' 'Cannot safely acquire the chain lock')" ;;
   esac
 }
 
@@ -1623,7 +1776,7 @@ acquire_global_lock() {
   else
     rc="$?"
   fi
-  [[ "${rc}" -eq 0 ]] || die 1 '无法安全取得 shared global lock'
+  [[ "${rc}" -eq 0 ]] || die 1 "$(L '无法安全取得 shared global lock' 'Cannot safely acquire the shared global lock')"
   LOCK_GLOBAL_HELD=1
 }
 
@@ -1718,7 +1871,7 @@ ssh_with_readonly_retry() {
     fi
     rm -f "${out_file}"
     delay=$(( attempt * 3 ))
-    log_warn "[ssh-retry] role=${role} attempt=${attempt}/3 rc=255，${delay} 秒后重试（只读命令）"
+    log_warn "$(L "[ssh-retry] role=${role} attempt=${attempt}/3 rc=255，${delay} 秒后重试（只读命令）" "[ssh-retry] role=${role} attempt=${attempt}/3 rc=255, retrying in ${delay} s (read-only command)")"
     sleep "${delay}"
   done
 }
@@ -1785,7 +1938,7 @@ negotiated_hostkey_fingerprint() {
       rc="$?"
     fi
     [[ "${rc}" -eq 255 && "${MANAGED_LAST_TIMEOUT}" != 1 && "${attempt}" -lt "${max_attempts}" ]] || break
-    log_warn "[ssh-retry] role=${alias#chain-} attempt=${attempt}/3 rc=255，$(( attempt * 3 )) 秒后重试（只读命令，主机指纹探测）"
+    log_warn "$(L "[ssh-retry] role=${alias#chain-} attempt=${attempt}/3 rc=255，$(( attempt * 3 )) 秒后重试（只读命令，主机指纹探测）" "[ssh-retry] role=${alias#chain-} attempt=${attempt}/3 rc=255, retrying in $(( attempt * 3 )) s (read-only command, host fingerprint probe)")"
     sleep "$(( attempt * 3 ))"
   done
   if [[ "${rc}" -ne 0 ]] || ! require_secure_user_file "${debug_file}" 600; then
@@ -1806,42 +1959,42 @@ negotiated_hostkey_fingerprint() {
 
 probe_ssh_and_fingerprints() {
   local relay_fp exit_fp
-  check_ssh_effective_config chain-relay || die 3 '中转 SSH 隔离配置未按预期生效'
-  check_ssh_effective_config chain-exit || die 3 '出口机 SSH 隔离配置未按预期生效'
-  ssh_relay true >/dev/null || die 3 '中转 root 免密 SSH 或 ed25519 host key 核验失败'
-  ssh_exit true >/dev/null || die 3 '经中转访问出口机的 root 免密 SSH 或 host key 核验失败'
+  check_ssh_effective_config chain-relay || die 3 "$(L '中转 SSH 隔离配置未按预期生效' 'The isolated SSH configuration for the relay did not take effect as expected')"
+  check_ssh_effective_config chain-exit || die 3 "$(L '出口机 SSH 隔离配置未按预期生效' 'The isolated SSH configuration for the exit did not take effect as expected')"
+  ssh_relay true >/dev/null || die 3 "$(L '中转 root 免密 SSH 或 ed25519 host key 核验失败' 'Root key-based SSH or ed25519 host key verification failed for the relay')"
+  ssh_exit true >/dev/null || die 3 "$(L '经中转访问出口机的 root 免密 SSH 或 host key 核验失败' 'Root key-based SSH or host key verification failed for the exit through the relay')"
   relay_fp="$(negotiated_hostkey_fingerprint chain-relay)"
   exit_fp="$(negotiated_hostkey_fingerprint chain-exit)"
-  [[ "${relay_fp}" == SHA256:* && "${exit_fp}" == SHA256:* ]] || die 3 '无法取得两端 ed25519 host-key 指纹'
+  [[ "${relay_fp}" == SHA256:* && "${exit_fp}" == SHA256:* ]] || die 3 "$(L '无法取得两端 ed25519 host-key 指纹' 'Cannot obtain the ed25519 host key fingerprints of both ends')"
   RELAY_HOSTKEY_FINGERPRINT="${relay_fp}"
   EXIT_HOSTKEY_FINGERPRINT="${exit_fp}"
-  [[ "$(fingerprint_private_key "${RELAY_SSH_KEY}")" == "${RELAY_SSH_KEY_FINGERPRINT}" ]] || die 3 '中转 SSH key 指纹在 preflight 前发生变化'
-  [[ "$(fingerprint_private_key "${EXIT_SSH_KEY}")" == "${EXIT_SSH_KEY_FINGERPRINT}" ]] || die 3 '出口机 SSH key 指纹在 preflight 前发生变化'
+  [[ "$(fingerprint_private_key "${RELAY_SSH_KEY}")" == "${RELAY_SSH_KEY_FINGERPRINT}" ]] || die 3 "$(L '中转 SSH key 指纹在 preflight 前发生变化' 'The relay SSH key fingerprint changed before preflight')"
+  [[ "$(fingerprint_private_key "${EXIT_SSH_KEY}")" == "${EXIT_SSH_KEY_FINGERPRINT}" ]] || die 3 "$(L '出口机 SSH key 指纹在 preflight 前发生变化' 'The exit SSH key fingerprint changed before preflight')"
   if run_managed_external ssh ssh -n -F "${SSH_DIRECT_CONFIG}" chain-direct-exit true >/dev/null 2>&1; then
-    log_info '本机到出口机管理端口的隔离直连探针成功（仅作管理通道证据）'
+    log_info "$(L '本机到出口机管理端口的隔离直连探针成功（仅作管理通道证据）' 'The isolated direct probe from this computer to the exit'\''s management port succeeded (management channel evidence only)')"
   else
-    log_warn '本机到出口机管理端口的隔离直连探针失败；经中转管理通道已通过'
+    log_warn "$(L '本机到出口机管理端口的隔离直连探针失败；经中转管理通道已通过' 'The isolated direct probe from this computer to the exit'\''s management port failed; the management channel through the relay passed')"
   fi
 }
 
 require_local_dependencies() {
   local command_name platform_commands
-  [[ "${BASH_VERSINFO[0]}" -gt 3 || ( "${BASH_VERSINFO[0]}" -eq 3 && "${BASH_VERSINFO[1]}" -ge 2 ) ]] || die 3 '需要 Bash 3.2 或以上'
+  [[ "${BASH_VERSINFO[0]}" -gt 3 || ( "${BASH_VERSINFO[0]}" -eq 3 && "${BASH_VERSINFO[1]}" -ge 2 ) ]] || die 3 "$(L '需要 Bash 3.2 或以上' 'Bash 3.2 or later is required')"
   # 控制端支持 macOS 与 Linux（含 WSL）；路由与端口探测在两边用不同命令（见 route_interface / tcp_probe）。
   case "$(uname -s)" in
     Darwin) platform_commands='route nc' ;;
     Linux) platform_commands='ip timeout' ;;
-    *) die 3 "控制端只支持 macOS 与 Linux（当前：$(uname -s)）" ;;
+    *) die 3 "$(L "控制端只支持 macOS 与 Linux（当前：$(uname -s)）" "The control machine must be macOS or Linux (current: $(uname -s))")" ;;
   esac
-  bash -n "${SCRIPT_PATH}" || die 3 '当前 PATH 中的 bash 无法解析脚本'
-  /bin/bash -n "${SCRIPT_PATH}" || die 3 '/bin/bash 无法解析脚本'
+  bash -n "${SCRIPT_PATH}" || die 3 "$(L '当前 PATH 中的 bash 无法解析脚本' 'The bash in the current PATH cannot parse the script')"
+  /bin/bash -n "${SCRIPT_PATH}" || die 3 "$(L '/bin/bash 无法解析脚本' '/bin/bash cannot parse the script')"
   # git 不在这份清单里：只有 git clone 形态需要它，由 init_repo_root 按安装形态自行检查；pip 安装的副本没有 git 也能运行。
   for command_name in ssh scp ssh-keygen curl openssl tar ps mktemp mkfifo stat readlink link ln sync awk sed grep sort tr head tail cmp find chmod mkdir rmdir rm cp mv cut cat date sleep uname kill dirname basename id ${platform_commands}; do
-    command -v "${command_name}" >/dev/null 2>&1 || die 3 "本机缺少依赖：${command_name}"
+    command -v "${command_name}" >/dev/null 2>&1 || die 3 "$(L "本机缺少依赖：${command_name}" "Missing local dependency: ${command_name}")"
   done
-  ssh -E /dev/null -G -F /dev/null localhost >/dev/null 2>&1 || die 3 '本机 OpenSSH 不支持独立 LogFile（-E）能力'
-  command -v shasum >/dev/null 2>&1 || command -v openssl >/dev/null 2>&1 || die 3 '本机缺少 SHA-256 工具'
-  test_exact_link_primitive || die 3 '本机 link 不满足 exact-target no-replace 语义'
+  ssh -E /dev/null -G -F /dev/null localhost >/dev/null 2>&1 || die 3 "$(L '本机 OpenSSH 不支持独立 LogFile（-E）能力' 'The local OpenSSH does not support a separate LogFile (-E)')"
+  command -v shasum >/dev/null 2>&1 || command -v openssl >/dev/null 2>&1 || die 3 "$(L '本机缺少 SHA-256 工具' 'No SHA-256 tool on this computer')"
+  test_exact_link_primitive || die 3 "$(L '本机 link 不满足 exact-target no-replace 语义' 'The local link does not provide exact-target no-replace semantics')"
 }
 
 init_repo_root() {
@@ -1852,9 +2005,9 @@ init_repo_root() {
     REPO_ROOT=''
     return 0
   fi
-  command -v git >/dev/null 2>&1 || die 3 '本机缺少 bootstrap 依赖：git'
-  REPO_ROOT="$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel 2>/dev/null)" || die 3 '无法确定脚本所属 Git worktree'
-  [[ -n "${REPO_ROOT}" && -d "${REPO_ROOT}" && ! -L "${REPO_ROOT}" ]] || die 3 '脚本所属 Git worktree 身份异常'
+  command -v git >/dev/null 2>&1 || die 3 "$(L '本机缺少 bootstrap 依赖：git' 'Missing bootstrap dependency on this computer: git')"
+  REPO_ROOT="$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel 2>/dev/null)" || die 3 "$(L '无法确定脚本所属 Git worktree' 'Cannot determine the Git worktree the script belongs to')"
+  [[ -n "${REPO_ROOT}" && -d "${REPO_ROOT}" && ! -L "${REPO_ROOT}" ]] || die 3 "$(L '脚本所属 Git worktree 身份异常' 'The Git worktree the script belongs to has an unexpected identity')"
 }
 
 archive_url() {
@@ -1872,12 +2025,12 @@ download_official_archive() {
   if ! curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 --max-time 600 "$(archive_url "${archive}")" -o "${temp_path}"; then
     rm -f "${temp_path}"
     [[ "${optional}" == optional ]] && return 1
-    die 3 "下载官方资产失败：${archive}"
+    die 3 "$(L "下载官方资产失败：${archive}" "Downloading the official asset failed: ${archive}")"
   fi
   if [[ "$(sha256_file "${temp_path}")" != "${expected}" ]]; then
     rm -f "${temp_path}"
     [[ "${optional}" == optional ]] && return 1
-    die 3 "官方资产摘要不符：${archive}"
+    die 3 "$(L "官方资产摘要不符：${archive}" "Official asset digest mismatch: ${archive}")"
   fi
 }
 
@@ -1893,7 +2046,7 @@ verified_archive_path() {
     private_dir_is_safe "${CHAIN_CACHE_DIR}" || cache_safe=0
   fi
   if [[ "${cache_safe}" == 0 ]]; then
-    [[ "${mode}" != deploy ]] || die 1 "cache 目录身份或权限不安全：${CHAIN_CACHE_DIR}"
+    [[ "${mode}" != deploy ]] || die 1 "$(L "cache 目录身份或权限不安全：${CHAIN_CACHE_DIR}" "The cache directory's ownership or permissions are unsafe: ${CHAIN_CACHE_DIR}")"
     temp_path="${OP_TMP}/${archive}"
     download_official_archive "${archive}" "${expected}" "${temp_path}" "${optional}" || return 1
     printf '%s\n' "${temp_path}"
@@ -1908,7 +2061,7 @@ verified_archive_path() {
     if [[ "${mode}" == deploy ]]; then
       local corrupt
       corrupt="${cache_path}.corrupt.${actual}.${OPERATION_ID}"
-      link "${cache_path}" "${corrupt}" || die 1 '无法排他归档损坏的 cache'
+      link "${cache_path}" "${corrupt}" || die 1 "$(L '无法排他归档损坏的 cache' 'Cannot exclusively archive the corrupted cache')"
       rm -f "${cache_path}"
     fi
   elif [[ -e "${cache_path}" ]]; then
@@ -1918,21 +2071,21 @@ verified_archive_path() {
       printf '%s\n' "${temp_path}"
       return 0
     }
-    die 1 "cache 路径不是当前用户拥有的 600 regular file：${cache_path}"
+    die 1 "$(L "cache 路径不是当前用户拥有的 600 regular file：${cache_path}" "The cache path is not a mode-600 regular file owned by the current user: ${cache_path}")"
   fi
   temp_path="${OP_TMP}/${archive}"
   download_official_archive "${archive}" "${expected}" "${temp_path}" "${optional}" || return 1
   if [[ "${mode}" == deploy ]]; then
     local cache_temp
-    ensure_private_dir "${CHAIN_CACHE_DIR}" || die 1 'cache 目录身份或权限不安全'
+    ensure_private_dir "${CHAIN_CACHE_DIR}" || die 1 "$(L 'cache 目录身份或权限不安全' 'The cache directory'\''s ownership or permissions are unsafe')"
     cache_temp="${CHAIN_CACHE_DIR}/.${archive}.${LOCK_OPERATION_ID}.tmp"
-    ( set -o noclobber; : > "${cache_temp}" ) 2>/dev/null || die 1 '无法排他创建 cache 临时文件'
-    cp "${temp_path}" "${cache_temp}" || die 1 '无法写入 cache 临时文件'
+    ( set -o noclobber; : > "${cache_temp}" ) 2>/dev/null || die 1 "$(L '无法排他创建 cache 临时文件' 'Cannot exclusively create a cache temporary file')"
+    cp "${temp_path}" "${cache_temp}" || die 1 "$(L '无法写入 cache 临时文件' 'Cannot write the cache temporary file')"
     chmod 600 "${cache_temp}"
-    [[ "$(sha256_file "${cache_temp}")" == "${expected}" ]] || die 1 'cache 发布前摘要复核失败'
+    [[ "$(sha256_file "${cache_temp}")" == "${expected}" ]] || die 1 "$(L 'cache 发布前摘要复核失败' 'The digest check before publishing the cache failed')"
     sync
     if ! link "${cache_temp}" "${cache_path}" 2>/dev/null; then
-      [[ -f "${cache_path}" && ! -L "${cache_path}" && "$(sha256_file "${cache_path}")" == "${expected}" ]] || die 1 'cache no-replace 发布发生冲突'
+      [[ -f "${cache_path}" && ! -L "${cache_path}" && "$(sha256_file "${cache_path}")" == "${expected}" ]] || die 1 "$(L 'cache no-replace 发布发生冲突' 'No-replace publishing of the cache hit a conflict')"
     fi
     rm -f "${cache_temp}"
     printf '%s\n' "${cache_path}"
@@ -1951,27 +2104,27 @@ prepare_verified_assets() {
   select_local_platform
   if [[ "${DARWIN_ARCHIVE_SHA256}" == NONE ]]; then
     DARWIN_BINARY_SHA256='NONE'
-    log_warn "没有本机平台（$(uname -s) $(uname -m)）的官方包，跳过本机侧出口验证"
+    log_warn "$(L "没有本机平台（$(uname -s) $(uname -m)）的官方包，跳过本机侧出口验证" "No official package for this platform ($(uname -s) $(uname -m)); skipping the local exit check")"
     return 0
   fi
   if ! DARWIN_ARCHIVE_PATH="$(verified_archive_path "${mode}" "${DARWIN_ARCHIVE}" "${DARWIN_ARCHIVE_SHA256}" optional)"; then
     DARWIN_ARCHIVE_PATH=''
     DARWIN_ARCHIVE_SHA256='NONE'
     DARWIN_BINARY_SHA256='NONE'
-    log_warn "没有本机平台（${LOCAL_PLATFORM}）的官方包（缓存缺失且下载失败），跳过本机侧出口验证"
+    log_warn "$(L "没有本机平台（${LOCAL_PLATFORM}）的官方包（缓存缺失且下载失败），跳过本机侧出口验证" "No official package for this platform (${LOCAL_PLATFORM}) (cache missing and the download failed); skipping the local exit check")"
     return 0
   fi
   extract_root="${OP_TMP}/assets"
   mkdir "${extract_root}"
   tar -xzf "${DARWIN_ARCHIVE_PATH}" -C "${extract_root}"
   DARWIN_BINARY_PATH="${extract_root}/sing-box-${SING_BOX_VERSION}-${LOCAL_PLATFORM}/sing-box"
-  [[ -f "${DARWIN_BINARY_PATH}" && ! -L "${DARWIN_BINARY_PATH}" ]] || die 3 "本机平台官方包布局异常：${LOCAL_PLATFORM}"
+  [[ -f "${DARWIN_BINARY_PATH}" && ! -L "${DARWIN_BINARY_PATH}" ]] || die 3 "$(L "本机平台官方包布局异常：${LOCAL_PLATFORM}" "Unexpected layout of the official package for this platform: ${LOCAL_PLATFORM}")"
   chmod 700 "${DARWIN_BINARY_PATH}"
   DARWIN_BINARY_SHA256="$(sha256_file "${DARWIN_BINARY_PATH}")"
   expected_binary="$(binary_sha256_of_platform "${LOCAL_PLATFORM}")"
-  [[ "${DARWIN_BINARY_SHA256}" == "${expected_binary}" ]] || die 3 "本机平台 binary 摘要不符：${LOCAL_PLATFORM}"
+  [[ "${DARWIN_BINARY_SHA256}" == "${expected_binary}" ]] || die 3 "$(L "本机平台 binary 摘要不符：${LOCAL_PLATFORM}" "Binary digest mismatch for this platform: ${LOCAL_PLATFORM}")"
   version_output="$("${DARWIN_BINARY_PATH}" version | awk '/^sing-box version / {print $3; exit}')"
-  [[ "${version_output}" == "${SING_BOX_VERSION}" ]] || die 3 '本机 binary 版本不符'
+  [[ "${version_output}" == "${SING_BOX_VERSION}" ]] || die 3 "$(L '本机 binary 版本不符' 'Local binary version mismatch')"
 }
 
 write_remote_preflight_script() {
@@ -1987,6 +2140,9 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 role="$1"
 cohosts="$2"
+# 远端没有 i18n_lib.sh：提示语言由本机作为第三个参数传过来（缺省 zh）。
+ui_lang="${3:-zh}"
+L() { if [[ "$ui_lang" == en ]]; then printf '%s' "$2"; else printf '%s' "$1"; fi; }
 tmp="$(mktemp -d /tmp/ownexit-chain-preflight.XXXXXX)"
 cleanup() {
   rm -rf "$tmp"
@@ -2008,19 +2164,19 @@ supports_option() {
   [[ "$help_output" == *"$expected"* ]]
 }
 
-[[ "$(id -u)" == 0 ]] || fail '必须以 root 执行'
-[[ "$(uname -s)" == Linux ]] || fail '只支持 Linux'
+[[ "$(id -u)" == 0 ]] || fail "$(L '必须以 root 执行' 'must run as root')"
+[[ "$(uname -s)" == Linux ]] || fail "$(L '只支持 Linux' 'only Linux is supported')"
 case "$(uname -m)" in
   x86_64) remote_arch=amd64 ;;
   aarch64|arm64) remote_arch=arm64 ;;
-  *) fail "只支持 amd64 / arm64（当前：$(uname -m)）" ;;
+  *) fail "$(L "只支持 amd64 / arm64（当前：$(uname -m)）" "only amd64 / arm64 are supported (current: $(uname -m))")" ;;
 esac
 for parent in / /opt /etc /etc/systemd /etc/systemd/system; do
-  [[ -d "$parent" && ! -L "$parent" && "$(stat -c %u "$parent")" == 0 ]] || fail "系统父目录不安全:$parent"
+  [[ -d "$parent" && ! -L "$parent" && "$(stat -c %u "$parent")" == 0 ]] || fail "$(L "系统父目录不安全:$parent" "unsafe system parent directory:$parent")"
   parent_mode="$(stat -c %a "$parent")"
-  (( (8#$parent_mode & 8#022) == 0 )) || fail "系统父目录可被 group/other 写:$parent"
+  (( (8#$parent_mode & 8#022) == 0 )) || fail "$(L "系统父目录可被 group/other 写:$parent" "system parent directory writable by group/other:$parent")"
 done
-[[ "$(stat -c %d /etc)" == "$(stat -c %d /etc/systemd/system)" ]] || fail '配置与 systemd unit 目标不在同一文件系统'
+[[ "$(stat -c %d /etc)" == "$(stat -c %d /etc/systemd/system)" ]] || fail "$(L '配置与 systemd unit 目标不在同一文件系统' 'configuration and systemd unit targets are on different file systems')"
 if [[ "$role" == relay ]]; then
   wants_dir=/etc/systemd/system/sockets.target.wants
 else
@@ -2028,66 +2184,66 @@ else
 fi
 # 全新机（从未 enable 过 socket unit）没有 sockets.target.wants 是常态；脚本按设计不代建 systemd 标准目录，
 # 但"不存在"必须与"存在却不安全"分开报，并告诉用户怎么建（fix-preflight-wants-dir.md）。
-[[ -e "$wants_dir" || -L "$wants_dir" ]] || fail "systemd wants 目录不存在:$wants_dir（请以 root 执行 mkdir -m 755 $wants_dir 后重跑；脚本不代建 systemd 标准目录）"
-[[ -d "$wants_dir" && ! -L "$wants_dir" && "$(stat -c %u "$wants_dir")" == 0 ]] || fail "systemd wants 目录不安全:$wants_dir"
+[[ -e "$wants_dir" || -L "$wants_dir" ]] || fail "$(L "systemd wants 目录不存在:$wants_dir（请以 root 执行 mkdir -m 755 $wants_dir 后重跑；脚本不代建 systemd 标准目录）" "systemd wants directory missing:$wants_dir (run mkdir -m 755 $wants_dir as root, then rerun; the script does not create standard systemd directories)")"
+[[ -d "$wants_dir" && ! -L "$wants_dir" && "$(stat -c %u "$wants_dir")" == 0 ]] || fail "$(L "systemd wants 目录不安全:$wants_dir" "unsafe systemd wants directory:$wants_dir")"
 wants_mode="$(stat -c %a "$wants_dir")"
-(( (8#$wants_mode & 8#022) == 0 )) || fail "systemd wants 目录可被 group/other 写:$wants_dir"
+(( (8#$wants_mode & 8#022) == 0 )) || fail "$(L "systemd wants 目录可被 group/other 写:$wants_dir" "systemd wants directory writable by group/other:$wants_dir")"
 
 common='bash ssh-keygen openssl sha256sum systemctl systemd-analyze systemd-run ss tar nft timeout find stat readlink link ln sync base64 awk sed grep sort tr head tail cmp chmod chown mkdir rmdir rm cp mv cut cat date sleep uname kill dirname basename id mktemp env'
 for command_name in $common; do
-  command -v "$command_name" >/dev/null 2>&1 || fail "缺少命令:$command_name"
+  command -v "$command_name" >/dev/null 2>&1 || fail "$(L "缺少命令:$command_name" "missing command:$command_name")"
 done
 trusted_executable() {
   local candidate resolved mode
   candidate="$1"
   resolved="$(readlink -f "$candidate")"
-  [[ "$resolved" == /* && -f "$resolved" && ! -L "$resolved" && -x "$resolved" ]] || fail "不安全的可执行文件:$candidate"
-  [[ "$(stat -c %u:%g "$resolved")" == 0:0 ]] || fail "可执行文件非 root:root:$resolved"
+  [[ "$resolved" == /* && -f "$resolved" && ! -L "$resolved" && -x "$resolved" ]] || fail "$(L "不安全的可执行文件:$candidate" "unsafe executable:$candidate")"
+  [[ "$(stat -c %u:%g "$resolved")" == 0:0 ]] || fail "$(L "可执行文件非 root:root:$resolved" "executable not owned by root:root:$resolved")"
   mode="$(stat -c %a "$resolved")"
-  (( (8#$mode & 8#022) == 0 )) || fail "可执行文件可被 group/other 写:$resolved"
+  (( (8#$mode & 8#022) == 0 )) || fail "$(L "可执行文件可被 group/other 写:$resolved" "executable writable by group/other:$resolved")"
   printf '%s\n' "$resolved"
 }
 systemctl_path="$(trusted_executable "$(command -v systemctl)")"
 if [[ "$role" == relay ]]; then
   for command_name in curl getent; do
-    command -v "$command_name" >/dev/null 2>&1 || fail "缺少命令:$command_name"
+    command -v "$command_name" >/dev/null 2>&1 || fail "$(L "缺少命令:$command_name" "missing command:$command_name")"
   done
 else
-  command -v wget >/dev/null 2>&1 || fail '缺少命令:wget'
+  command -v wget >/dev/null 2>&1 || fail "$(L '缺少命令:wget' 'missing command:wget')"
 fi
 
-supports_option tar '--no-same-owner' || fail 'tar 不支持 --no-same-owner'
-supports_option tar '--no-same-permissions' || fail 'tar 不支持 --no-same-permissions'
-supports_option ln '--no-target-directory' || fail 'ln 不支持 --no-target-directory'
+supports_option tar '--no-same-owner' || fail "$(L 'tar 不支持 --no-same-owner' 'tar does not support --no-same-owner')"
+supports_option tar '--no-same-permissions' || fail "$(L 'tar 不支持 --no-same-permissions' 'tar does not support --no-same-permissions')"
+supports_option ln '--no-target-directory' || fail "$(L 'ln 不支持 --no-target-directory' 'ln does not support --no-target-directory')"
 
 printf 'sentinel\n' > "$tmp/source"
 mkdir "$tmp/container"
 ln -s "$tmp/container" "$tmp/target"
 if link "$tmp/source" "$tmp/target" 2>/dev/null; then
-  fail 'link 覆盖或跟随了 exact target'
+  fail "$(L 'link 覆盖或跟随了 exact target' 'link overwrote or followed the exact target')"
 fi
-[[ ! -e "$tmp/container/source" ]] || fail 'link 把 target directory 当作容器'
+[[ ! -e "$tmp/container/source" ]] || fail "$(L 'link 把 target directory 当作容器' 'link treated the target directory as a container')"
 
 # 除本项目自己管理的出口机白名单表（table inet ownexit_*，见 EXIT_SOURCE_FILTER=managed）外不得有任何 nft 表；
 # 同一台出口机上可以有多条链各自的白名单表。
-timeout --signal=TERM --kill-after=2s 10s nft list tables > "$tmp/nft" || fail 'nft 规则无法核证'
+timeout --signal=TERM --kill-after=2s 10s nft list tables > "$tmp/nft" || fail "$(L 'nft 规则无法核证' 'nft rules cannot be verified')"
 if grep -v '^table inet ownexit_[a-z0-9_]*$' "$tmp/nft" | grep -q '[^[:space:]]'; then
-  fail 'nft 规则集非空（除 ownexit_* 白名单表外）'
+  fail "$(L 'nft 规则集非空（除 ownexit_* 白名单表外）' 'nft ruleset is not empty (other than the ownexit_* allowlist tables)')"
 fi
 if command -v ufw >/dev/null 2>&1; then
-  timeout --signal=TERM --kill-after=2s 10s ufw status > "$tmp/ufw" || fail 'ufw 状态无法核证'
-  grep -q '^Status: inactive$' "$tmp/ufw" || fail 'ufw 处于活动状态'
+  timeout --signal=TERM --kill-after=2s 10s ufw status > "$tmp/ufw" || fail "$(L 'ufw 状态无法核证' 'ufw status cannot be verified')"
+  grep -q '^Status: inactive$' "$tmp/ufw" || fail "$(L 'ufw 处于活动状态' 'ufw is active')"
 fi
 if command -v iptables-save >/dev/null 2>&1; then
-  timeout --signal=TERM --kill-after=2s 10s iptables-save > "$tmp/iptables" || fail 'iptables 状态无法核证'
-  ! grep -q '^-A ' "$tmp/iptables" || fail 'iptables 存在规则'
-  ! awk '$1 == "-P" && $3 != "ACCEPT" { bad=1 } END { exit bad ? 0 : 1 }' "$tmp/iptables" || fail 'iptables 内建链 policy 非 ACCEPT'
+  timeout --signal=TERM --kill-after=2s 10s iptables-save > "$tmp/iptables" || fail "$(L 'iptables 状态无法核证' 'iptables state cannot be verified')"
+  ! grep -q '^-A ' "$tmp/iptables" || fail "$(L 'iptables 存在规则' 'iptables has rules')"
+  ! awk '$1 == "-P" && $3 != "ACCEPT" { bad=1 } END { exit bad ? 0 : 1 }' "$tmp/iptables" || fail "$(L 'iptables 内建链 policy 非 ACCEPT' 'an iptables built-in chain policy is not ACCEPT')"
 elif [[ -s /proc/net/ip_tables_names ]]; then
-  fail '缺少 iptables-save 但 legacy table 存在'
+  fail "$(L '缺少 iptables-save 但 legacy table 存在' 'iptables-save is missing but legacy tables exist')"
 fi
 
-systemd-analyze unit-paths >/dev/null || fail 'systemd unit load path 无法读取'
-supports_option systemd-run '--timer-property' || fail 'systemd-run 不支持 --timer-property'
+systemd-analyze unit-paths >/dev/null || fail "$(L 'systemd unit load path 无法读取' 'systemd unit load path cannot be read')"
+supports_option systemd-run '--timer-property' || fail "$(L 'systemd-run 不支持 --timer-property' 'systemd-run does not support --timer-property')"
 
 if [[ "$role" == relay ]]; then
   proxyd="$(command -v systemd-socket-proxyd 2>/dev/null || true)"
@@ -2099,9 +2255,9 @@ if [[ "$role" == relay ]]; then
       fi
     done
   fi
-  [[ -n "$proxyd" ]] || fail '缺少安全的 systemd-socket-proxyd'
+  [[ -n "$proxyd" ]] || fail "$(L '缺少安全的 systemd-socket-proxyd' 'no safe systemd-socket-proxyd found')"
   proxyd="$(trusted_executable "$proxyd")"
-  supports_option "$proxyd" '--connections-max' || fail 'systemd-socket-proxyd 不支持 --connections-max'
+  supports_option "$proxyd" '--connections-max' || fail "$(L 'systemd-socket-proxyd 不支持 --connections-max' 'systemd-socket-proxyd does not support --connections-max')"
 
   # co-host 判定表（docs/feature/feature-direct-native-install.md §5.1.10）：预检、init、rebaseline 共用同一组信号。
   # U1/D1 = 233boy 的 sing-box.service 与 /etc/sing-box；U2/D2 = ownexit 直连的 ownexit-direct.service 与 /etc/ownexit-direct；
@@ -2126,23 +2282,23 @@ if [[ "$role" == relay ]]; then
     *) cohost_unit=''; cohost_dir='' ;;
   esac
   if [[ "$cohosts" == yes ]]; then
-    [[ "$load_state" == loaded && "$config_seen" == yes && "$process_seen" == yes ]] || fail '声明 co-host，但既有 sing-box 配置、进程或 unit 缺失'
-    [[ "$direct_load_state" == not-found && "$direct_config_seen" == no ]] || fail '声明 233boy co-host，但中转机上还有 ownexit-direct；运行 rebaseline 重新登记'
+    [[ "$load_state" == loaded && "$config_seen" == yes && "$process_seen" == yes ]] || fail "$(L '声明 co-host，但既有 sing-box 配置、进程或 unit 缺失' 'co-host declared, but the existing sing-box configuration, process or unit is missing')"
+    [[ "$direct_load_state" == not-found && "$direct_config_seen" == no ]] || fail "$(L '声明 233boy co-host，但中转机上还有 ownexit-direct；运行 rebaseline 重新登记' '233boy co-host declared, but the relay also has ownexit-direct; run rebaseline to re-register')"
   elif [[ "$cohosts" == ownexit-direct ]]; then
-    [[ "$direct_load_state" == loaded && "$direct_config_seen" == yes && "$process_seen" == yes ]] || fail '声明 ownexit-direct co-host，但其配置、进程或 unit 缺失'
-    [[ "$load_state" == not-found && "$config_seen" == no ]] || fail '声明 ownexit-direct co-host，但中转机上还有 233boy 的 sing-box；运行 rebaseline 重新登记'
+    [[ "$direct_load_state" == loaded && "$direct_config_seen" == yes && "$process_seen" == yes ]] || fail "$(L '声明 ownexit-direct co-host，但其配置、进程或 unit 缺失' 'ownexit-direct co-host declared, but its configuration, process or unit is missing')"
+    [[ "$load_state" == not-found && "$config_seen" == no ]] || fail "$(L '声明 ownexit-direct co-host，但中转机上还有 233boy 的 sing-box；运行 rebaseline 重新登记' 'ownexit-direct co-host declared, but the relay also has the 233boy sing-box; run rebaseline to re-register')"
   else
-    [[ "$load_state" == not-found && "$config_seen" == no && "$process_seen" == no && "$direct_load_state" == not-found && "$direct_config_seen" == no ]] || fail '声明全新中转，但发现既有 sing-box / ownexit-direct 的配置、进程或 unit；运行 rebaseline 重新登记'
+    [[ "$load_state" == not-found && "$config_seen" == no && "$process_seen" == no && "$direct_load_state" == not-found && "$direct_config_seen" == no ]] || fail "$(L '声明全新中转，但发现既有 sing-box / ownexit-direct 的配置、进程或 unit；运行 rebaseline 重新登记' 'fresh relay declared, but an existing sing-box / ownexit-direct configuration, process or unit was found; run rebaseline to re-register')"
   fi
   if [[ -n "$cohost_unit" ]]; then
-    [[ -d "$cohost_dir" && ! -L "$cohost_dir" ]] || fail "既有 $cohost_dir 目录身份不安全"
+    [[ -d "$cohost_dir" && ! -L "$cohost_dir" ]] || fail "$(L "既有 $cohost_dir 目录身份不安全" "existing $cohost_dir directory identity is unsafe")"
     config_mode="$(stat -c %a "$cohost_dir")"
-    (( (8#$config_mode & 8#022) == 0 )) || fail "既有 $cohost_dir 可被 group/other 写"
-    [[ "$(systemctl is-active "$cohost_unit" 2>/dev/null || true)" == active ]] || fail "既有 $cohost_unit 非 active"
+    (( (8#$config_mode & 8#022) == 0 )) || fail "$(L "既有 $cohost_dir 可被 group/other 写" "existing $cohost_dir writable by group/other")"
+    [[ "$(systemctl is-active "$cohost_unit" 2>/dev/null || true)" == active ]] || fail "$(L "既有 $cohost_unit 非 active" "existing $cohost_unit is not active")"
     pid="$(systemctl show "$cohost_unit" -p MainPID --value)"
-    [[ "$pid" =~ ^[1-9][0-9]*$ && -d "/proc/$pid" ]] || fail "既有 $cohost_unit MainPID 无效"
+    [[ "$pid" =~ ^[1-9][0-9]*$ && -d "/proc/$pid" ]] || fail "$(L "既有 $cohost_unit MainPID 无效" "existing $cohost_unit MainPID is invalid")"
     exe="$(readlink -f "/proc/$pid/exe")"
-    [[ -f "$exe" && ! -L "$exe" ]] || fail "既有 $cohost_unit executable 不安全"
+    [[ -f "$exe" && ! -L "$exe" ]] || fail "$(L "既有 $cohost_unit executable 不安全" "existing $cohost_unit executable is unsafe")"
   fi
   printf 'SOCKET_PROXYD_PATH=%s\n' "$proxyd"
   printf 'SYSTEMCTL_PATH=%s\n' "$systemctl_path"
@@ -2160,7 +2316,7 @@ probe_remote_platform_preflight() {
   local script output rc relay_arch exit_arch
   script="${OP_TMP}/remote-preflight.sh"
   write_remote_preflight_script "${script}" || return 30
-  if output="$(ssh_relay_stdin bash -s -- relay "${RELAY_COHOSTS_SINGBOX}" < "${script}")"; then
+  if output="$(ssh_relay_stdin bash -s -- relay "${RELAY_COHOSTS_SINGBOX}" "${OWNEXIT_UI_LANG}" < "${script}")"; then
     rc=0
   else
     rc="$?"
@@ -2170,7 +2326,7 @@ probe_remote_platform_preflight() {
   SYSTEMCTL_PATH="$(printf '%s\n' "${output}" | awk -F= '$1 == "SYSTEMCTL_PATH" {print $2}')"
   [[ "${SOCKET_PROXYD_PATH}" == /* && "${SYSTEMCTL_PATH}" == /* ]] || return 32
   relay_arch="$(printf '%s\n' "${output}" | awk -F= '$1 == "REMOTE_ARCH" {print $2}')"
-  if output="$(ssh_exit_stdin bash -s -- exit no < "${script}")"; then
+  if output="$(ssh_exit_stdin bash -s -- exit no "${OWNEXIT_UI_LANG}" < "${script}")"; then
     rc=0
   else
     rc="$?"
@@ -2196,18 +2352,18 @@ remote_platform_preflight() {
   fi
   case "${rc}" in
     0) return 0 ;;
-    21) die 3 '中转平台预检 SSH 不可达' ;;
-    22) die 3 '出口机平台预检 SSH 不可达' ;;
-    31) die 3 '中转依赖、防火墙或角色声明预检失败；若中转机上的直连刚迁移、改参数、新装或卸载过，运行 rebaseline 重新登记' ;;
-    32) die 3 '中转能力探针没有返回安全绝对路径' ;;
-    33) die 3 '出口机依赖或防火墙预检失败' ;;
-    34) die 3 '中转机与出口机的 CPU 架构必须相同（都为 amd64 或都为 arm64），且与已部署状态一致' ;;
-    *) die 3 '远端平台预检脚本生成或执行异常' ;;
+    21) die 3 "$(L '中转平台预检 SSH 不可达' 'The relay is unreachable over SSH during the platform preflight')" ;;
+    22) die 3 "$(L '出口机平台预检 SSH 不可达' 'The exit is unreachable over SSH during the platform preflight')" ;;
+    31) die 3 "$(L '中转依赖、防火墙或角色声明预检失败；若中转机上的直连刚迁移、改参数、新装或卸载过，运行 rebaseline 重新登记' 'The relay'\''s dependency, firewall or role declaration preflight failed; if direct on the relay was just migrated, reconfigured, freshly installed or uninstalled, run rebaseline to register it again')" ;;
+    32) die 3 "$(L '中转能力探针没有返回安全绝对路径' 'The relay capability probe did not return a safe absolute path')" ;;
+    33) die 3 "$(L '出口机依赖或防火墙预检失败' 'The exit'\''s dependency or firewall preflight failed')" ;;
+    34) die 3 "$(L '中转机与出口机的 CPU 架构必须相同（都为 amd64 或都为 arm64），且与已部署状态一致' 'The relay and the exit must have the same CPU architecture (both amd64 or both arm64), matching the deployed state')" ;;
+    *) die 3 "$(L '远端平台预检脚本生成或执行异常' 'Generating or running the remote platform preflight script failed')" ;;
   esac
 }
 
 probe_exit_tls() {
-  ssh_exit env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin timeout --signal=TERM --kill-after=2s 20s openssl s_client -connect "${REALITY_SERVER_NAME}:443" -servername "${REALITY_SERVER_NAME}" -tls1_3 -verify_return_error -verify_hostname "${REALITY_SERVER_NAME}" </dev/null >/dev/null 2>&1 || die 3 '出口机到 Reality handshake server 的 TLS 1.3/证书前置探针失败'
+  ssh_exit env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin timeout --signal=TERM --kill-after=2s 20s openssl s_client -connect "${REALITY_SERVER_NAME}:443" -servername "${REALITY_SERVER_NAME}" -tls1_3 -verify_return_error -verify_hostname "${REALITY_SERVER_NAME}" </dev/null >/dev/null 2>&1 || die 3 "$(L '出口机到 Reality handshake server 的 TLS 1.3/证书前置探针失败' 'The TLS 1.3 / certificate pre-probe from the exit to the Reality handshake server failed')"
 }
 
 write_exit_probe_script() {
@@ -2242,7 +2398,7 @@ probe_exit_exit() {
   local script
   script="${OP_TMP}/exit-probe.sh"
   write_exit_probe_script "${script}"
-  ssh_exit_stdin bash -s -- "${EXPECTED_EXIT_IPV4}" < "${script}" >/dev/null || die 3 '出口机直连出口未通过 2-of-3 严格仲裁'
+  ssh_exit_stdin bash -s -- "${EXPECTED_EXIT_IPV4}" < "${script}" >/dev/null || die 3 "$(L '出口机直连出口未通过 2-of-3 严格仲裁' 'The exit'\''s direct outbound did not pass the strict 2-of-3 arbitration')"
 }
 
 # 返回 0=远端确无该路径；1=远端存在（碰撞）；2=SSH 不可达（rc 255），没核成。
@@ -2262,7 +2418,7 @@ remote_test_path() {
       if ssh_exit test ! "${flag}" "${path}"; then rc=0; else rc="$?"; fi
     fi
     [[ "${rc}" -eq 255 && "${attempt}" -eq 1 ]] || break
-    log_warn "${role} SSH 连接被断开，2 秒后重试一次（检查 ${path}）"
+    log_warn "$(L "${role} SSH 连接被断开，2 秒后重试一次（检查 ${path}）" "${role} SSH connection dropped; retrying once in 2 seconds (checking ${path})")"
     sleep 2
   done
   return "${rc}"
@@ -2281,7 +2437,7 @@ remote_path_absent() {
 }
 
 role_label() {
-  if [[ "$1" == relay ]]; then printf '中转\n'; else printf '出口机\n'; fi
+  if [[ "$1" == relay ]]; then printf "$(L '中转\n' 'relay\n')"; else printf "$(L '出口机\n' 'exit\n')"; fi
 }
 
 # 碰撞核证的统一分派：不可达退出 3（与 configured_resources_absent 的口径一致），真实碰撞才退出 4。
@@ -2294,7 +2450,7 @@ require_remote_path_absent() {
   if remote_path_absent "${role}" "${path}"; then rc=0; else rc="$?"; fi
   case "${rc}" in
     0) return 0 ;;
-    2) die 3 "碰撞核证期间$(role_label "${role}")不可达：${path}" ;;
+    2) die 3 "$(L "碰撞核证期间$(role_label "${role}")不可达：${path}" "$(role_label "${role}") unreachable during the collision check: ${path}")" ;;
     *) die 4 "${message}" ;;
   esac
 }
@@ -2307,7 +2463,7 @@ require_remote_unit_absent() {
   if remote_unit_absent "${role}" "${unit}"; then rc=0; else rc="$?"; fi
   case "${rc}" in
     0) return 0 ;;
-    2) die 3 "碰撞核证期间$(role_label "${role}")不可达或 systemd unit-paths 不可读：${unit}" ;;
+    2) die 3 "$(L "碰撞核证期间$(role_label "${role}")不可达或 systemd unit-paths 不可读：${unit}" "$(role_label "${role}") unreachable or systemd unit-paths unreadable during the collision check: ${unit}")" ;;
     *) die 4 "${message}" ;;
   esac
 }
@@ -2350,13 +2506,13 @@ UNIT_ABSENT
 
 check_initial_collisions() {
   local relay_owner relay_socket relay_service relay_link exit_owner exit_exit exit_service exit_link rc
-  configured_local_resources_absent || die 4 '无 active state，但发现当前 chain 的本地 staging、临时提交或活动产物'
+  configured_local_resources_absent || die 4 "$(L '无 active state，但发现当前 chain 的本地 staging、临时提交或活动产物' 'No active state, but this chain'\''s local staging, temporary commits or live artifacts were found')"
   if configured_resources_absent; then rc=0; else rc="$?"; fi
   case "${rc}" in
     0) ;;
-    21) die 3 '初始资源核证期间中转不可达' ;;
-    22) die 3 '初始资源核证期间出口机不可达' ;;
-    *) die 4 '无 active state，但发现确定性资源或当前 chain/config 的 owned staging' ;;
+    21) die 3 "$(L '初始资源核证期间中转不可达' 'The relay is unreachable during the initial resource check')" ;;
+    22) die 3 "$(L '初始资源核证期间出口机不可达' 'The exit is unreachable during the initial resource check')" ;;
+    *) die 4 "$(L '无 active state，但发现确定性资源或当前 chain/config 的 owned staging' 'No active state, but deterministic resources or owned staging of this chain/config were found')" ;;
   esac
   relay_owner="${REMOTE_CONFIG_DIR}/${CHAIN_ID}.owner.env"
   relay_socket="/etc/systemd/system/ownexit-chain-relay-${CHAIN_ID}.socket"
@@ -2366,17 +2522,17 @@ check_initial_collisions() {
   exit_exit="${REMOTE_CONFIG_DIR}/${CHAIN_ID}.exit.json"
   exit_service="/etc/systemd/system/ownexit-chain-exit-${CHAIN_ID}.service"
   exit_link="/etc/systemd/system/multi-user.target.wants/ownexit-chain-exit-${CHAIN_ID}.service"
-  require_remote_path_absent relay "${relay_owner}" "中转专属 owner 路径碰撞：${relay_owner}"
-  require_remote_path_absent relay "${relay_socket}" "中转 socket unit 路径碰撞：${relay_socket}"
-  require_remote_path_absent relay "${relay_service}" "中转 service unit 路径碰撞：${relay_service}"
-  require_remote_path_absent relay "${relay_link}" "中转 enablement 路径碰撞：${relay_link}"
-  require_remote_unit_absent relay "ownexit-chain-relay-${CHAIN_ID}.socket" 'systemd load path 中存在同名中转 socket'
-  require_remote_unit_absent relay "ownexit-chain-relay-${CHAIN_ID}.service" 'systemd load path 中存在同名中转 service'
-  require_remote_path_absent exit "${exit_owner}" "出口机专属 owner 路径碰撞：${exit_owner}"
-  require_remote_path_absent exit "${exit_exit}" "出口机 config 路径碰撞：${exit_exit}"
-  require_remote_path_absent exit "${exit_service}" "出口机 service unit 路径碰撞：${exit_service}"
-  require_remote_path_absent exit "${exit_link}" "出口机 enablement 路径碰撞：${exit_link}"
-  require_remote_unit_absent exit "ownexit-chain-exit-${CHAIN_ID}.service" 'systemd load path 中存在同名出口机 service'
+  require_remote_path_absent relay "${relay_owner}" "$(L "中转专属 owner 路径碰撞：${relay_owner}" "Relay-specific owner path collision: ${relay_owner}")"
+  require_remote_path_absent relay "${relay_socket}" "$(L "中转 socket unit 路径碰撞：${relay_socket}" "Relay socket unit path collision: ${relay_socket}")"
+  require_remote_path_absent relay "${relay_service}" "$(L "中转 service unit 路径碰撞：${relay_service}" "Relay service unit path collision: ${relay_service}")"
+  require_remote_path_absent relay "${relay_link}" "$(L "中转 enablement 路径碰撞：${relay_link}" "Relay enablement path collision: ${relay_link}")"
+  require_remote_unit_absent relay "ownexit-chain-relay-${CHAIN_ID}.socket" "$(L 'systemd load path 中存在同名中转 socket' 'A relay socket with the same name exists in the systemd load path')"
+  require_remote_unit_absent relay "ownexit-chain-relay-${CHAIN_ID}.service" "$(L 'systemd load path 中存在同名中转 service' 'A relay service with the same name exists in the systemd load path')"
+  require_remote_path_absent exit "${exit_owner}" "$(L "出口机专属 owner 路径碰撞：${exit_owner}" "Exit-specific owner path collision: ${exit_owner}")"
+  require_remote_path_absent exit "${exit_exit}" "$(L "出口机 config 路径碰撞：${exit_exit}" "Exit config path collision: ${exit_exit}")"
+  require_remote_path_absent exit "${exit_service}" "$(L "出口机 service unit 路径碰撞：${exit_service}" "Exit service unit path collision: ${exit_service}")"
+  require_remote_path_absent exit "${exit_link}" "$(L "出口机 enablement 路径碰撞：${exit_link}" "Exit enablement path collision: ${exit_link}")"
+  require_remote_unit_absent exit "ownexit-chain-exit-${CHAIN_ID}.service" "$(L 'systemd load path 中存在同名出口机 service' 'An exit service with the same name exists in the systemd load path')"
 }
 
 snapshot_operation_state() {
@@ -2607,9 +2763,9 @@ collect_relay_baseline() {
   fi
   case "${rc}" in
     0) return 0 ;;
-    21) die 3 '既有 sing-box 零回归基线采集时中转 SSH 不可达' ;;
-    31) die 3 '既有 sing-box 实际运行配置、unit、binary 或 listener 基线采集失败' ;;
-    *) die 3 '既有 sing-box 零回归基线不完整或本地暂存异常' ;;
+    21) die 3 "$(L '既有 sing-box 零回归基线采集时中转 SSH 不可达' 'The relay is unreachable over SSH while capturing the zero-regression baseline of the existing sing-box')" ;;
+    31) die 3 "$(L '既有 sing-box 实际运行配置、unit、binary 或 listener 基线采集失败' 'Capturing the baseline of the existing sing-box'\''s running configuration, unit, binary or listeners failed')" ;;
+    *) die 3 "$(L '既有 sing-box 零回归基线不完整或本地暂存异常' 'The zero-regression baseline of the existing sing-box is incomplete or the local staging is abnormal')" ;;
   esac
 }
 
@@ -2862,23 +3018,23 @@ write_checksummed_file() {
   mode="$2"
   payload="$3"
   parent="$(dirname "${final}")"
-  ensure_private_dir "${parent}" || die 1 "状态父目录身份或权限不安全：${parent}"
+  ensure_private_dir "${parent}" || die 1 "$(L "状态父目录身份或权限不安全：${parent}" "The state parent directory's ownership or permissions are unsafe: ${parent}")"
   # 事务 OPERATION_ID 会跨进程恢复；临时提交名必须绑定当前控制进程，避免断电残留把恢复永久卡住。
   temp="${parent}/.$(basename "${final}").${LOCK_OPERATION_ID}.tmp"
-  ( set -o noclobber; : > "${temp}" ) 2>/dev/null || die 1 "无法排他创建状态临时文件：${final}"
-  cp "${payload}" "${temp}" || die 1 "无法写入状态临时文件：${final}"
-  hash="$(sha256_file "${temp}")" || die 1 "无法计算状态 payload 摘要：${final}"
-  printf 'PAYLOAD_SHA256=%s\n' "${hash}" >> "${temp}" || die 1 "无法写入状态 checksum：${final}"
-  chmod 600 "${temp}" || die 1 "无法设置状态临时文件权限：${final}"
-  sync || die 1 "状态临时文件持久化失败：${final}"
+  ( set -o noclobber; : > "${temp}" ) 2>/dev/null || die 1 "$(L "无法排他创建状态临时文件：${final}" "Cannot exclusively create the state temporary file: ${final}")"
+  cp "${payload}" "${temp}" || die 1 "$(L "无法写入状态临时文件：${final}" "Cannot write the state temporary file: ${final}")"
+  hash="$(sha256_file "${temp}")" || die 1 "$(L "无法计算状态 payload 摘要：${final}" "Cannot compute the state payload digest: ${final}")"
+  printf 'PAYLOAD_SHA256=%s\n' "${hash}" >> "${temp}" || die 1 "$(L "无法写入状态 checksum：${final}" "Cannot write the state checksum: ${final}")"
+  chmod 600 "${temp}" || die 1 "$(L "无法设置状态临时文件权限：${final}" "Cannot set the state temporary file's permissions: ${final}")"
+  sync || die 1 "$(L "状态临时文件持久化失败：${final}" "Persisting the state temporary file failed: ${final}")"
   if [[ "${mode}" == new ]]; then
-    link "${temp}" "${final}" || die 1 "状态 no-replace 发布冲突：${final}"
-    rm -f "${temp}" || die 1 "状态发布后临时文件删除失败：${final}"
+    link "${temp}" "${final}" || die 1 "$(L "状态 no-replace 发布冲突：${final}" "No-replace publishing of the state hit a conflict: ${final}")"
+    rm -f "${temp}" || die 1 "$(L "状态发布后临时文件删除失败：${final}" "Deleting the temporary file after publishing the state failed: ${final}")"
   else
-    [[ -f "${final}" && ! -L "${final}" ]] || die 1 "拒绝替换非本方案状态：${final}"
-    mv -f "${temp}" "${final}" || die 1 "状态原子替换失败：${final}"
+    [[ -f "${final}" && ! -L "${final}" ]] || die 1 "$(L "拒绝替换非本方案状态：${final}" "Refusing to replace state that does not belong to this scheme: ${final}")"
+    mv -f "${temp}" "${final}" || die 1 "$(L "状态原子替换失败：${final}" "Atomic replacement of the state failed: ${final}")"
   fi
-  sync || die 1 "状态提交持久化失败：${final}"
+  sync || die 1 "$(L "状态提交持久化失败：${final}" "Persisting the state commit failed: ${final}")"
 }
 
 render_state_payload() {
@@ -2927,22 +3083,22 @@ render_journal_payload() {
 deploy_test_stop() {
   [[ "${COMMAND}" == deploy || "${COMMAND}" == up ]] || return 0
   [[ -n "${OWNEXIT_TEST_DEPLOY_STOP_AFTER:-}" && "${OWNEXIT_TEST_DEPLOY_STOP_AFTER}" == "${LAST_COMPLETED_STEP}" ]] || return 0
-  log_warn "测试钩子：deploy 在 ${LAST_COMPLETED_STEP} 之后停止"
+  log_warn "$(L "测试钩子：deploy 在 ${LAST_COMPLETED_STEP} 之后停止" "Test hook: deploy stops after ${LAST_COMPLETED_STEP}")"
   exit 99
 }
 
 write_journal() {
   local payload mode
   payload="${OP_TMP}/journal-payload"
-  render_journal_payload "${payload}" || die 1 'transaction payload 生成失败'
+  render_journal_payload "${payload}" || die 1 "$(L 'transaction payload 生成失败' 'Generating the transaction payload failed')"
   if [[ -e "${JOURNAL_FILE}" || -L "${JOURNAL_FILE}" ]]; then
-    validate_checksum_env "${JOURNAL_FILE}" journal || die 1 '活动 transaction 损坏，拒绝替换'
+    validate_checksum_env "${JOURNAL_FILE}" journal || die 1 "$(L '活动 transaction 损坏，拒绝替换' 'The active transaction is corrupted; refusing to replace it')"
     mode=replace
   else
     mode=new
   fi
-  write_checksummed_file "${JOURNAL_FILE}" "${mode}" "${payload}" || die 1 'transaction 提交失败'
-  validate_checksum_env "${JOURNAL_FILE}" journal || die 1 'transaction 写入后校验失败'
+  write_checksummed_file "${JOURNAL_FILE}" "${mode}" "${payload}" || die 1 "$(L 'transaction 提交失败' 'Committing the transaction failed')"
+  validate_checksum_env "${JOURNAL_FILE}" journal || die 1 "$(L 'transaction 写入后校验失败' 'Verifying the transaction after writing failed')"
   deploy_test_stop
 }
 
@@ -2950,10 +3106,10 @@ write_active_state() {
   local payload
   payload="${OP_TMP}/state-payload"
   CREATED_AT="$(now_rfc3339)"
-  render_state_payload "${payload}" || die 1 'active state payload 生成失败'
-  [[ ! -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 1 'active state 已存在，拒绝覆盖'
-  write_checksummed_file "${STATE_FILE}" new "${payload}" || die 1 'active state 提交失败'
-  validate_checksum_env "${STATE_FILE}" state || die 1 'active state 写入后校验失败'
+  render_state_payload "${payload}" || die 1 "$(L 'active state payload 生成失败' 'Generating the active state payload failed')"
+  [[ ! -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 1 "$(L 'active state 已存在，拒绝覆盖' 'The active state already exists; refusing to overwrite it')"
+  write_checksummed_file "${STATE_FILE}" new "${payload}" || die 1 "$(L 'active state 提交失败' 'Committing the active state failed')"
+  validate_checksum_env "${STATE_FILE}" state || die 1 "$(L 'active state 写入后校验失败' 'Verifying the active state after writing failed')"
 }
 
 # 采纳状态 / 事务记录里的资产哈希：远端归档哈希决定远端架构（并锁定，现场预检必须一致），
@@ -3055,15 +3211,15 @@ load_state_file() {
   else
     rc="$?"
   fi
-  [[ "${rc}" -eq 0 ]] || die 5 "state.env 校验失败：${STATE_PROBE_REASON}"
+  [[ "${rc}" -eq 0 ]] || die 5 "$(L "state.env 校验失败：${STATE_PROBE_REASON}" "state.env verification failed: ${STATE_PROBE_REASON}")"
 }
 
 load_journal_file() {
   local file value key expected
   file="$1"
-  validate_checksum_env "${file}" journal || die 5 'transaction.env schema、权限或 checksum 损坏'
-  [[ "$(kv_get "${file}" SCHEMA_VERSION)" == 1 && "$(kv_get "${file}" STATUS)" == active ]] || die 5 'transaction 版本或状态错误'
-  [[ "$(kv_get "${file}" CHAIN_ID)" == "${CHAIN_ID}" && "$(kv_get "${file}" CONFIG_SHA256)" == "${CONFIG_SHA256}" ]] || die 5 'transaction 与当前 chain/config 不绑定'
+  validate_checksum_env "${file}" journal || die 5 "$(L 'transaction.env schema、权限或 checksum 损坏' 'transaction.env schema, permissions or checksum are corrupted')"
+  [[ "$(kv_get "${file}" SCHEMA_VERSION)" == 1 && "$(kv_get "${file}" STATUS)" == active ]] || die 5 "$(L 'transaction 版本或状态错误' 'Wrong transaction version or status')"
+  [[ "$(kv_get "${file}" CHAIN_ID)" == "${CHAIN_ID}" && "$(kv_get "${file}" CONFIG_SHA256)" == "${CONFIG_SHA256}" ]] || die 5 "$(L 'transaction 与当前 chain/config 不绑定' 'The transaction is not bound to the current chain/config')"
   JOURNAL_OPERATION="$(kv_get "${file}" OPERATION)"
   OPERATION_ID="$(kv_get "${file}" OPERATION_ID)"
   TARGET_STATE="$(kv_get "${file}" TARGET_STATE)"
@@ -3125,50 +3281,50 @@ load_journal_file() {
       REALITY_SERVER_NAME) expected="${REALITY_SERVER_NAME}" ;;
       RELAY_COHOSTS_SINGBOX) expected="${RELAY_COHOSTS_SINGBOX}" ;;
     esac
-    [[ "$(kv_get "${file}" "${key}")" == "${expected}" ]] || die 5 "transaction ${key} 与当前配置不一致"
+    [[ "$(kv_get "${file}" "${key}")" == "${expected}" ]] || die 5 "$(L "transaction ${key} 与当前配置不一致" "transaction ${key} does not match the current configuration")"
   done
-  [[ "${OPERATION_ID}" =~ ^[0-9a-f]{32}$ && "${DEPLOYMENT_ID}" =~ ^[0-9a-f]{32}$ ]] || die 5 'transaction id 格式错误'
-  [[ "${RELAY_PORT}" =~ ^[1-9][0-9]*$ && "${EXIT_REALITY_PORT}" =~ ^[1-9][0-9]*$ ]] || die 5 'transaction 端口格式错误'
-  (( RELAY_PORT <= 65535 && EXIT_REALITY_PORT <= 65535 )) || die 5 'transaction 端口范围错误'
+  [[ "${OPERATION_ID}" =~ ^[0-9a-f]{32}$ && "${DEPLOYMENT_ID}" =~ ^[0-9a-f]{32}$ ]] || die 5 "$(L 'transaction id 格式错误' 'Malformed transaction id')"
+  [[ "${RELAY_PORT}" =~ ^[1-9][0-9]*$ && "${EXIT_REALITY_PORT}" =~ ^[1-9][0-9]*$ ]] || die 5 "$(L 'transaction 端口格式错误' 'Malformed transaction port')"
+  (( RELAY_PORT <= 65535 && EXIT_REALITY_PORT <= 65535 )) || die 5 "$(L 'transaction 端口范围错误' 'Transaction port out of range')"
   case "${JOURNAL_OPERATION}:${TARGET_STATE}" in
     deploy:deployed|rollback:not_deployed) ;;
-    *) die 5 'transaction operation/target 组合错误' ;;
+    *) die 5 "$(L 'transaction operation/target 组合错误' 'Wrong transaction operation/target combination')" ;;
   esac
-  [[ "$(kv_get "${file}" SING_BOX_VERSION)" == "${SING_BOX_VERSION}" ]] || die 5 'transaction 固定资产版本错误'
-  adopt_recorded_assets "$(kv_get "${file}" LINUX_ARCHIVE_SHA256)" "$(kv_get "${file}" LINUX_BINARY_SHA256)" "$(kv_get "${file}" DARWIN_ARCHIVE_SHA256)" "$(kv_get "${file}" DARWIN_BINARY_SHA256)" || die 5 'transaction 固定资产摘要错误'
+  [[ "$(kv_get "${file}" SING_BOX_VERSION)" == "${SING_BOX_VERSION}" ]] || die 5 "$(L 'transaction 固定资产版本错误' 'Wrong transaction pinned asset version')"
+  adopt_recorded_assets "$(kv_get "${file}" LINUX_ARCHIVE_SHA256)" "$(kv_get "${file}" LINUX_BINARY_SHA256)" "$(kv_get "${file}" DARWIN_ARCHIVE_SHA256)" "$(kv_get "${file}" DARWIN_BINARY_SHA256)" || die 5 "$(L 'transaction 固定资产摘要错误' 'Wrong transaction pinned asset digest')"
   for value in "${LINUX_BINARY_SHA256}" "${RELAY_ENABLE_LINK_SHA256}" "${EXIT_ENABLE_LINK_SHA256}" "${RELAY_BASELINE_CONFIG_MANIFEST_SHA256}" "${RELAY_BASELINE_LISTEN_SHA256}" "${RELAY_BASELINE_BINARY_MANIFEST_SHA256}" "${RELAY_BASELINE_UNIT_MANIFEST_SHA256}"; do
-    [[ "${value}" =~ ^[0-9a-f]{64}$ ]] || die 5 'transaction 固定资源 hash 格式错误'
+    [[ "${value}" =~ ^[0-9a-f]{64}$ ]] || die 5 "$(L 'transaction 固定资源 hash 格式错误' 'Malformed transaction pinned resource hash')"
   done
   for value in "${RELAY_OWNER_SHA256}" "${RELAY_SOCKET_SHA256}" "${RELAY_SERVICE_SHA256}" "${EXIT_OWNER_SHA256}" "${EXIT_EXIT_SHA256}" "${EXIT_SERVICE_SHA256}" "${NODE_SHA256}"; do
-    [[ "${value}" == ABSENT || "${value}" =~ ^[0-9a-f]{64}$ ]] || die 5 'transaction 可选资源 hash 格式错误'
+    [[ "${value}" == ABSENT || "${value}" =~ ^[0-9a-f]{64}$ ]] || die 5 "$(L 'transaction 可选资源 hash 格式错误' 'Malformed transaction optional resource hash')"
   done
-  [[ "$(kv_get "${file}" RELAY_ENABLE_LINK_TARGET)" == "../ownexit-chain-relay-${CHAIN_ID}.socket" ]] || die 5 'transaction 中转 enablement target 错误'
-  [[ "$(kv_get "${file}" EXIT_ENABLE_LINK_TARGET)" == "../ownexit-chain-exit-${CHAIN_ID}.service" ]] || die 5 'transaction 出口机 enablement target 错误'
-  [[ "${VLESS_UUID}" == ABSENT || "${VLESS_UUID}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || die 5 'transaction UUID 格式错误'
-  [[ "${REALITY_PUBLIC_KEY}" == ABSENT || "${REALITY_PUBLIC_KEY}" =~ ^[A-Za-z0-9_-]+$ ]] || die 5 'transaction Reality public key 格式错误'
-  [[ "${REALITY_SHORT_ID}" == ABSENT || "${REALITY_SHORT_ID}" =~ ^[0-9a-f]{16}$ ]] || die 5 'transaction Reality short id 格式错误'
+  [[ "$(kv_get "${file}" RELAY_ENABLE_LINK_TARGET)" == "../ownexit-chain-relay-${CHAIN_ID}.socket" ]] || die 5 "$(L 'transaction 中转 enablement target 错误' 'Wrong transaction relay enablement target')"
+  [[ "$(kv_get "${file}" EXIT_ENABLE_LINK_TARGET)" == "../ownexit-chain-exit-${CHAIN_ID}.service" ]] || die 5 "$(L 'transaction 出口机 enablement target 错误' 'Wrong transaction exit enablement target')"
+  [[ "${VLESS_UUID}" == ABSENT || "${VLESS_UUID}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || die 5 "$(L 'transaction UUID 格式错误' 'Malformed transaction UUID')"
+  [[ "${REALITY_PUBLIC_KEY}" == ABSENT || "${REALITY_PUBLIC_KEY}" =~ ^[A-Za-z0-9_-]+$ ]] || die 5 "$(L 'transaction Reality public key 格式错误' 'Malformed transaction Reality public key')"
+  [[ "${REALITY_SHORT_ID}" == ABSENT || "${REALITY_SHORT_ID}" =~ ^[0-9a-f]{16}$ ]] || die 5 "$(L 'transaction Reality short id 格式错误' 'Malformed transaction Reality short id')"
   if [[ "${JOURNAL_OPERATION}" == deploy ]]; then
     case "${LAST_COMPLETED_STEP}" in
       PREPARED|RELAY_BINARY_READY|RELAY_BINARY_STAGE_CLEANED|EXIT_BINARY_READY|EXIT_BINARY_STAGE_CLEANED|EXIT_STAGED|EXIT_INSTALLED|EXIT_STAGE_CLEANED|EXIT_ACTIVE|EXIT_REALITY_SMOKE_OK|RELAY_STAGED|RELAY_INSTALLED|RELAY_STAGE_CLEANED|RELAY_ACTIVE|LOCAL_ARTIFACTS_READY|FULL_VERIFY_OK|STATE_WRITTEN|COMMITTED) ;;
-      *) die 5 'deploy transaction step 不在允许枚举中' ;;
+      *) die 5 "$(L 'deploy transaction step 不在允许枚举中' 'The deploy transaction step is not one of the allowed values')" ;;
     esac
-    [[ "${LOCAL_STAGE_PATH}" == "${CHAIN_STATE_DIR}/.stage-local-${OPERATION_ID}" ]] || die 5 'transaction local stage path 不匹配'
-    [[ "${RELAY_STAGE_PATH}" == "/etc/ownexit-chain/.stage-relay-${DEPLOYMENT_ID}" ]] || die 5 'transaction relay stage path 不匹配'
-    [[ "${EXIT_STAGE_PATH}" == "/etc/ownexit-chain/.stage-exit-${DEPLOYMENT_ID}" ]] || die 5 'transaction 出口机 stage path 不匹配'
-    [[ "${RELAY_BINARY_STAGE_PATH}" == "/opt/ownexit-chain/.stage-binary-${DEPLOYMENT_ID}" && "${EXIT_BINARY_STAGE_PATH}" == "/opt/ownexit-chain/.stage-binary-${DEPLOYMENT_ID}" ]] || die 5 'transaction binary stage path 不匹配'
-    [[ "${RELAY_STAGE_OWNER_TEMP_PATH}" == "/etc/ownexit-chain/.owner-relay-${DEPLOYMENT_ID}" && "${EXIT_STAGE_OWNER_TEMP_PATH}" == "/etc/ownexit-chain/.owner-exit-${DEPLOYMENT_ID}" ]] || die 5 'transaction config owner temp path 不匹配'
-    [[ "${RELAY_BINARY_STAGE_OWNER_TEMP_PATH}" == "/opt/ownexit-chain/.owner-relay-binary-${DEPLOYMENT_ID}" && "${EXIT_BINARY_STAGE_OWNER_TEMP_PATH}" == "/opt/ownexit-chain/.owner-exit-binary-${DEPLOYMENT_ID}" ]] || die 5 'transaction binary owner temp path 不匹配'
+    [[ "${LOCAL_STAGE_PATH}" == "${CHAIN_STATE_DIR}/.stage-local-${OPERATION_ID}" ]] || die 5 "$(L 'transaction local stage path 不匹配' 'Transaction local stage path mismatch')"
+    [[ "${RELAY_STAGE_PATH}" == "/etc/ownexit-chain/.stage-relay-${DEPLOYMENT_ID}" ]] || die 5 "$(L 'transaction relay stage path 不匹配' 'Transaction relay stage path mismatch')"
+    [[ "${EXIT_STAGE_PATH}" == "/etc/ownexit-chain/.stage-exit-${DEPLOYMENT_ID}" ]] || die 5 "$(L 'transaction 出口机 stage path 不匹配' 'Transaction exit stage path mismatch')"
+    [[ "${RELAY_BINARY_STAGE_PATH}" == "/opt/ownexit-chain/.stage-binary-${DEPLOYMENT_ID}" && "${EXIT_BINARY_STAGE_PATH}" == "/opt/ownexit-chain/.stage-binary-${DEPLOYMENT_ID}" ]] || die 5 "$(L 'transaction binary stage path 不匹配' 'Transaction binary stage path mismatch')"
+    [[ "${RELAY_STAGE_OWNER_TEMP_PATH}" == "/etc/ownexit-chain/.owner-relay-${DEPLOYMENT_ID}" && "${EXIT_STAGE_OWNER_TEMP_PATH}" == "/etc/ownexit-chain/.owner-exit-${DEPLOYMENT_ID}" ]] || die 5 "$(L 'transaction config owner temp path 不匹配' 'Transaction config owner temp path mismatch')"
+    [[ "${RELAY_BINARY_STAGE_OWNER_TEMP_PATH}" == "/opt/ownexit-chain/.owner-relay-binary-${DEPLOYMENT_ID}" && "${EXIT_BINARY_STAGE_OWNER_TEMP_PATH}" == "/opt/ownexit-chain/.owner-exit-binary-${DEPLOYMENT_ID}" ]] || die 5 "$(L 'transaction binary owner temp path 不匹配' 'Transaction binary owner temp path mismatch')"
     for value in "${LOCAL_STAGE_OWNER_SHA256}" "${RELAY_STAGE_OWNER_SHA256}" "${EXIT_STAGE_OWNER_SHA256}" "${RELAY_BINARY_STAGE_OWNER_SHA256}" "${EXIT_BINARY_STAGE_OWNER_SHA256}"; do
-      [[ "${value}" =~ ^[0-9a-f]{64}$ ]] || die 5 'deploy transaction stage owner hash 格式错误'
+      [[ "${value}" =~ ^[0-9a-f]{64}$ ]] || die 5 "$(L 'deploy transaction stage owner hash 格式错误' 'Malformed deploy transaction stage owner hash')"
     done
   else
     case "${LAST_COMPLETED_STEP}" in
       ROLLBACK_PREPARED|RELAY_STOPPED|RELAY_FILES_REMOVED|EXIT_STOPPED|EXIT_FILES_REMOVED|LOCAL_ARTIFACTS_ARCHIVED|ROLLBACK_COMMITTED) ;;
-      *) die 5 'rollback transaction step 不在允许枚举中' ;;
+      *) die 5 "$(L 'rollback transaction step 不在允许枚举中' 'The rollback transaction step is not one of the allowed values')" ;;
     esac
-    [[ "${LOCAL_STAGE_PATH}" == ABSENT && "${RELAY_STAGE_PATH}" == ABSENT && "${EXIT_STAGE_PATH}" == ABSENT && "${RELAY_BINARY_STAGE_PATH}" == ABSENT && "${EXIT_BINARY_STAGE_PATH}" == ABSENT ]] || die 5 'rollback transaction 不得携带 deploy stage path'
-    [[ "${LOCAL_STAGE_OWNER_SHA256}" == ABSENT && "${RELAY_STAGE_OWNER_TEMP_PATH}" == ABSENT && "${EXIT_STAGE_OWNER_TEMP_PATH}" == ABSENT && "${RELAY_BINARY_STAGE_OWNER_TEMP_PATH}" == ABSENT && "${EXIT_BINARY_STAGE_OWNER_TEMP_PATH}" == ABSENT ]] || die 5 'rollback transaction 不得携带 deploy owner temp'
-    [[ "${RELAY_STAGE_OWNER_SHA256}" == ABSENT && "${EXIT_STAGE_OWNER_SHA256}" == ABSENT && "${RELAY_BINARY_STAGE_OWNER_SHA256}" == ABSENT && "${EXIT_BINARY_STAGE_OWNER_SHA256}" == ABSENT ]] || die 5 'rollback transaction 不得携带 deploy stage owner hash'
+    [[ "${LOCAL_STAGE_PATH}" == ABSENT && "${RELAY_STAGE_PATH}" == ABSENT && "${EXIT_STAGE_PATH}" == ABSENT && "${RELAY_BINARY_STAGE_PATH}" == ABSENT && "${EXIT_BINARY_STAGE_PATH}" == ABSENT ]] || die 5 "$(L 'rollback transaction 不得携带 deploy stage path' 'A rollback transaction must not carry a deploy stage path')"
+    [[ "${LOCAL_STAGE_OWNER_SHA256}" == ABSENT && "${RELAY_STAGE_OWNER_TEMP_PATH}" == ABSENT && "${EXIT_STAGE_OWNER_TEMP_PATH}" == ABSENT && "${RELAY_BINARY_STAGE_OWNER_TEMP_PATH}" == ABSENT && "${EXIT_BINARY_STAGE_OWNER_TEMP_PATH}" == ABSENT ]] || die 5 "$(L 'rollback transaction 不得携带 deploy owner temp' 'A rollback transaction must not carry a deploy owner temp')"
+    [[ "${RELAY_STAGE_OWNER_SHA256}" == ABSENT && "${EXIT_STAGE_OWNER_SHA256}" == ABSENT && "${RELAY_BINARY_STAGE_OWNER_SHA256}" == ABSENT && "${EXIT_BINARY_STAGE_OWNER_SHA256}" == ABSENT ]] || die 5 "$(L 'rollback transaction 不得携带 deploy stage owner hash' 'A rollback transaction must not carry a deploy stage owner hash')"
   fi
 }
 
@@ -3193,13 +3349,13 @@ verify_loaded_binding() {
   fi
   case "${rc}" in
     0) return 0 ;;
-    11) die 5 '中转 SSH key 指纹漂移' ;;
-    12) die 5 '出口机 SSH key 指纹漂移' ;;
-    21) die 5 '中转实际协商 host-key 探针不可达' ;;
-    22) die 5 '出口机实际协商 host-key 探针不可达' ;;
-    31) die 5 '中转实际协商 host-key 指纹漂移' ;;
-    32) die 5 '出口机实际协商 host-key 指纹漂移' ;;
-    *) die 5 '主机/密钥绑定核验异常' ;;
+    11) die 5 "$(L '中转 SSH key 指纹漂移' 'Relay SSH key fingerprint drifted')" ;;
+    12) die 5 "$(L '出口机 SSH key 指纹漂移' 'Exit SSH key fingerprint drifted')" ;;
+    21) die 5 "$(L '中转实际协商 host-key 探针不可达' 'Probe of the relay'\''s actually negotiated host key unreachable')" ;;
+    22) die 5 "$(L '出口机实际协商 host-key 探针不可达' 'Probe of the exit'\''s actually negotiated host key unreachable')" ;;
+    31) die 5 "$(L '中转实际协商 host-key 指纹漂移' 'The relay'\''s actually negotiated host key fingerprint drifted')" ;;
+    32) die 5 "$(L '出口机实际协商 host-key 指纹漂移' 'The exit'\''s actually negotiated host key fingerprint drifted')" ;;
+    *) die 5 "$(L '主机/密钥绑定核验异常' 'Host/key binding verification failed unexpectedly')" ;;
   esac
 }
 
@@ -3276,14 +3432,14 @@ choose_remote_port() {
 create_local_stage() {
   local owner owner_temp baseline
   LOCAL_STAGE_PATH="${CHAIN_STATE_DIR}/.stage-local-${OPERATION_ID}"
-  [[ ! -e "${LOCAL_STAGE_PATH}" && ! -L "${LOCAL_STAGE_PATH}" ]] || die 4 '本地 staging 路径碰撞'
-  ensure_private_dir "${CHAIN_STATE_DIR}" || die 1 'chain state 目录身份或权限不安全'
+  [[ ! -e "${LOCAL_STAGE_PATH}" && ! -L "${LOCAL_STAGE_PATH}" ]] || die 4 "$(L '本地 staging 路径碰撞' 'Local staging path collision')"
+  ensure_private_dir "${CHAIN_STATE_DIR}" || die 1 "$(L 'chain state 目录身份或权限不安全' 'The chain state directory'\''s ownership or permissions are unsafe')"
   mkdir "${LOCAL_STAGE_PATH}"
   chmod 700 "${LOCAL_STAGE_PATH}"
   owner="${LOCAL_STAGE_PATH}/stage-owner.env"
   owner_temp="${CHAIN_STATE_DIR}/.stage-owner.${LOCK_OPERATION_ID}.tmp"
-  ( set -o noclobber; render_local_stage_owner "${owner_temp}" ) || die 1 '本地 staging owner 临时文件碰撞'
-  link "${owner_temp}" "${owner}" || die 1 '本地 staging owner no-replace 发布失败'
+  ( set -o noclobber; render_local_stage_owner "${owner_temp}" ) || die 1 "$(L '本地 staging owner 临时文件碰撞' 'Local staging owner temporary file collision')"
+  link "${owner_temp}" "${owner}" || die 1 "$(L '本地 staging owner no-replace 发布失败' 'No-replace publishing of the local staging owner failed')"
   rm -f "${owner_temp}"
   LOCAL_STAGE_OWNER_SHA256="$(sha256_file "${owner}")"
   baseline="${LOCAL_STAGE_PATH}/baseline"
@@ -3297,8 +3453,8 @@ create_local_stage() {
 init_deploy_transaction_fields() {
   local owner_dir
   DEPLOYMENT_ID="$(random_hex_128)"
-  RELAY_PORT="$(choose_remote_port relay)" || die 3 '无法在中转选择候选端口'
-  EXIT_REALITY_PORT="$(choose_remote_port exit)" || die 3 '无法在出口机选择候选端口'
+  RELAY_PORT="$(choose_remote_port relay)" || die 3 "$(L '无法在中转选择候选端口' 'Cannot choose a candidate port on the relay')"
+  EXIT_REALITY_PORT="$(choose_remote_port exit)" || die 3 "$(L '无法在出口机选择候选端口' 'Cannot choose a candidate port on the exit')"
   RELAY_ENABLE_LINK_TARGET="../ownexit-chain-relay-${CHAIN_ID}.socket"
   EXIT_ENABLE_LINK_TARGET="../ownexit-chain-exit-${CHAIN_ID}.service"
   RELAY_ENABLE_LINK_SHA256="$(printf '%s' "${RELAY_ENABLE_LINK_TARGET}" | sha256_text)"
@@ -3321,15 +3477,15 @@ init_deploy_transaction_fields() {
   EXIT_BINARY_STAGE_OWNER_SHA256="$(sha256_file "${owner_dir}/exit-binary.env")"
   RELAY_STAGE_OWNER_SHA256="$(sha256_file "${owner_dir}/relay-stage.env")"
   EXIT_STAGE_OWNER_SHA256="$(sha256_file "${owner_dir}/exit-stage.env")"
-  require_remote_path_absent relay "${RELAY_BINARY_STAGE_PATH}" '中转 binary staging 路径碰撞'
-  require_remote_path_absent exit "${EXIT_BINARY_STAGE_PATH}" '出口机 binary staging 路径碰撞'
-  require_remote_path_absent relay "${RELAY_STAGE_PATH}" '中转 unit staging 路径碰撞'
-  require_remote_path_absent exit "${EXIT_STAGE_PATH}" '出口机 config staging 路径碰撞'
+  require_remote_path_absent relay "${RELAY_BINARY_STAGE_PATH}" "$(L '中转 binary staging 路径碰撞' 'Relay binary staging path collision')"
+  require_remote_path_absent exit "${EXIT_BINARY_STAGE_PATH}" "$(L '出口机 binary staging 路径碰撞' 'Exit binary staging path collision')"
+  require_remote_path_absent relay "${RELAY_STAGE_PATH}" "$(L '中转 unit staging 路径碰撞' 'Relay unit staging path collision')"
+  require_remote_path_absent exit "${EXIT_STAGE_PATH}" "$(L '出口机 config staging 路径碰撞' 'Exit config staging path collision')"
   for suffix in .part .ready; do
-    require_remote_path_absent relay "${RELAY_BINARY_STAGE_OWNER_TEMP_PATH}${suffix}" '中转 binary owner temp 碰撞'
-    require_remote_path_absent exit "${EXIT_BINARY_STAGE_OWNER_TEMP_PATH}${suffix}" '出口机 binary owner temp 碰撞'
-    require_remote_path_absent relay "${RELAY_STAGE_OWNER_TEMP_PATH}${suffix}" '中转 unit owner temp 碰撞'
-    require_remote_path_absent exit "${EXIT_STAGE_OWNER_TEMP_PATH}${suffix}" '出口机 config owner temp 碰撞'
+    require_remote_path_absent relay "${RELAY_BINARY_STAGE_OWNER_TEMP_PATH}${suffix}" "$(L '中转 binary owner temp 碰撞' 'Relay binary owner temp collision')"
+    require_remote_path_absent exit "${EXIT_BINARY_STAGE_OWNER_TEMP_PATH}${suffix}" "$(L '出口机 binary owner temp 碰撞' 'Exit binary owner temp collision')"
+    require_remote_path_absent relay "${RELAY_STAGE_OWNER_TEMP_PATH}${suffix}" "$(L '中转 unit owner temp 碰撞' 'Relay unit owner temp collision')"
+    require_remote_path_absent exit "${EXIT_STAGE_OWNER_TEMP_PATH}${suffix}" "$(L '出口机 config owner temp 碰撞' 'Exit config owner temp collision')"
   done
   create_local_stage
   LAST_COMPLETED_STEP='PREPARED'
@@ -3494,7 +3650,7 @@ install_remote_binary() {
   owner_hash="$3"
   owner_file="$4"
   owner_base="$5"
-  create_remote_stage "${role}" "${stage}" "${owner_base}" "${owner_file}" "${owner_hash}" || die 1 "${role} binary staging 创建失败"
+  create_remote_stage "${role}" "${stage}" "${owner_base}" "${owner_file}" "${owner_hash}" || die 1 "$(L "${role} binary staging 创建失败" "${role} binary staging creation failed")"
   download_script="${OP_TMP}/remote-download.sh"
   write_remote_download_script "${download_script}"
   if [[ "${role}" == relay ]]; then
@@ -3505,28 +3661,28 @@ install_remote_binary() {
   if [[ "${rc}" -eq 0 ]]; then
     source=remote-download
   else
-    log_warn "${role} 远端下载官方包失败（rc=${rc}），改为本机下载后上传"
+    log_warn "$(L "${role} 远端下载官方包失败（rc=${rc}），改为本机下载后上传" "${role} remote download of the official package failed (rc=${rc}); downloading on this computer and uploading instead")"
     [[ -n "${LINUX_ARCHIVE_PATH}" ]] || LINUX_ARCHIVE_PATH="$(verified_archive_path deploy "${LINUX_ARCHIVE}" "${LINUX_ARCHIVE_SHA256}")"
     if [[ "${role}" == relay ]]; then
-      scp_relay "${LINUX_ARCHIVE_PATH}" "chain-relay:${stage}/archive.tar.gz" || die 1 'Linux archive 上传中转失败'
+      scp_relay "${LINUX_ARCHIVE_PATH}" "chain-relay:${stage}/archive.tar.gz" || die 1 "$(L 'Linux archive 上传中转失败' 'Uploading the Linux archive to the relay failed')"
       ssh_relay chown root:root "${stage}/archive.tar.gz"
       ssh_relay chmod 600 "${stage}/archive.tar.gz"
     else
-      scp_exit "${LINUX_ARCHIVE_PATH}" "chain-exit:${stage}/archive.tar.gz" || die 1 'Linux archive 上传出口机失败'
+      scp_exit "${LINUX_ARCHIVE_PATH}" "chain-exit:${stage}/archive.tar.gz" || die 1 "$(L 'Linux archive 上传出口机失败' 'Uploading the Linux archive to the exit failed')"
       ssh_exit chown root:root "${stage}/archive.tar.gz"
       ssh_exit chmod 600 "${stage}/archive.tar.gz"
     fi
     source=local-upload
   fi
-  log_info "${role} binary 来源=${source} arch=${REMOTE_ARCH}"
+  log_info "$(L "${role} binary 来源=${source} arch=${REMOTE_ARCH}" "${role} binary source=${source} arch=${REMOTE_ARCH}")"
   script="${OP_TMP}/install-binary.sh"
   write_install_binary_script "${script}"
   if [[ "${role}" == relay ]]; then
-    output="$(ssh_relay_stdin bash -s -- "${stage}" "${owner_hash}" "${LINUX_ARCHIVE_SHA256}" "${LINUX_BINARY_SHA256}" "${SING_BOX_VERSION}" "${REMOTE_BIN}" "${REMOTE_ARCH}" < "${script}")" || die 1 '中转固定 binary 安装/复用验证失败'
+    output="$(ssh_relay_stdin bash -s -- "${stage}" "${owner_hash}" "${LINUX_ARCHIVE_SHA256}" "${LINUX_BINARY_SHA256}" "${SING_BOX_VERSION}" "${REMOTE_BIN}" "${REMOTE_ARCH}" < "${script}")" || die 1 "$(L '中转固定 binary 安装/复用验证失败' 'Installing / reusing the pinned binary on the relay failed verification')"
   else
-    output="$(ssh_exit_stdin bash -s -- "${stage}" "${owner_hash}" "${LINUX_ARCHIVE_SHA256}" "${LINUX_BINARY_SHA256}" "${SING_BOX_VERSION}" "${REMOTE_BIN}" "${REMOTE_ARCH}" < "${script}")" || die 1 '出口机固定 binary 安装/复用验证失败'
+    output="$(ssh_exit_stdin bash -s -- "${stage}" "${owner_hash}" "${LINUX_ARCHIVE_SHA256}" "${LINUX_BINARY_SHA256}" "${SING_BOX_VERSION}" "${REMOTE_BIN}" "${REMOTE_ARCH}" < "${script}")" || die 1 "$(L '出口机固定 binary 安装/复用验证失败' 'Installing / reusing the pinned binary on the exit failed verification')"
   fi
-  printf '%s\n' "${output}" | grep -Eq '^BINARY_RESULT=(created|reused)$' || die 1 '远端 binary 安装结果不完整'
+  printf '%s\n' "${output}" | grep -Eq '^BINARY_RESULT=(created|reused)$' || die 1 "$(L '远端 binary 安装结果不完整' 'The remote binary installation result is incomplete')"
 }
 
 cleanup_remote_stage() {
@@ -3718,9 +3874,9 @@ PREPARE_EXIT
 # 中转机连向出口机时实际使用的源地址（中转有多个 IP 或在 NAT 后时与 RELAY_HOST 不同），managed 白名单按它放行。
 detect_relay_source_ip() {
   local route source
-  route="$(ssh_relay ip -4 route get "${EXIT_HOST}")" || die 1 '无法在中转机上查询到出口机的路由'
+  route="$(ssh_relay ip -4 route get "${EXIT_HOST}")" || die 1 "$(L '无法在中转机上查询到出口机的路由' 'Cannot look up the route to the exit on the relay')"
   source="$(printf '%s\n' "${route}" | awk '{for (i = 1; i < NF; i++) if ($i == "src") {print $(i + 1); exit}}')"
-  is_ipv4 "${source}" || die 1 '中转机到出口机的出站源地址不是 IPv4'
+  is_ipv4 "${source}" || die 1 "$(L '中转机到出口机的出站源地址不是 IPv4' 'The relay'\''s outbound source address to the exit is not IPv4')"
   printf '%s\n' "${source}"
 }
 
@@ -3729,24 +3885,24 @@ prepare_exit_exit() {
   owner_file="${OP_TMP}/exit-owner.env"
   render_owner_file "${owner_file}" exit "${EXIT_HOSTKEY_FINGERPRINT}"
   owner_b64="$(openssl base64 -A -in "${owner_file}")"
-  create_remote_stage exit "${EXIT_STAGE_PATH}" "${EXIT_STAGE_OWNER_TEMP_PATH}" "${OP_TMP}/owners/exit-stage.env" "${EXIT_STAGE_OWNER_SHA256}" || die 1 '出口机 config staging 创建失败'
+  create_remote_stage exit "${EXIT_STAGE_PATH}" "${EXIT_STAGE_OWNER_TEMP_PATH}" "${OP_TMP}/owners/exit-stage.env" "${EXIT_STAGE_OWNER_SHA256}" || die 1 "$(L '出口机 config staging 创建失败' 'Creating the exit config staging failed')"
   relay_source='-'
   if [[ "${EXIT_SOURCE_FILTER}" == managed ]]; then
     relay_source="$(detect_relay_source_ip)"
-    [[ "${EXIT_NFT_PATH}" == /* ]] || die 1 '没有取得出口机 nft 路径，无法配置 managed 白名单'
-    log_info "出口机白名单放行来源=${relay_source}（EXIT_SOURCE_FILTER=managed）"
+    [[ "${EXIT_NFT_PATH}" == /* ]] || die 1 "$(L '没有取得出口机 nft 路径，无法配置 managed 白名单' 'No nft path obtained on the exit, so the managed allow-list cannot be configured')"
+    log_info "$(L "出口机白名单放行来源=${relay_source}（EXIT_SOURCE_FILTER=managed）" "Exit allow-list admits source=${relay_source} (EXIT_SOURCE_FILTER=managed)")"
   fi
   script="${OP_TMP}/prepare-exit.sh"
   write_prepare_exit_script "${script}"
-  output="$(ssh_exit_stdin bash -s -- "${EXIT_STAGE_PATH}" "${EXIT_STAGE_OWNER_SHA256}" "${REMOTE_BIN}" "${CHAIN_ID}" "${EXIT_REALITY_PORT}" "${REALITY_SERVER_NAME}" "${owner_b64}" "${EXIT_SOURCE_FILTER}" "${EXIT_NFT_PATH:--}" "${relay_source}" - < "${script}")" || die 1 '出口机 Reality config/unit staging 失败'
+  output="$(ssh_exit_stdin bash -s -- "${EXIT_STAGE_PATH}" "${EXIT_STAGE_OWNER_SHA256}" "${REMOTE_BIN}" "${CHAIN_ID}" "${EXIT_REALITY_PORT}" "${REALITY_SERVER_NAME}" "${owner_b64}" "${EXIT_SOURCE_FILTER}" "${EXIT_NFT_PATH:--}" "${relay_source}" - < "${script}")" || die 1 "$(L '出口机 Reality config/unit staging 失败' 'Exit Reality config/unit staging failed')"
   VLESS_UUID="$(printf '%s\n' "${output}" | awk -F= '$1 == "VLESS_UUID" {print $2}')"
   REALITY_PUBLIC_KEY="$(printf '%s\n' "${output}" | awk -F= '$1 == "REALITY_PUBLIC_KEY" {print $2}')"
   REALITY_SHORT_ID="$(printf '%s\n' "${output}" | awk -F= '$1 == "REALITY_SHORT_ID" {print $2}')"
   EXIT_OWNER_SHA256="$(printf '%s\n' "${output}" | awk -F= '$1 == "EXIT_OWNER_SHA256" {print $2}')"
   EXIT_EXIT_SHA256="$(printf '%s\n' "${output}" | awk -F= '$1 == "EXIT_EXIT_SHA256" {print $2}')"
   EXIT_SERVICE_SHA256="$(printf '%s\n' "${output}" | awk -F= '$1 == "EXIT_SERVICE_SHA256" {print $2}')"
-  [[ "${VLESS_UUID}" =~ ^[0-9a-f-]{36}$ && "${REALITY_PUBLIC_KEY}" =~ ^[A-Za-z0-9_-]+$ && "${REALITY_SHORT_ID}" =~ ^[0-9a-f]{16}$ ]] || die 1 '出口机未返回完整客户端参数'
-  [[ "${EXIT_OWNER_SHA256}" =~ ^[0-9a-f]{64}$ && "${EXIT_EXIT_SHA256}" =~ ^[0-9a-f]{64}$ && "${EXIT_SERVICE_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die 1 '出口机 staging hash 不完整'
+  [[ "${VLESS_UUID}" =~ ^[0-9a-f-]{36}$ && "${REALITY_PUBLIC_KEY}" =~ ^[A-Za-z0-9_-]+$ && "${REALITY_SHORT_ID}" =~ ^[0-9a-f]{16}$ ]] || die 1 "$(L '出口机未返回完整客户端参数' 'The exit did not return complete client parameters')"
+  [[ "${EXIT_OWNER_SHA256}" =~ ^[0-9a-f]{64}$ && "${EXIT_EXIT_SHA256}" =~ ^[0-9a-f]{64}$ && "${EXIT_SERVICE_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die 1 "$(L '出口机 staging hash 不完整' 'Exit staging hashes incomplete')"
   LAST_COMPLETED_STEP='EXIT_STAGED'
   write_journal
 }
@@ -3796,10 +3952,10 @@ install_exit_exit() {
   local script
   script="${OP_TMP}/promote-exit.sh"
   write_promote_exit_script "${script}"
-  ssh_exit_stdin bash -s -- "${EXIT_STAGE_PATH}" "${EXIT_STAGE_OWNER_SHA256}" "${CHAIN_ID}" "${EXIT_OWNER_SHA256}" "${EXIT_EXIT_SHA256}" "${EXIT_SERVICE_SHA256}" "${EXIT_ENABLE_LINK_TARGET}" < "${script}" || die 1 '出口机专属资源 no-replace 发布失败'
+  ssh_exit_stdin bash -s -- "${EXIT_STAGE_PATH}" "${EXIT_STAGE_OWNER_SHA256}" "${CHAIN_ID}" "${EXIT_OWNER_SHA256}" "${EXIT_EXIT_SHA256}" "${EXIT_SERVICE_SHA256}" "${EXIT_ENABLE_LINK_TARGET}" < "${script}" || die 1 "$(L '出口机专属资源 no-replace 发布失败' 'No-replace publishing of exit-specific resources failed')"
   LAST_COMPLETED_STEP='EXIT_INSTALLED'
   write_journal
-  cleanup_remote_stage exit "${EXIT_STAGE_PATH}" "${EXIT_STAGE_OWNER_SHA256}" || die 1 '出口机 config staging 清理失败'
+  cleanup_remote_stage exit "${EXIT_STAGE_PATH}" "${EXIT_STAGE_OWNER_SHA256}" || die 1 "$(L '出口机 config staging 清理失败' 'Cleaning up the exit config staging failed')"
   LAST_COMPLETED_STEP='EXIT_STAGE_CLEANED'
   write_journal
 }
@@ -3809,9 +3965,9 @@ activate_exit_exit() {
   unit="ownexit-chain-exit-${CHAIN_ID}.service"
   ssh_exit systemctl daemon-reload
   ssh_exit systemctl start "${unit}"
-  [[ "$(ssh_exit systemctl is-active "${unit}")" == active ]] || die 1 '出口机 service 未进入 active'
-  [[ "$(ssh_exit systemctl is-enabled "${unit}")" == enabled ]] || die 1 '出口机 service 未按预期 enabled'
-  ssh_exit "ss -H -ltnp | grep -q ':${EXIT_REALITY_PORT} '" || die 1 '出口机 Reality 端口未监听'
+  [[ "$(ssh_exit systemctl is-active "${unit}")" == active ]] || die 1 "$(L '出口机 service 未进入 active' 'The exit service did not become active')"
+  [[ "$(ssh_exit systemctl is-enabled "${unit}")" == enabled ]] || die 1 "$(L '出口机 service 未按预期 enabled' 'The exit service is not enabled as expected')"
+  ssh_exit "ss -H -ltnp | grep -q ':${EXIT_REALITY_PORT} '" || die 1 "$(L '出口机 Reality 端口未监听' 'The exit'\''s Reality port is not listening')"
   LAST_COMPLETED_STEP='EXIT_ACTIVE'
   write_journal
 }
@@ -3896,14 +4052,14 @@ prepare_relay() {
   owner_file="${OP_TMP}/relay-owner.env"
   render_owner_file "${owner_file}" relay "${RELAY_HOSTKEY_FINGERPRINT}"
   owner_b64="$(openssl base64 -A -in "${owner_file}")"
-  create_remote_stage relay "${RELAY_STAGE_PATH}" "${RELAY_STAGE_OWNER_TEMP_PATH}" "${OP_TMP}/owners/relay-stage.env" "${RELAY_STAGE_OWNER_SHA256}" || die 1 '中转 unit staging 创建失败'
+  create_remote_stage relay "${RELAY_STAGE_PATH}" "${RELAY_STAGE_OWNER_TEMP_PATH}" "${OP_TMP}/owners/relay-stage.env" "${RELAY_STAGE_OWNER_SHA256}" || die 1 "$(L '中转 unit staging 创建失败' 'Creating the relay unit staging failed')"
   script="${OP_TMP}/prepare-relay.sh"
   write_prepare_relay_script "${script}"
-  output="$(ssh_relay_stdin bash -s -- "${RELAY_STAGE_PATH}" "${RELAY_STAGE_OWNER_SHA256}" "${CHAIN_ID}" "${RELAY_PORT}" "${EXIT_HOST}" "${EXIT_REALITY_PORT}" "${SOCKET_PROXYD_PATH}" "${owner_b64}" < "${script}")" || die 1 '中转 socket/service staging 失败'
+  output="$(ssh_relay_stdin bash -s -- "${RELAY_STAGE_PATH}" "${RELAY_STAGE_OWNER_SHA256}" "${CHAIN_ID}" "${RELAY_PORT}" "${EXIT_HOST}" "${EXIT_REALITY_PORT}" "${SOCKET_PROXYD_PATH}" "${owner_b64}" < "${script}")" || die 1 "$(L '中转 socket/service staging 失败' 'Relay socket/service staging failed')"
   RELAY_OWNER_SHA256="$(printf '%s\n' "${output}" | awk -F= '$1 == "RELAY_OWNER_SHA256" {print $2}')"
   RELAY_SOCKET_SHA256="$(printf '%s\n' "${output}" | awk -F= '$1 == "RELAY_SOCKET_SHA256" {print $2}')"
   RELAY_SERVICE_SHA256="$(printf '%s\n' "${output}" | awk -F= '$1 == "RELAY_SERVICE_SHA256" {print $2}')"
-  [[ "${RELAY_OWNER_SHA256}" =~ ^[0-9a-f]{64}$ && "${RELAY_SOCKET_SHA256}" =~ ^[0-9a-f]{64}$ && "${RELAY_SERVICE_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die 1 '中转 staging hash 不完整'
+  [[ "${RELAY_OWNER_SHA256}" =~ ^[0-9a-f]{64}$ && "${RELAY_SOCKET_SHA256}" =~ ^[0-9a-f]{64}$ && "${RELAY_SERVICE_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die 1 "$(L '中转 staging hash 不完整' 'Relay staging hashes incomplete')"
   LAST_COMPLETED_STEP='RELAY_STAGED'
   write_journal
 }
@@ -3953,10 +4109,10 @@ install_relay() {
   local script
   script="${OP_TMP}/promote-relay.sh"
   write_promote_relay_script "${script}"
-  ssh_relay_stdin bash -s -- "${RELAY_STAGE_PATH}" "${RELAY_STAGE_OWNER_SHA256}" "${CHAIN_ID}" "${RELAY_OWNER_SHA256}" "${RELAY_SOCKET_SHA256}" "${RELAY_SERVICE_SHA256}" "${RELAY_ENABLE_LINK_TARGET}" < "${script}" || die 1 '中转专属资源 no-replace 发布失败'
+  ssh_relay_stdin bash -s -- "${RELAY_STAGE_PATH}" "${RELAY_STAGE_OWNER_SHA256}" "${CHAIN_ID}" "${RELAY_OWNER_SHA256}" "${RELAY_SOCKET_SHA256}" "${RELAY_SERVICE_SHA256}" "${RELAY_ENABLE_LINK_TARGET}" < "${script}" || die 1 "$(L '中转专属资源 no-replace 发布失败' 'No-replace publishing of relay-specific resources failed')"
   LAST_COMPLETED_STEP='RELAY_INSTALLED'
   write_journal
-  cleanup_remote_stage relay "${RELAY_STAGE_PATH}" "${RELAY_STAGE_OWNER_SHA256}" || die 1 '中转 unit staging 清理失败'
+  cleanup_remote_stage relay "${RELAY_STAGE_PATH}" "${RELAY_STAGE_OWNER_SHA256}" || die 1 "$(L '中转 unit staging 清理失败' 'Cleaning up the relay unit staging failed')"
   LAST_COMPLETED_STEP='RELAY_STAGE_CLEANED'
   write_journal
 }
@@ -3967,9 +4123,9 @@ activate_relay() {
   service="ownexit-chain-relay-${CHAIN_ID}.service"
   ssh_relay systemctl daemon-reload
   ssh_relay systemctl start "${socket}"
-  [[ "$(ssh_relay systemctl is-active "${socket}")" == active ]] || die 1 '中转 socket 未进入 active'
-  [[ "$(ssh_relay systemctl is-enabled "${socket}")" == enabled ]] || die 1 '中转 socket 未按预期 enabled'
-  ssh_relay "ss -H -ltn | grep -q ':${RELAY_PORT} '" || die 1 '中转 relay 端口未监听'
+  [[ "$(ssh_relay systemctl is-active "${socket}")" == active ]] || die 1 "$(L '中转 socket 未进入 active' 'The relay socket did not become active')"
+  [[ "$(ssh_relay systemctl is-enabled "${socket}")" == enabled ]] || die 1 "$(L '中转 socket 未按预期 enabled' 'The relay socket is not enabled as expected')"
+  ssh_relay "ss -H -ltn | grep -q ':${RELAY_PORT} '" || die 1 "$(L '中转 relay 端口未监听' 'The relay port is not listening')"
   LAST_COMPLETED_STEP='RELAY_ACTIVE'
   write_journal
 }
@@ -4103,13 +4259,13 @@ smoke_from_relay() {
   server="$1"
   server_port="$2"
   label="$3"
-  local_port="$(choose_remote_port relay)" || die 1 "无法为 ${label} 选择中转本地 smoke 端口"
+  local_port="$(choose_remote_port relay)" || die 1 "$(L "无法为 ${label} 选择中转本地 smoke 端口" "Cannot choose a local smoke port on the relay for ${label}")"
   config="${OP_TMP}/smoke-${label}.json"
   runner="${OP_TMP}/smoke-${label}.sh"
   render_client_config "${config}" "${local_port}" "${server}" "${server_port}"
   write_remote_smoke_script "${runner}" "${config}"
-  output="$(ssh_relay_stdin bash -s -- "${EXPECTED_EXIT_IPV4}" "${local_port}" < "${runner}")" || die 1 "${label} Reality smoke 失败"
-  [[ "${output}" == SMOKE=ok ]] || die 1 "${label} Reality smoke 返回异常"
+  output="$(ssh_relay_stdin bash -s -- "${EXPECTED_EXIT_IPV4}" "${local_port}" < "${runner}")" || die 1 "$(L "${label} Reality smoke 失败" "${label} Reality smoke failed")"
+  [[ "${output}" == SMOKE=ok ]] || die 1 "$(L "${label} Reality smoke 返回异常" "${label} Reality smoke returned something unexpected")"
 }
 
 local_process_metadata_matches() {
@@ -4185,16 +4341,16 @@ publish_local_process() {
 
 record_local_pid() {
   local start
-  [[ -z "${TEMP_PID}" && -z "${TEMP_PID_CONFIG}" && -z "${TEMP_PID_START}" ]] || die 1 '本地临时进程登记发生重入'
+  [[ -z "${TEMP_PID}" && -z "${TEMP_PID_CONFIG}" && -z "${TEMP_PID_START}" ]] || die 1 "$(L '本地临时进程登记发生重入' 'Re-entrant registration of a local temporary process')"
   start="$(process_start_token "$1")"
-  [[ -n "${start}" ]] || die 1 '无法读取本地临时进程启动身份'
+  [[ -n "${start}" ]] || die 1 "$(L '无法读取本地临时进程启动身份' 'Cannot read the start identity of the local temporary process')"
   TEMP_PID="$1"
   TEMP_PID_CONFIG="$2"
   TEMP_PID_START="${start}"
   if ! publish_local_process "$1" "$2" "${start}"; then
     terminate_pid_with_start "$1" "${start}" || true
     remove_recorded_local_pid "$1" || true
-    die 1 '本地临时进程持久登记失败'
+    die 1 "$(L '本地临时进程持久登记失败' 'Persisting the registration of the local temporary process failed')"
   fi
 }
 
@@ -4274,8 +4430,8 @@ start_local_smoke_process() {
   config="$1"
   log="$2"
   gate="${OP_TMP}/local-process-gate.${LOCK_OPERATION_ID}"
-  [[ ! -e "${gate}" && ! -L "${gate}" ]] || die 1 '本地临时进程 gate 路径碰撞'
-  mkfifo -m 600 "${gate}" || die 1 '无法创建本地临时进程 gate'
+  [[ ! -e "${gate}" && ! -L "${gate}" ]] || die 1 "$(L '本地临时进程 gate 路径碰撞' 'Local temporary process gate path collision')"
+  mkfifo -m 600 "${gate}" || die 1 "$(L '无法创建本地临时进程 gate' 'Cannot create the local temporary process gate')"
   (
     exec 9<>"${gate}"
     IFS= read -r -t 10 token <&9 || exit 124
@@ -4289,7 +4445,7 @@ start_local_smoke_process() {
   if ! printf 'go\n' > "${gate}"; then
     cleanup_one_local_pid "${pid}" "${config}" || true
     remove_recorded_local_pid "${pid}" || true
-    die 1 '无法放行本地临时进程 gate'
+    die 1 "$(L '无法放行本地临时进程 gate' 'Cannot release the local temporary process gate')"
   fi
   rm -f "${gate}"
   LOCAL_PROCESS_GATE=''
@@ -4298,20 +4454,20 @@ start_local_smoke_process() {
 smoke_from_mac() {
   local local_port config log pid started success endpoint result interface
   if [[ "${DARWIN_BINARY_SHA256}" == NONE || -z "${DARWIN_BINARY_PATH}" ]]; then
-    log_warn '没有本机平台的官方包，跳过本机层出口 smoke（非硬门槛，中转侧第 2/3 层已是部署硬门槛）'
+    log_warn "$(L '没有本机平台的官方包，跳过本机层出口 smoke（非硬门槛，中转侧第 2/3 层已是部署硬门槛）' 'No official package for this platform; skipping the local exit smoke (not a hard gate; layers 2/3 on the relay already are)')"
     return 0
   fi
   interface="$(route_interface "${RELAY_HOST}")"
-  [[ -n "${interface}" ]] || die 1 '无法判定本机到中转的实际路由接口'
+  [[ -n "${interface}" ]] || die 1 "$(L '无法判定本机到中转的实际路由接口' 'Cannot determine the actual route interface from this computer to the relay')"
   if interface_is_tunnel "${interface}"; then
-    log_warn "本机到中转的路由经过 TUN（${interface}）；跳过本机层出口 smoke（非硬门槛，中转侧第 2/3 层已是部署硬门槛）"
+    log_warn "$(L "本机到中转的路由经过 TUN（${interface}）；跳过本机层出口 smoke（非硬门槛，中转侧第 2/3 层已是部署硬门槛）" "The route from this computer to the relay goes through TUN (${interface}); skipping the local exit smoke (not a hard gate; layers 2/3 on the relay already are)")"
     return 0
   fi
-  local_port="$(choose_local_port)" || die 1 '无法为本机 smoke 选择本地端口'
+  local_port="$(choose_local_port)" || die 1 "$(L '无法为本机 smoke 选择本地端口' 'Cannot choose a local port for the local smoke')"
   config="${OP_TMP}/smoke-mac.json"
   log="${OP_TMP}/smoke-mac.log"
   render_client_config "${config}" "${local_port}" "${RELAY_HOST}" "${RELAY_PORT}"
-  "${DARWIN_BINARY_PATH}" check -c "${config}" >/dev/null || die 1 '本机 smoke config check 失败'
+  "${DARWIN_BINARY_PATH}" check -c "${config}" >/dev/null || die 1 "$(L '本机 smoke config check 失败' 'Local smoke config check failed')"
   start_local_smoke_process "${config}" "${log}"
   pid="${TEMP_PID}"
   started=0
@@ -4323,20 +4479,20 @@ smoke_from_mac() {
     kill -0 "${pid}" 2>/dev/null || break
     sleep 0.1
   done
-  [[ "${started}" == 1 ]] || die 1 '本机临时 sing-box 未监听'
+  [[ "${started}" == 1 ]] || die 1 "$(L '本机临时 sing-box 未监听' 'The local temporary sing-box is not listening')"
   success=0
   for endpoint in https://api.ipify.org https://icanhazip.com https://ifconfig.me/ip; do
     result="$(
       env -i HOME="${OP_TMP}" PATH="/usr/bin:/bin:/usr/sbin:/sbin" curl --disable --fail --silent --show-error --proxy "socks5h://127.0.0.1:${local_port}" --noproxy '' --max-time 15 "${endpoint}" 2>/dev/null | tr -d '[:space:]' || true
     )"
     if is_ipv4 "${result}"; then
-      [[ "${result}" == "${EXPECTED_EXIT_IPV4}" ]] || die 1 '本机 smoke 得到非预期出口'
+      [[ "${result}" == "${EXPECTED_EXIT_IPV4}" ]] || die 1 "$(L '本机 smoke 得到非预期出口' 'The local smoke got an unexpected exit')"
       success="$((success + 1))"
     fi
   done
   cleanup_one_local_pid "${pid}" "${config}"
   remove_recorded_local_pid "${pid}"
-  (( success >= 2 )) || die 1 '本机 smoke 未通过 2-of-3 出口仲裁'
+  (( success >= 2 )) || die 1 "$(L '本机 smoke 未通过 2-of-3 出口仲裁' 'The local smoke did not pass the 2-of-3 exit arbitration')"
 }
 
 # 拒绝侧：本机（非中转来源）直连出口机 Reality 端口应当失败。provider（服务商白名单）与 managed（本项目 nft 白名单）
@@ -4344,18 +4500,18 @@ smoke_from_mac() {
 probe_mac_reality_rejection() {
   local interface
   interface="$(route_interface "${EXIT_HOST}")"
-  [[ -n "${interface}" ]] || die 1 '无法判定本机到出口机的实际路由接口'
+  [[ -n "${interface}" ]] || die 1 "$(L '无法判定本机到出口机的实际路由接口' 'Cannot determine the actual route interface from this computer to the exit')"
   if interface_is_tunnel "${interface}"; then
-    log_warn "本机到出口机的路由经过 TUN（${interface}）；非中转来源拒绝侧未验证（EXIT_SOURCE_FILTER=${EXIT_SOURCE_FILTER}），需在不经 TUN 的环境再跑 verify"
+    log_warn "$(L "本机到出口机的路由经过 TUN（${interface}）；非中转来源拒绝侧未验证（EXIT_SOURCE_FILTER=${EXIT_SOURCE_FILTER}），需在不经 TUN 的环境再跑 verify" "The route from this computer to the exit goes through TUN (${interface}); the rejection of non-relay sources was not verified (EXIT_SOURCE_FILTER=${EXIT_SOURCE_FILTER}); run verify again from an environment without TUN")"
     return 0
   fi
   if tcp_probe "${EXIT_HOST}" "${EXIT_REALITY_PORT}" 5; then
     # none 时这是普通 VPS 的预期状态，没有凭据仍无法使用该端口。
-    [[ "${EXIT_SOURCE_FILTER}" == none ]] || die 1 "非中转来源可直连出口机 Reality 端口，白名单拒绝侧失败（EXIT_SOURCE_FILTER=${EXIT_SOURCE_FILTER}）"
-    log_warn '出口机 Reality 端口对非中转来源开放（EXIT_SOURCE_FILTER=none，未配置白名单；没有凭据仍无法使用）'
+    [[ "${EXIT_SOURCE_FILTER}" == none ]] || die 1 "$(L "非中转来源可直连出口机 Reality 端口，白名单拒绝侧失败（EXIT_SOURCE_FILTER=${EXIT_SOURCE_FILTER}）" "Non-relay sources can reach the exit's Reality port directly, so the allow-list rejection failed (EXIT_SOURCE_FILTER=${EXIT_SOURCE_FILTER})")"
+    log_warn "$(L '出口机 Reality 端口对非中转来源开放（EXIT_SOURCE_FILTER=none，未配置白名单；没有凭据仍无法使用）' 'The exit'\''s Reality port is open to non-relay sources (EXIT_SOURCE_FILTER=none, no allow-list configured; it is still unusable without credentials)')"
     return 0
   fi
-  log_info '出口机 Reality 端口的本机直连拒绝侧通过'
+  log_info "$(L '出口机 Reality 端口的本机直连拒绝侧通过' 'Direct connections from this computer to the exit'\''s Reality port are rejected, as expected')"
 }
 
 render_node_artifact() {
@@ -4378,17 +4534,17 @@ publish_local_artifacts() {
   write_journal
   final_baseline="${CHAIN_STATE_DIR}/baseline"
   final_client="${CHAIN_STATE_DIR}/client"
-  [[ ! -e "${final_baseline}" && ! -L "${final_baseline}" ]] || die 4 '本地 baseline 目录碰撞'
-  [[ ! -e "${final_client}" && ! -L "${final_client}" ]] || die 4 '本地 client 目录碰撞'
+  [[ ! -e "${final_baseline}" && ! -L "${final_baseline}" ]] || die 4 "$(L '本地 baseline 目录碰撞' 'Local baseline directory collision')"
+  [[ ! -e "${final_client}" && ! -L "${final_client}" ]] || die 4 "$(L '本地 client 目录碰撞' 'Local client directory collision')"
   mkdir "${final_baseline}"
   mkdir "${final_client}"
   chmod 700 "${final_baseline}" "${final_client}"
   for file in relay-config-manifest.txt relay-unit-manifest.txt relay-binary-manifest.txt relay-listeners.txt; do
-    link "${baseline_stage}/${file}" "${final_baseline}/${file}" || die 1 "本地 baseline no-replace 发布失败：${file}"
+    link "${baseline_stage}/${file}" "${final_baseline}/${file}" || die 1 "$(L "本地 baseline no-replace 发布失败：${file}" "No-replace publishing of the local baseline failed: ${file}")"
   done
-  link "${client_stage}/node.txt" "${final_client}/node.txt" || die 1 'node.txt no-replace 发布失败'
-  [[ "$(sha256_file "${final_client}/node.txt")" == "${NODE_SHA256}" ]] || die 1 'node.txt 发布后 hash 不符'
-  cleanup_local_stage_if_owned || die 1 '本地 staging owner/允许清单复核失败'
+  link "${client_stage}/node.txt" "${final_client}/node.txt" || die 1 "$(L 'node.txt no-replace 发布失败' 'No-replace publishing of node.txt failed')"
+  [[ "$(sha256_file "${final_client}/node.txt")" == "${NODE_SHA256}" ]] || die 1 "$(L 'node.txt 发布后 hash 不符' 'node.txt hash mismatch after publishing')"
+  cleanup_local_stage_if_owned || die 1 "$(L '本地 staging owner/允许清单复核失败' 'Re-checking the local staging owner / allow-list failed')"
   LAST_COMPLETED_STEP='LOCAL_ARTIFACTS_READY'
   write_journal
 }
@@ -4758,7 +4914,7 @@ ensure_local_assets_match_state() {
   recorded_archive="${DARWIN_ARCHIVE_SHA256}"
   prepare_verified_assets readonly
   if [[ "${recorded_archive}" != "${DARWIN_ARCHIVE_SHA256}" ]]; then
-    log_warn "本机平台的官方包与部署时不同（部署时=$(platform_of_archive_sha256 "${recorded_archive}" || printf 'NONE')，现在=${LOCAL_PLATFORM:-无}），本机侧出口验证按现在的平台进行"
+    log_warn "$(L "本机平台的官方包与部署时不同（部署时=$(platform_of_archive_sha256 "${recorded_archive}" || printf 'NONE')，现在=${LOCAL_PLATFORM:-无}），本机侧出口验证按现在的平台进行" "The official package for this platform differs from deployment time (at deployment=$(platform_of_archive_sha256 "${recorded_archive}" || printf 'NONE'), now=${LOCAL_PLATFORM:-none}); the local exit check uses the current platform")"
   fi
 }
 
@@ -4773,14 +4929,14 @@ full_verify() {
   probe_exit_tls
   probe_exit_exit
   if probe_remote_resources yes; then rc=0; else rc="$?"; fi
-  [[ "${rc}" -ne 33 ]] || die 5 '出口机上有未完成的凭据或设备操作（辅助文件未清理）；重跑中断的那条命令（rotate-keys / add-device / remove-device）收敛'
-  [[ "${rc}" -eq 0 ]] || die 5 '远端文件、unit、进程、listener 或 binary 发生 drift'
-  verify_local_artifacts || die 5 '本地 state 配套产物发生 drift'
-  verify_relay_baseline || die 5 '中转既有 sing-box 零回归基线发生变化'
+  [[ "${rc}" -ne 33 ]] || die 5 "$(L '出口机上有未完成的凭据或设备操作（辅助文件未清理）；重跑中断的那条命令（rotate-keys / add-device / remove-device）收敛' 'The exit has an unfinished credential or device operation (helper files not cleaned up); rerun the interrupted command (rotate-keys / add-device / remove-device) to converge')"
+  [[ "${rc}" -eq 0 ]] || die 5 "$(L '远端文件、unit、进程、listener 或 binary 发生 drift' 'Remote files, units, processes, listeners or binaries drifted')"
+  verify_local_artifacts || die 5 "$(L '本地 state 配套产物发生 drift' 'Local artifacts accompanying the state drifted')"
+  verify_relay_baseline || die 5 "$(L '中转既有 sing-box 零回归基线发生变化' 'The zero-regression baseline of the relay'\''s existing sing-box changed')"
   smoke_from_relay "${EXIT_HOST}" "${EXIT_REALITY_PORT}" exit-direct
   probe_mac_reality_rejection
   verify_chain_smokes
-  deployment_residue_absent || die 5 '发现本 deployment 或当前 chain/config 的 staging、owner-temp、child/temp 残留'
+  deployment_residue_absent || die 5 "$(L '发现本 deployment 或当前 chain/config 的 staging、owner-temp、child/temp 残留' 'Leftover staging, owner-temp or child/temp of this deployment or chain/config found')"
 }
 
 check_remote_shared_binary_or_absent() {
@@ -4819,10 +4975,10 @@ SHARED_CHECK
 preflight_chain() {
   local before after baseline actual_linux actual_darwin state_relay_fp state_exit_fp
   if [[ -e "${CHAIN_STATE_DIR}" || -L "${CHAIN_STATE_DIR}" ]]; then
-    private_dir_is_safe "${CHAIN_STATE_DIR}" || die 3 '现有 chain state 目录身份或权限不安全'
+    private_dir_is_safe "${CHAIN_STATE_DIR}" || die 3 "$(L '现有 chain state 目录身份或权限不安全' 'The existing chain state directory'\''s ownership or permissions are unsafe')"
   fi
   before="$(snapshot_operation_state)"
-  printf '%s\n' "${before}" | grep -qv '|absent$' && die 3 'preflight 起点存在 operation lock 或 transaction'
+  printf '%s\n' "${before}" | grep -qv '|absent$' && die 3 "$(L 'preflight 起点存在 operation lock 或 transaction' 'An operation lock or transaction exists at the start of preflight')"
   require_local_dependencies
   prepare_verified_assets readonly
   actual_darwin="${DARWIN_BINARY_SHA256}"
@@ -4833,60 +4989,60 @@ preflight_chain() {
   actual_linux="${LINUX_BINARY_SHA256}"
   probe_exit_tls
   probe_exit_exit
-  check_remote_shared_binary_or_absent relay || die 3 '中转共享 binary/目录发生 drift'
-  check_remote_shared_binary_or_absent exit || die 3 '出口机共享 binary/目录发生 drift'
+  check_remote_shared_binary_or_absent relay || die 3 "$(L '中转共享 binary/目录发生 drift' 'Shared binary/directories on the relay drifted')"
+  check_remote_shared_binary_or_absent exit || die 3 "$(L '出口机共享 binary/目录发生 drift' 'Shared binary/directories on the exit drifted')"
   baseline="${OP_TMP}/baseline-preflight"
   collect_relay_baseline "${baseline}"
   if [[ -e "${STATE_FILE}" || -L "${STATE_FILE}" ]]; then
     state_relay_fp="${RELAY_HOSTKEY_FINGERPRINT}"
     state_exit_fp="${EXIT_HOSTKEY_FINGERPRINT}"
     load_state_file "${STATE_FILE}"
-    [[ "${LINUX_BINARY_SHA256}" == "${actual_linux}" ]] || die 3 'active state 的远端官方 binary hash 与现场架构的固定资产不一致'
-    [[ "${DARWIN_BINARY_SHA256}" == "${actual_darwin}" ]] || log_warn '本机平台的官方包与部署时不同，本机侧出口验证按现在的平台进行'
-    [[ "${RELAY_HOSTKEY_FINGERPRINT}" == "${state_relay_fp}" && "${EXIT_HOSTKEY_FINGERPRINT}" == "${state_exit_fp}" ]] || die 3 'active state 的 host-key 指纹与当前连接不一致'
+    [[ "${LINUX_BINARY_SHA256}" == "${actual_linux}" ]] || die 3 "$(L 'active state 的远端官方 binary hash 与现场架构的固定资产不一致' 'The remote official binary hash in the active state does not match the pinned asset for the live architecture')"
+    [[ "${DARWIN_BINARY_SHA256}" == "${actual_darwin}" ]] || log_warn "$(L '本机平台的官方包与部署时不同，本机侧出口验证按现在的平台进行' 'The official package for this platform differs from deployment time; the local exit check uses the current platform')"
+    [[ "${RELAY_HOSTKEY_FINGERPRINT}" == "${state_relay_fp}" && "${EXIT_HOSTKEY_FINGERPRINT}" == "${state_exit_fp}" ]] || die 3 "$(L 'active state 的 host-key 指纹与当前连接不一致' 'The host key fingerprints in the active state do not match the current connection')"
     remote_platform_preflight
-    verify_remote_resources no || die 3 'active chain 远端资源不健康'
-    verify_local_artifacts || die 3 'active chain 本地产物不健康'
-    verify_relay_baseline || die 3 'active chain 的既有 sing-box 基线变化'
+    verify_remote_resources no || die 3 "$(L 'active chain 远端资源不健康' 'The active chain'\''s remote resources are unhealthy')"
+    verify_local_artifacts || die 3 "$(L 'active chain 本地产物不健康' 'The active chain'\''s local artifacts are unhealthy')"
+    verify_relay_baseline || die 3 "$(L 'active chain 的既有 sing-box 基线变化' 'The active chain'\''s existing sing-box baseline changed')"
   else
     check_initial_collisions
   fi
   after="$(snapshot_operation_state)"
-  [[ "${before}" == "${after}" ]] || die 3 'preflight 期间 lock/journal 身份发生变化'
-  log_info "preflight 通过；chain=${CHAIN_ID} elapsed=$(elapsed_seconds)s"
+  [[ "${before}" == "${after}" ]] || die 3 "$(L 'preflight 期间 lock/journal 身份发生变化' 'The lock/journal identity changed during preflight')"
+  log_info "$(L "preflight 通过；chain=${CHAIN_ID} elapsed=$(elapsed_seconds)s" "preflight passed; chain=${CHAIN_ID} elapsed=$(elapsed_seconds)s")"
 }
 
 archive_deploy_transaction() {
   local audit transaction_copy complete payload_hash
   audit="${CHAIN_STATE_DIR}/audit/deployed.${DEPLOYMENT_ID}.${OPERATION_ID}"
-  ensure_private_dir "${CHAIN_STATE_DIR}/audit" || die 1 'deploy audit 父目录不安全'
+  ensure_private_dir "${CHAIN_STATE_DIR}/audit" || die 1 "$(L 'deploy audit 父目录不安全' 'The deploy audit parent directory is unsafe')"
   if [[ ! -e "${audit}" && ! -L "${audit}" ]]; then
-    mkdir "${audit}" || die 1 'deploy audit 目录碰撞'
-    chmod 700 "${audit}" || die 1 'deploy audit 目录权限设置失败'
+    mkdir "${audit}" || die 1 "$(L 'deploy audit 目录碰撞' 'Deploy audit directory collision')"
+    chmod 700 "${audit}" || die 1 "$(L 'deploy audit 目录权限设置失败' 'Setting the deploy audit directory'\''s permissions failed')"
   fi
-  ensure_private_dir "${audit}" || die 1 'deploy audit 目录身份或权限不安全'
+  ensure_private_dir "${audit}" || die 1 "$(L 'deploy audit 目录身份或权限不安全' 'The deploy audit directory'\''s ownership or permissions are unsafe')"
   transaction_copy="${audit}/transaction.env"
   if [[ ! -e "${transaction_copy}" && ! -L "${transaction_copy}" ]]; then
-    link "${JOURNAL_FILE}" "${transaction_copy}" || die 1 'deploy audit transaction 发布失败'
-    chmod 600 "${transaction_copy}" || die 1 'deploy audit transaction 权限设置失败'
+    link "${JOURNAL_FILE}" "${transaction_copy}" || die 1 "$(L 'deploy audit transaction 发布失败' 'Publishing the deploy audit transaction failed')"
+    chmod 600 "${transaction_copy}" || die 1 "$(L 'deploy audit transaction 权限设置失败' 'Setting the deploy audit transaction'\''s permissions failed')"
   else
-    require_secure_user_file "${transaction_copy}" 600 || die 1 'deploy audit transaction 身份异常'
-    [[ "$(sha256_file "${transaction_copy}")" == "$(sha256_file "${JOURNAL_FILE}")" ]] || die 1 'deploy audit transaction 碰撞'
+    require_secure_user_file "${transaction_copy}" 600 || die 1 "$(L 'deploy audit transaction 身份异常' 'The deploy audit transaction has an unexpected identity')"
+    [[ "$(sha256_file "${transaction_copy}")" == "$(sha256_file "${JOURNAL_FILE}")" ]] || die 1 "$(L 'deploy audit transaction 碰撞' 'Deploy audit transaction collision')"
   fi
-  payload_hash="$(sha256_file "${transaction_copy}")" || die 1 'deploy audit transaction 摘要失败'
+  payload_hash="$(sha256_file "${transaction_copy}")" || die 1 "$(L 'deploy audit transaction 摘要失败' 'Digest of the deploy audit transaction failed')"
   complete="${audit}/COMPLETE"
   if [[ ! -e "${complete}" && ! -L "${complete}" ]]; then
     {
       printf 'SCHEMA_VERSION=1\n'
       printf 'TRANSACTION_SHA256=%s\n' "${payload_hash}"
-    } > "${OP_TMP}/deploy-complete" || die 1 'deploy COMPLETE payload 写入失败'
+    } > "${OP_TMP}/deploy-complete" || die 1 "$(L 'deploy COMPLETE payload 写入失败' 'Writing the deploy COMPLETE payload failed')"
     write_checksummed_file "${complete}" new "${OP_TMP}/deploy-complete"
   fi
-  validate_complete_marker "${complete}" "${payload_hash}" || die 1 'deploy COMPLETE marker 无效'
-  [[ "$(sha256_file "${transaction_copy}")" == "${payload_hash}" ]] || die 1 'deploy audit 复核失败'
-  validate_deploy_audit "${audit}" || die 1 'deploy audit 全量复核失败'
-  rm -f "${JOURNAL_FILE}" || die 1 'deploy commit 后 transaction 删除失败'
-  sync || die 1 'deploy commit 持久化失败'
+  validate_complete_marker "${complete}" "${payload_hash}" || die 1 "$(L 'deploy COMPLETE marker 无效' 'Invalid deploy COMPLETE marker')"
+  [[ "$(sha256_file "${transaction_copy}")" == "${payload_hash}" ]] || die 1 "$(L 'deploy audit 复核失败' 'Re-checking the deploy audit failed')"
+  validate_deploy_audit "${audit}" || die 1 "$(L 'deploy audit 全量复核失败' 'Full re-check of the deploy audit failed')"
+  rm -f "${JOURNAL_FILE}" || die 1 "$(L 'deploy commit 后 transaction 删除失败' 'Deleting the transaction after the deploy commit failed')"
+  sync || die 1 "$(L 'deploy commit 持久化失败' 'Persisting the deploy commit failed')"
   log_info "deploy audit=${audit}"
 }
 
@@ -4935,11 +5091,11 @@ commit_deploy() {
   write_active_state
   LAST_COMPLETED_STEP='STATE_WRITTEN'
   write_journal
-  state_matches_loaded_transaction || die 1 'state 写入后与 transaction 字段不一致'
-  verify_remote_resources no || die 1 'state 写入后的远端复核失败'
-  verify_local_artifacts || die 1 'state 写入后的本地产物复核失败'
-  verify_relay_baseline || die 1 'state 写入后的既有 sing-box 基线复核失败'
-  deployment_residue_absent || die 1 'state 写入后仍存在 staging/owner-temp 残留'
+  state_matches_loaded_transaction || die 1 "$(L 'state 写入后与 transaction 字段不一致' 'The state after writing does not match the transaction fields')"
+  verify_remote_resources no || die 1 "$(L 'state 写入后的远端复核失败' 'The remote re-check after writing the state failed')"
+  verify_local_artifacts || die 1 "$(L 'state 写入后的本地产物复核失败' 'The local artifact re-check after writing the state failed')"
+  verify_relay_baseline || die 1 "$(L 'state 写入后的既有 sing-box 基线复核失败' 'The existing sing-box baseline re-check after writing the state failed')"
+  deployment_residue_absent || die 1 "$(L 'state 写入后仍存在 staging/owner-temp 残留' 'Staging/owner-temp leftovers remain after writing the state')"
   LAST_COMPLETED_STEP='COMMITTED'
   write_journal
   archive_deploy_transaction
@@ -4949,7 +5105,7 @@ deploy_chain() {
   local rc
   acquire_global_lock
   if acquire_chain_lock 1; then rc=0; else rc="$?"; fi
-  [[ "${rc}" -eq 0 ]] || die 1 'chain 正被其它操作占用或锁无法安全回收'
+  [[ "${rc}" -eq 0 ]] || die 1 "$(L 'chain 正被其它操作占用或锁无法安全回收' 'The chain is held by another operation, or the lock cannot be reclaimed safely')"
   migrate_gate
   require_local_dependencies
   # up 已在配免密之前自检过，这里不重复。
@@ -4966,7 +5122,7 @@ deploy_chain() {
     verify_loaded_binding
     ensure_local_assets_match_state
     full_verify
-    log_info "deploy 幂等 no-op；chain=${CHAIN_ID} deployment=${DEPLOYMENT_ID:0:12}"
+    log_info "$(L "deploy 幂等 no-op；chain=${CHAIN_ID} deployment=${DEPLOYMENT_ID:0:12}" "deploy is an idempotent no-op; chain=${CHAIN_ID} deployment=${DEPLOYMENT_ID:0:12}")"
     return 0
   fi
   prepare_verified_assets deploy
@@ -4974,8 +5130,8 @@ deploy_chain() {
   remote_platform_preflight
   probe_exit_tls
   probe_exit_exit
-  check_remote_shared_binary_or_absent relay || die 4 '中转共享资源 drift'
-  check_remote_shared_binary_or_absent exit || die 4 '出口机共享资源 drift'
+  check_remote_shared_binary_or_absent relay || die 4 "$(L '中转共享资源 drift' 'Shared resources on the relay drifted')"
+  check_remote_shared_binary_or_absent exit || die 4 "$(L '出口机共享资源 drift' 'Shared resources on the exit drifted')"
   check_initial_collisions
   init_deploy_transaction_fields
 
@@ -5005,13 +5161,13 @@ deploy_chain() {
   install_relay
   activate_relay
   smoke_from_relay 127.0.0.1 "${RELAY_PORT}" relay-full
-  [[ "$(ssh_relay systemctl is-active "ownexit-chain-relay-${CHAIN_ID}.service")" == active ]] || die 1 '中转 service 未被真实连接激活'
+  [[ "$(ssh_relay systemctl is-active "ownexit-chain-relay-${CHAIN_ID}.service")" == active ]] || die 1 "$(L '中转 service 未被真实连接激活' 'The relay service was not activated by a real connection')"
   publish_local_artifacts
   smoke_from_mac
   full_verify
   commit_deploy
-  log_info "deploy 完成；chain=${CHAIN_ID} deployment=${DEPLOYMENT_ID:0:12} node=${CHAIN_STATE_DIR}/client/node.txt elapsed=$(elapsed_seconds)s"
-  log_info '备份：无（专属路径碰撞即拒绝）；两端共享目录与固定 binary 按设计保留'
+  log_info "$(L "deploy 完成；chain=${CHAIN_ID} deployment=${DEPLOYMENT_ID:0:12} node=${CHAIN_STATE_DIR}/client/node.txt elapsed=$(elapsed_seconds)s" "deploy complete; chain=${CHAIN_ID} deployment=${DEPLOYMENT_ID:0:12} node=${CHAIN_STATE_DIR}/client/node.txt elapsed=$(elapsed_seconds)s")"
+  log_info "$(L '备份：无（专属路径碰撞即拒绝）；两端共享目录与固定 binary 按设计保留' 'Backup: none (any collision on a chain-specific path is refused); shared directories and the pinned binary on both ends are kept by design')"
 }
 
 write_fail_closed_probe_script() {
@@ -5074,20 +5230,20 @@ verify_fail_closed() {
   accuracy="$(ssh_relay systemctl show "${timer}" -p AccuracyUSec --value)"
   triggers="$(ssh_relay systemctl show "${timer}" -p Triggers --value)"
   execstart="$(ssh_relay systemctl show "${timer_service}" -p ExecStart --value)"
-  [[ "${accuracy}" == 1s && "${triggers}" == *"${timer_service}"* && "${execstart}" == *"${SYSTEMCTL_PATH}"*"${socket}"* ]] || die 1 'fail-closed watchdog 属性核验失败'
-  [[ "$(ssh_relay systemctl is-active "${timer}")" == active ]] || die 1 'fail-closed watchdog timer 未 active'
+  [[ "${accuracy}" == 1s && "${triggers}" == *"${timer_service}"* && "${execstart}" == *"${SYSTEMCTL_PATH}"*"${socket}"* ]] || die 1 "$(L 'fail-closed watchdog 属性核验失败' 'Verifying the fail-closed watchdog properties failed')"
+  [[ "$(ssh_relay systemctl is-active "${timer}")" == active ]] || die 1 "$(L 'fail-closed watchdog timer 未 active' 'The fail-closed watchdog timer is not active')"
   ssh_relay systemctl stop "${socket}"
   ssh_relay systemctl stop "${service}" || true
-  ! ssh_relay "ss -H -ltn | grep -q ':${RELAY_PORT} '" || die 1 '停止后 relay 端口仍监听'
-  local_port="$(choose_remote_port relay)" || die 1 '无法选择 fail-closed 临时端口'
+  ! ssh_relay "ss -H -ltn | grep -q ':${RELAY_PORT} '" || die 1 "$(L '停止后 relay 端口仍监听' 'The relay port is still listening after stopping')"
+  local_port="$(choose_remote_port relay)" || die 1 "$(L '无法选择 fail-closed 临时端口' 'Cannot choose a fail-closed temporary port')"
   config="${OP_TMP}/fail-closed.json"
   probe="${OP_TMP}/fail-closed.sh"
   render_client_config "${config}" "${local_port}" 127.0.0.1 "${RELAY_PORT}"
   write_fail_closed_probe_script "${probe}" "${config}"
-  ssh_relay_stdin bash -s -- "${local_port}" < "${probe}" || die 1 'fail-closed 期间仍得到有效代理响应'
+  ssh_relay_stdin bash -s -- "${local_port}" < "${probe}" || die 1 "$(L 'fail-closed 期间仍得到有效代理响应' 'Still got a working proxy response during fail-closed')"
   ssh_relay systemctl start "${socket}"
   verify_chain_smokes
-  restore_and_disarm_fail_closed_watchdog || die 1 'relay socket 或 fail-closed watchdog 未安全闭合'
+  restore_and_disarm_fail_closed_watchdog || die 1 "$(L 'relay socket 或 fail-closed watchdog 未安全闭合' 'The relay socket or the fail-closed watchdog did not close safely')"
 }
 
 write_remove_chain_script() {
@@ -5405,61 +5561,61 @@ init_rollback_journal() {
 
 archive_rollback_artifacts() {
   local audit saved_step payload transaction_copy complete file transaction_hash
-  validate_checksum_env "${STATE_FILE}" state || die 1 'rollback 归档前 active state 漂移'
-  verify_local_artifacts || die 1 'rollback 归档前本地产物漂移'
+  validate_checksum_env "${STATE_FILE}" state || die 1 "$(L 'rollback 归档前 active state 漂移' 'The active state drifted before the rollback archive')"
+  verify_local_artifacts || die 1 "$(L 'rollback 归档前本地产物漂移' 'Local artifacts drifted before the rollback archive')"
   audit="${CHAIN_STATE_DIR}/audit/rolledback.${DEPLOYMENT_ID}.${OPERATION_ID}"
-  ensure_private_dir "${CHAIN_STATE_DIR}/audit" || die 1 'rollback audit 父目录不安全'
+  ensure_private_dir "${CHAIN_STATE_DIR}/audit" || die 1 "$(L 'rollback audit 父目录不安全' 'The rollback audit parent directory is unsafe')"
   if [[ ! -e "${audit}" && ! -L "${audit}" ]]; then
-    mkdir "${audit}" || die 1 'rollback audit 目录碰撞'
-    chmod 700 "${audit}" || die 1 'rollback audit 目录权限设置失败'
+    mkdir "${audit}" || die 1 "$(L 'rollback audit 目录碰撞' 'Rollback audit directory collision')"
+    chmod 700 "${audit}" || die 1 "$(L 'rollback audit 目录权限设置失败' 'Setting the rollback audit directory'\''s permissions failed')"
   fi
-  ensure_private_dir "${audit}" || die 1 'rollback audit 目录身份或权限不安全'
-  ensure_private_dir "${audit}/baseline" || die 1 'rollback baseline audit 目录不安全'
-  ensure_private_dir "${audit}/client" || die 1 'rollback client audit 目录不安全'
+  ensure_private_dir "${audit}" || die 1 "$(L 'rollback audit 目录身份或权限不安全' 'The rollback audit directory'\''s ownership or permissions are unsafe')"
+  ensure_private_dir "${audit}/baseline" || die 1 "$(L 'rollback baseline audit 目录不安全' 'The rollback baseline audit directory is unsafe')"
+  ensure_private_dir "${audit}/client" || die 1 "$(L 'rollback client audit 目录不安全' 'The rollback client audit directory is unsafe')"
   if [[ ! -e "${audit}/state.env" ]]; then
-    link "${STATE_FILE}" "${audit}/state.env" || die 1 'rollback audit state 发布失败'
+    link "${STATE_FILE}" "${audit}/state.env" || die 1 "$(L 'rollback audit state 发布失败' 'Publishing the rollback audit state failed')"
   else
-    require_secure_user_file "${audit}/state.env" 600 || die 1 'rollback audit state 身份异常'
-    [[ "$(sha256_file "${audit}/state.env")" == "$(sha256_file "${STATE_FILE}")" ]] || die 1 'rollback audit state 碰撞'
+    require_secure_user_file "${audit}/state.env" 600 || die 1 "$(L 'rollback audit state 身份异常' 'The rollback audit state has an unexpected identity')"
+    [[ "$(sha256_file "${audit}/state.env")" == "$(sha256_file "${STATE_FILE}")" ]] || die 1 "$(L 'rollback audit state 碰撞' 'Rollback audit state collision')"
   fi
   for file in relay-config-manifest.txt relay-unit-manifest.txt relay-binary-manifest.txt relay-listeners.txt; do
     if [[ ! -e "${audit}/baseline/${file}" ]]; then
-      link "${CHAIN_STATE_DIR}/baseline/${file}" "${audit}/baseline/${file}" || die 1 "rollback audit baseline 发布失败：${file}"
+      link "${CHAIN_STATE_DIR}/baseline/${file}" "${audit}/baseline/${file}" || die 1 "$(L "rollback audit baseline 发布失败：${file}" "Publishing the rollback audit baseline failed: ${file}")"
     else
-      require_secure_user_file "${audit}/baseline/${file}" 600 || die 1 "rollback audit baseline 身份异常：${file}"
-      [[ "$(sha256_file "${audit}/baseline/${file}")" == "$(sha256_file "${CHAIN_STATE_DIR}/baseline/${file}")" ]] || die 1 "rollback audit baseline 碰撞：${file}"
+      require_secure_user_file "${audit}/baseline/${file}" 600 || die 1 "$(L "rollback audit baseline 身份异常：${file}" "The rollback audit baseline has an unexpected identity: ${file}")"
+      [[ "$(sha256_file "${audit}/baseline/${file}")" == "$(sha256_file "${CHAIN_STATE_DIR}/baseline/${file}")" ]] || die 1 "$(L "rollback audit baseline 碰撞：${file}" "Rollback audit baseline collision: ${file}")"
     fi
   done
   if [[ ! -e "${audit}/client/node.txt" ]]; then
-    link "${CHAIN_STATE_DIR}/client/node.txt" "${audit}/client/node.txt" || die 1 'rollback audit node 发布失败'
+    link "${CHAIN_STATE_DIR}/client/node.txt" "${audit}/client/node.txt" || die 1 "$(L 'rollback audit node 发布失败' 'Publishing the rollback audit node failed')"
   else
-    require_secure_user_file "${audit}/client/node.txt" 600 || die 1 'rollback audit node 身份异常'
-    [[ "$(sha256_file "${audit}/client/node.txt")" == "$(sha256_file "${CHAIN_STATE_DIR}/client/node.txt")" ]] || die 1 'rollback audit node 碰撞'
+    require_secure_user_file "${audit}/client/node.txt" 600 || die 1 "$(L 'rollback audit node 身份异常' 'The rollback audit node has an unexpected identity')"
+    [[ "$(sha256_file "${audit}/client/node.txt")" == "$(sha256_file "${CHAIN_STATE_DIR}/client/node.txt")" ]] || die 1 "$(L 'rollback audit node 碰撞' 'Rollback audit node collision')"
   fi
   saved_step="${LAST_COMPLETED_STEP}"
   LAST_COMPLETED_STEP='ROLLBACK_COMMITTED'
   payload="${OP_TMP}/rollback-archive-journal"
-  render_journal_payload "${payload}" || die 1 'rollback audit transaction payload 生成失败'
+  render_journal_payload "${payload}" || die 1 "$(L 'rollback audit transaction payload 生成失败' 'Generating the rollback audit transaction payload failed')"
   LAST_COMPLETED_STEP="${saved_step}"
   transaction_copy="${audit}/transaction.env"
   if [[ ! -e "${transaction_copy}" ]]; then
     write_checksummed_file "${transaction_copy}" new "${payload}"
   else
-    validate_checksum_env "${transaction_copy}" journal || die 1 'rollback audit transaction 无效'
-    [[ "$(kv_get "${transaction_copy}" LAST_COMPLETED_STEP)" == ROLLBACK_COMMITTED ]] || die 1 'rollback audit transaction step 错误'
+    validate_checksum_env "${transaction_copy}" journal || die 1 "$(L 'rollback audit transaction 无效' 'Invalid rollback audit transaction')"
+    [[ "$(kv_get "${transaction_copy}" LAST_COMPLETED_STEP)" == ROLLBACK_COMMITTED ]] || die 1 "$(L 'rollback audit transaction step 错误' 'Wrong rollback audit transaction step')"
   fi
-  transaction_hash="$(sha256_file "${transaction_copy}")" || die 1 'rollback audit transaction 摘要失败'
+  transaction_hash="$(sha256_file "${transaction_copy}")" || die 1 "$(L 'rollback audit transaction 摘要失败' 'Digest of the rollback audit transaction failed')"
   complete="${audit}/COMPLETE"
   if [[ ! -e "${complete}" ]]; then
     {
       printf 'SCHEMA_VERSION=1\n'
       printf 'TRANSACTION_SHA256=%s\n' "${transaction_hash}"
-    } > "${OP_TMP}/rollback-complete" || die 1 'rollback COMPLETE payload 写入失败'
+    } > "${OP_TMP}/rollback-complete" || die 1 "$(L 'rollback COMPLETE payload 写入失败' 'Writing the rollback COMPLETE payload failed')"
     write_checksummed_file "${complete}" new "${OP_TMP}/rollback-complete"
   fi
-  validate_complete_marker "${complete}" "${transaction_hash}" || die 1 'rollback COMPLETE marker 无效'
-  [[ "$(sha256_file "${transaction_copy}")" == "${transaction_hash}" ]] || die 1 'rollback audit transaction 漂移'
-  validate_rollback_audit || die 1 'rollback audit 全量复核失败'
+  validate_complete_marker "${complete}" "${transaction_hash}" || die 1 "$(L 'rollback COMPLETE marker 无效' 'Invalid rollback COMPLETE marker')"
+  [[ "$(sha256_file "${transaction_copy}")" == "${transaction_hash}" ]] || die 1 "$(L 'rollback audit transaction 漂移' 'The rollback audit transaction drifted')"
+  validate_rollback_audit || die 1 "$(L 'rollback audit 全量复核失败' 'Full re-check of the rollback audit failed')"
   printf '%s\n' "${audit}"
 }
 
@@ -5522,55 +5678,55 @@ validate_rollback_audit() {
 remove_active_local_artifacts() {
   local file expected_hash
   if [[ -e "${CHAIN_STATE_DIR}/client" || -L "${CHAIN_STATE_DIR}/client" ]]; then
-    private_dir_is_safe "${CHAIN_STATE_DIR}/client" || die 1 'client 目录删除前身份异常'
+    private_dir_is_safe "${CHAIN_STATE_DIR}/client" || die 1 "$(L 'client 目录删除前身份异常' 'The client directory has an unexpected identity before deletion')"
   fi
   if [[ -e "${CHAIN_STATE_DIR}/baseline" || -L "${CHAIN_STATE_DIR}/baseline" ]]; then
-    private_dir_is_safe "${CHAIN_STATE_DIR}/baseline" || die 1 'baseline 目录删除前身份异常'
+    private_dir_is_safe "${CHAIN_STATE_DIR}/baseline" || die 1 "$(L 'baseline 目录删除前身份异常' 'The baseline directory has an unexpected identity before deletion')"
   fi
   if [[ -e "${CHAIN_STATE_DIR}/client/node.txt" || -L "${CHAIN_STATE_DIR}/client/node.txt" ]]; then
-    require_secure_user_file "${CHAIN_STATE_DIR}/client/node.txt" 600 || die 1 'node.txt 删除前身份异常'
-    [[ "$(sha256_file "${CHAIN_STATE_DIR}/client/node.txt")" == "${NODE_SHA256}" ]] || die 1 'node.txt 删除前 hash 漂移'
-    rm -f "${CHAIN_STATE_DIR}/client/node.txt" || die 1 'node.txt 删除失败'
+    require_secure_user_file "${CHAIN_STATE_DIR}/client/node.txt" 600 || die 1 "$(L 'node.txt 删除前身份异常' 'node.txt has an unexpected identity before deletion')"
+    [[ "$(sha256_file "${CHAIN_STATE_DIR}/client/node.txt")" == "${NODE_SHA256}" ]] || die 1 "$(L 'node.txt 删除前 hash 漂移' 'node.txt hash drifted before deletion')"
+    rm -f "${CHAIN_STATE_DIR}/client/node.txt" || die 1 "$(L 'node.txt 删除失败' 'Deleting node.txt failed')"
   fi
-  [[ ! -d "${CHAIN_STATE_DIR}/client" ]] || rmdir "${CHAIN_STATE_DIR}/client" || die 1 'client 目录删除失败'
+  [[ ! -d "${CHAIN_STATE_DIR}/client" ]] || rmdir "${CHAIN_STATE_DIR}/client" || die 1 "$(L 'client 目录删除失败' 'Deleting the client directory failed')"
   # rotate-keys 中断留下的 node.txt 临时文件：不删的话 state 删除后它会被判成孤儿，status / deploy / rollback 都卡住。
   for file in "${CHAIN_STATE_DIR}"/.node.txt.rotate.*.tmp; do
     [[ -e "${file}" || -L "${file}" ]] || continue
-    require_secure_user_file "${file}" 600 || die 1 "rotate-keys 残留删除前身份异常：${file}"
-    rm -f "${file}" || die 1 "rotate-keys 残留删除失败：${file}"
+    require_secure_user_file "${file}" 600 || die 1 "$(L "rotate-keys 残留删除前身份异常：${file}" "A rotate-keys leftover has an unexpected identity before deletion: ${file}")"
+    rm -f "${file}" || die 1 "$(L "rotate-keys 残留删除失败：${file}" "Deleting a rotate-keys leftover failed: ${file}")"
   done
   # 额外设备的本机缓存（设备表、节点文件、临时文件）随链一起退役：出口机已拆，这些凭据不再有效。
   if [[ -e "${CHAIN_STATE_DIR}/devices" || -L "${CHAIN_STATE_DIR}/devices" ]]; then
-    private_dir_is_safe "${CHAIN_STATE_DIR}/devices" || die 1 'devices 目录删除前身份异常'
+    private_dir_is_safe "${CHAIN_STATE_DIR}/devices" || die 1 "$(L 'devices 目录删除前身份异常' 'The devices directory has an unexpected identity before deletion')"
     for file in "${CHAIN_STATE_DIR}/devices"/devices.env "${CHAIN_STATE_DIR}/devices"/node-*.txt "${CHAIN_STATE_DIR}/devices"/.*.tmp; do
       [[ -e "${file}" || -L "${file}" ]] || continue
-      require_secure_user_file "${file}" 600 || die 1 "设备文件删除前身份异常：${file}"
-      rm -f "${file}" || die 1 "设备文件删除失败：${file}"
+      require_secure_user_file "${file}" 600 || die 1 "$(L "设备文件删除前身份异常：${file}" "A device file has an unexpected identity before deletion: ${file}")"
+      rm -f "${file}" || die 1 "$(L "设备文件删除失败：${file}" "Deleting a device file failed: ${file}")"
     done
-    rmdir "${CHAIN_STATE_DIR}/devices" || die 1 'devices 目录删除失败（里面有不认识的文件）'
+    rmdir "${CHAIN_STATE_DIR}/devices" || die 1 "$(L 'devices 目录删除失败（里面有不认识的文件）' 'Deleting the devices directory failed (it contains unrecognised files)')"
   fi
   for file in relay-config-manifest.txt relay-unit-manifest.txt relay-binary-manifest.txt relay-listeners.txt; do
     if [[ -e "${CHAIN_STATE_DIR}/baseline/${file}" || -L "${CHAIN_STATE_DIR}/baseline/${file}" ]]; then
-      require_secure_user_file "${CHAIN_STATE_DIR}/baseline/${file}" 600 || die 1 "baseline 删除前身份异常：${file}"
+      require_secure_user_file "${CHAIN_STATE_DIR}/baseline/${file}" 600 || die 1 "$(L "baseline 删除前身份异常：${file}" "A baseline has an unexpected identity before deletion: ${file}")"
       case "${file}" in
         relay-config-manifest.txt) expected_hash="${RELAY_BASELINE_CONFIG_MANIFEST_SHA256}" ;;
         relay-unit-manifest.txt) expected_hash="${RELAY_BASELINE_UNIT_MANIFEST_SHA256}" ;;
         relay-binary-manifest.txt) expected_hash="${RELAY_BASELINE_BINARY_MANIFEST_SHA256}" ;;
         relay-listeners.txt) expected_hash="${RELAY_BASELINE_LISTEN_SHA256}" ;;
       esac
-      [[ "$(sha256_file "${CHAIN_STATE_DIR}/baseline/${file}")" == "${expected_hash}" ]] || die 1 "baseline 删除前 hash 漂移：${file}"
-      rm -f "${CHAIN_STATE_DIR}/baseline/${file}" || die 1 "baseline 删除失败：${file}"
+      [[ "$(sha256_file "${CHAIN_STATE_DIR}/baseline/${file}")" == "${expected_hash}" ]] || die 1 "$(L "baseline 删除前 hash 漂移：${file}" "A baseline hash drifted before deletion: ${file}")"
+      rm -f "${CHAIN_STATE_DIR}/baseline/${file}" || die 1 "$(L "baseline 删除失败：${file}" "Deleting a baseline failed: ${file}")"
     fi
   done
-  [[ ! -d "${CHAIN_STATE_DIR}/baseline" ]] || rmdir "${CHAIN_STATE_DIR}/baseline" || die 1 'baseline 目录删除失败'
+  [[ ! -d "${CHAIN_STATE_DIR}/baseline" ]] || rmdir "${CHAIN_STATE_DIR}/baseline" || die 1 "$(L 'baseline 目录删除失败' 'Deleting the baseline directory failed')"
   if [[ -e "${STATE_FILE}" || -L "${STATE_FILE}" ]]; then
-    validate_checksum_env "${STATE_FILE}" state || die 1 'state 删除前 checksum 漂移'
-    rm -f "${STATE_FILE}" || die 1 'active state 删除失败'
+    validate_checksum_env "${STATE_FILE}" state || die 1 "$(L 'state 删除前 checksum 漂移' 'The state checksum drifted before deletion')"
+    rm -f "${STATE_FILE}" || die 1 "$(L 'active state 删除失败' 'Deleting the active state failed')"
   fi
   # 黑名单随 deployment 一起退役：远端 drop-in 已在 remove 段删除，本地副本若留下会让下次 verify 误判 drift。
   if [[ -e "${BLACKLIST_FILE}" || -L "${BLACKLIST_FILE}" ]]; then
-    require_secure_user_file "${BLACKLIST_FILE}" 600 || die 1 'blacklist.txt 删除前身份异常'
-    rm -f "${BLACKLIST_FILE}" || die 1 'blacklist.txt 删除失败'
+    require_secure_user_file "${BLACKLIST_FILE}" 600 || die 1 "$(L 'blacklist.txt 删除前身份异常' 'blacklist.txt has an unexpected identity before deletion')"
+    rm -f "${BLACKLIST_FILE}" || die 1 "$(L 'blacklist.txt 删除失败' 'Deleting blacklist.txt failed')"
   fi
 }
 
@@ -5584,63 +5740,63 @@ perform_rollback_steps() {
     EXIT_FILES_REMOVED) rank=4 ;;
     LOCAL_ARTIFACTS_ARCHIVED) rank=5 ;;
     ROLLBACK_COMMITTED) rank=6 ;;
-    *) die 1 "未知 rollback step：${LAST_COMPLETED_STEP}" ;;
+    *) die 1 "$(L "未知 rollback step：${LAST_COMPLETED_STEP}" "Unknown rollback step: ${LAST_COMPLETED_STEP}")" ;;
   esac
   # 每次续做先闭合已完成步骤的不变量；不能因主机重启或手工漂移直接跳到删除/提交。
   if (( rank >= 2 )); then
-    verify_removed_chain_role relay || die 1 'rollback 续做发现中转已删除状态漂移'
+    verify_removed_chain_role relay || die 1 "$(L 'rollback 续做发现中转已删除状态漂移' 'Resuming rollback found the relay'\''s deleted state drifted')"
   elif (( rank >= 1 )); then
-    stop_chain_role relay || die 1 'rollback 续做无法重新确认中转已停止'
+    stop_chain_role relay || die 1 "$(L 'rollback 续做无法重新确认中转已停止' 'Resuming rollback cannot re-confirm that the relay is stopped')"
   fi
   if (( rank >= 4 )); then
-    verify_removed_chain_role exit || die 1 'rollback 续做发现出口机已删除状态漂移'
+    verify_removed_chain_role exit || die 1 "$(L 'rollback 续做发现出口机已删除状态漂移' 'Resuming rollback found the exit'\''s deleted state drifted')"
   elif (( rank >= 3 )); then
-    stop_chain_role exit || die 1 'rollback 续做无法重新确认出口机已停止'
+    stop_chain_role exit || die 1 "$(L 'rollback 续做无法重新确认出口机已停止' 'Resuming rollback cannot re-confirm that the exit is stopped')"
   fi
   if (( rank >= 5 )); then
-    validate_rollback_audit || die 1 'rollback 续做发现审计归档或 COMPLETE 漂移'
+    validate_rollback_audit || die 1 "$(L 'rollback 续做发现审计归档或 COMPLETE 漂移' 'Resuming rollback found the audit archive or COMPLETE drifted')"
   fi
   if (( rank < 1 )); then
-    stop_chain_role relay || die 1 '中转停止失败'
+    stop_chain_role relay || die 1 "$(L '中转停止失败' 'Stopping the relay failed')"
     LAST_COMPLETED_STEP='RELAY_STOPPED'
-    write_journal || die 1 '中转停止后 transaction 推进失败'
+    write_journal || die 1 "$(L '中转停止后 transaction 推进失败' 'Advancing the transaction after stopping the relay failed')"
   fi
   if (( rank < 2 )); then
-    remove_chain_role_files relay || die 1 '中转资源删除失败'
-    verify_removed_chain_role relay || die 1 '中转资源删除后复核失败'
+    remove_chain_role_files relay || die 1 "$(L '中转资源删除失败' 'Deleting relay resources failed')"
+    verify_removed_chain_role relay || die 1 "$(L '中转资源删除后复核失败' 'The re-check after deleting relay resources failed')"
     LAST_COMPLETED_STEP='RELAY_FILES_REMOVED'
-    write_journal || die 1 '中转删除后 transaction 推进失败'
+    write_journal || die 1 "$(L '中转删除后 transaction 推进失败' 'Advancing the transaction after deleting the relay failed')"
   fi
   if (( rank < 3 )); then
-    stop_chain_role exit || die 1 '出口机停止失败'
+    stop_chain_role exit || die 1 "$(L '出口机停止失败' 'Stopping the exit failed')"
     LAST_COMPLETED_STEP='EXIT_STOPPED'
-    write_journal || die 1 '出口机停止后 transaction 推进失败'
+    write_journal || die 1 "$(L '出口机停止后 transaction 推进失败' 'Advancing the transaction after stopping the exit failed')"
   fi
   if (( rank < 4 )); then
-    remove_chain_role_files exit || die 1 '出口机资源删除失败'
-    verify_removed_chain_role exit || die 1 '出口机资源删除后复核失败'
+    remove_chain_role_files exit || die 1 "$(L '出口机资源删除失败' 'Deleting exit resources failed')"
+    verify_removed_chain_role exit || die 1 "$(L '出口机资源删除后复核失败' 'The re-check after deleting exit resources failed')"
     LAST_COMPLETED_STEP='EXIT_FILES_REMOVED'
-    write_journal || die 1 '出口机删除后 transaction 推进失败'
+    write_journal || die 1 "$(L '出口机删除后 transaction 推进失败' 'Advancing the transaction after deleting the exit failed')"
   fi
   if (( rank < 5 )); then
-    audit="$(archive_rollback_artifacts)" || die 1 'rollback audit 未完整提交，保留 active state 与 transaction'
+    audit="$(archive_rollback_artifacts)" || die 1 "$(L 'rollback audit 未完整提交，保留 active state 与 transaction' 'The rollback audit was not fully committed; keeping the active state and transaction')"
     LAST_COMPLETED_STEP='LOCAL_ARTIFACTS_ARCHIVED'
-    write_journal || die 1 'rollback audit 后 transaction 推进失败'
+    write_journal || die 1 "$(L 'rollback audit 后 transaction 推进失败' 'Advancing the transaction after the rollback audit failed')"
     log_info "rollback audit=${audit}"
   fi
   if (( rank < 6 )); then
-    remove_active_local_artifacts || die 1 'rollback 本地产物删除失败'
+    remove_active_local_artifacts || die 1 "$(L 'rollback 本地产物删除失败' 'Deleting local artifacts during rollback failed')"
     LAST_COMPLETED_STEP='ROLLBACK_COMMITTED'
-    write_journal || die 1 'rollback commit transaction 推进失败'
+    write_journal || die 1 "$(L 'rollback commit transaction 推进失败' 'Advancing the rollback commit transaction failed')"
   fi
-  rm -f "${JOURNAL_FILE}" || die 1 'rollback commit 后 transaction 删除失败'
-  sync || die 1 'rollback commit 持久化失败'
+  rm -f "${JOURNAL_FILE}" || die 1 "$(L 'rollback commit 后 transaction 删除失败' 'Deleting the transaction after the rollback commit failed')"
+  sync || die 1 "$(L 'rollback commit 持久化失败' 'Persisting the rollback commit failed')"
 }
 
 rollback_chain() {
   local rc
   if acquire_chain_lock 1; then rc=0; else rc="$?"; fi
-  [[ "${rc}" -eq 0 ]] || die 6 'chain 正被其它操作占用或锁无法安全回收'
+  [[ "${rc}" -eq 0 ]] || die 6 "$(L 'chain 正被其它操作占用或锁无法安全回收' 'The chain is held by another operation, or the lock cannot be reclaimed safely')"
   migrate_gate
   require_local_dependencies
   render_ssh_config
@@ -5655,7 +5811,7 @@ rollback_chain() {
     fi
     if [[ -e "${JOURNAL_FILE}" ]]; then
       load_journal_file "${JOURNAL_FILE}"
-      [[ "${JOURNAL_OPERATION}" == rollback ]] || die 6 '活动 transaction 不是 rollback'
+      [[ "${JOURNAL_OPERATION}" == rollback ]] || die 6 "$(L '活动 transaction 不是 rollback' 'The active transaction is not a rollback')"
       verify_loaded_binding
       perform_rollback_steps
       return 0
@@ -5663,25 +5819,25 @@ rollback_chain() {
   fi
   if [[ ! -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]]; then
     if configured_local_resources_absent && configured_resources_absent; then
-      log_info 'rollback 幂等 no-op：chain 未部署'
+      log_info "$(L 'rollback 幂等 no-op：chain 未部署' 'rollback is an idempotent no-op: the chain is not deployed')"
       return 0
     fi
-    die 6 '无 active state 但存在 orphan 或远端不可核证'
+    die 6 "$(L '无 active state 但存在 orphan 或远端不可核证' 'No active state, but orphans exist or a server cannot be verified')"
   fi
   load_state_file "${STATE_FILE}"
   verify_loaded_binding
   ensure_local_assets_match_state
   remote_platform_preflight
   if probe_remote_resources no; then rc=0; else rc="$?"; fi
-  [[ "${rc}" -ne 33 ]] || die 6 'rollback 预校验发现出口机上有未完成的凭据或设备操作；先重跑中断的那条命令（rotate-keys / add-device / remove-device）收敛再 rollback'
-  [[ "${rc}" -eq 0 ]] || die 6 'rollback 预校验发现远端 drift'
-  verify_local_artifacts || die 6 'rollback 预校验发现本地产物 drift'
-  verify_relay_baseline || die 6 'rollback 预校验发现既有 sing-box 基线变化'
-  watchdog_is_absent || die 6 '存在 active/残留 fail-closed watchdog，拒绝 rollback'
+  [[ "${rc}" -ne 33 ]] || die 6 "$(L 'rollback 预校验发现出口机上有未完成的凭据或设备操作；先重跑中断的那条命令（rotate-keys / add-device / remove-device）收敛再 rollback' 'The rollback pre-check found an unfinished credential or device operation on the exit; rerun the interrupted command (rotate-keys / add-device / remove-device) to converge, then roll back')"
+  [[ "${rc}" -eq 0 ]] || die 6 "$(L 'rollback 预校验发现远端 drift' 'The rollback pre-check found remote drift')"
+  verify_local_artifacts || die 6 "$(L 'rollback 预校验发现本地产物 drift' 'The rollback pre-check found local artifact drift')"
+  verify_relay_baseline || die 6 "$(L 'rollback 预校验发现既有 sing-box 基线变化' 'The rollback pre-check found the existing sing-box baseline changed')"
+  watchdog_is_absent || die 6 "$(L '存在 active/残留 fail-closed watchdog，拒绝 rollback' 'An active / leftover fail-closed watchdog exists; refusing to roll back')"
   init_rollback_journal
   perform_rollback_steps
-  log_info "rollback 完成；chain=${CHAIN_ID} elapsed=$(elapsed_seconds)s"
-  log_info '备份：无（专属路径碰撞即拒绝）；两端共享目录与固定 binary 已保留'
+  log_info "$(L "rollback 完成；chain=${CHAIN_ID} elapsed=$(elapsed_seconds)s" "rollback complete; chain=${CHAIN_ID} elapsed=$(elapsed_seconds)s")"
+  log_info "$(L '备份：无（专属路径碰撞即拒绝）；两端共享目录与固定 binary 已保留' 'Backup: none (any collision on a chain-specific path is refused); shared directories and the pinned binary on both ends were kept')"
 }
 
 write_cleanup_residue_script() {
@@ -5851,20 +6007,20 @@ deploy_commit_is_recoverable() {
 finish_verified_deploy_commit() {
   case "${LAST_COMPLETED_STEP}" in
     FULL_VERIFY_OK|STATE_WRITTEN|COMMITTED) ;;
-    *) die 1 "不可补齐的 deploy commit step：${LAST_COMPLETED_STEP}" ;;
+    *) die 1 "$(L "不可补齐的 deploy commit step：${LAST_COMPLETED_STEP}" "Deploy commit step cannot be completed: ${LAST_COMPLETED_STEP}")" ;;
   esac
   if [[ ! -e "${STATE_FILE}" && "${LAST_COMPLETED_STEP}" == FULL_VERIFY_OK ]]; then
     write_active_state
     LAST_COMPLETED_STEP='STATE_WRITTEN'
     write_journal
   fi
-  [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 1 '补齐 deploy commit 时 active state 缺失'
-  state_matches_loaded_transaction || die 1 '补齐 deploy commit 时 state/transaction 不一致'
+  [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 1 "$(L '补齐 deploy commit 时 active state 缺失' 'The active state is missing while completing the deploy commit')"
+  state_matches_loaded_transaction || die 1 "$(L '补齐 deploy commit 时 state/transaction 不一致' 'State and transaction disagree while completing the deploy commit')"
   remote_platform_preflight
-  verify_remote_resources no || die 1 '补齐 deploy commit 时远端资源复核失败'
-  verify_local_artifacts || die 1 '补齐 deploy commit 时本地产物复核失败'
-  verify_relay_baseline || die 1 '补齐 deploy commit 时既有 sing-box 基线复核失败'
-  deployment_residue_absent || die 1 '补齐 deploy commit 时仍有部署残留'
+  verify_remote_resources no || die 1 "$(L '补齐 deploy commit 时远端资源复核失败' 'The remote resource re-check failed while completing the deploy commit')"
+  verify_local_artifacts || die 1 "$(L '补齐 deploy commit 时本地产物复核失败' 'The local artifact re-check failed while completing the deploy commit')"
+  verify_relay_baseline || die 1 "$(L '补齐 deploy commit 时既有 sing-box 基线复核失败' 'The existing sing-box baseline re-check failed while completing the deploy commit')"
+  deployment_residue_absent || die 1 "$(L '补齐 deploy commit 时仍有部署残留' 'Deployment leftovers remain while completing the deploy commit')"
   if [[ "${LAST_COMPLETED_STEP}" == COMMITTED ]]; then
     archive_deploy_transaction
     return 0
@@ -5876,27 +6032,27 @@ finish_verified_deploy_commit() {
 
 cleanup_incomplete_deploy() {
   if [[ "${RELAY_OWNER_SHA256}" != ABSENT ]]; then
-    stop_chain_role relay || die 1 '恢复未完成 deploy 时中转停止失败'
-    remove_chain_role_files relay || die 1 '恢复未完成 deploy 时中转资源删除失败'
-    verify_removed_chain_role relay || die 1 '恢复未完成 deploy 时中转删除复核失败'
+    stop_chain_role relay || die 1 "$(L '恢复未完成 deploy 时中转停止失败' 'Stopping the relay failed while recovering an unfinished deploy')"
+    remove_chain_role_files relay || die 1 "$(L '恢复未完成 deploy 时中转资源删除失败' 'Deleting relay resources failed while recovering an unfinished deploy')"
+    verify_removed_chain_role relay || die 1 "$(L '恢复未完成 deploy 时中转删除复核失败' 'The relay deletion re-check failed while recovering an unfinished deploy')"
   fi
   if [[ "${EXIT_OWNER_SHA256}" != ABSENT ]]; then
-    stop_chain_role exit || die 1 '恢复未完成 deploy 时出口机停止失败'
-    remove_chain_role_files exit || die 1 '恢复未完成 deploy 时出口机资源删除失败'
-    verify_removed_chain_role exit || die 1 '恢复未完成 deploy 时出口机删除复核失败'
+    stop_chain_role exit || die 1 "$(L '恢复未完成 deploy 时出口机停止失败' 'Stopping the exit failed while recovering an unfinished deploy')"
+    remove_chain_role_files exit || die 1 "$(L '恢复未完成 deploy 时出口机资源删除失败' 'Deleting exit resources failed while recovering an unfinished deploy')"
+    verify_removed_chain_role exit || die 1 "$(L '恢复未完成 deploy 时出口机删除复核失败' 'The exit deletion re-check failed while recovering an unfinished deploy')"
   fi
-  cleanup_remote_residue relay "${RELAY_STAGE_PATH}" "${RELAY_STAGE_OWNER_SHA256}" "${RELAY_STAGE_OWNER_TEMP_PATH}" || die 1 '恢复未完成 deploy 时中转配置 staging 清理失败'
-  cleanup_remote_residue exit "${EXIT_STAGE_PATH}" "${EXIT_STAGE_OWNER_SHA256}" "${EXIT_STAGE_OWNER_TEMP_PATH}" || die 1 '恢复未完成 deploy 时出口机配置 staging 清理失败'
-  cleanup_remote_residue relay "${RELAY_BINARY_STAGE_PATH}" "${RELAY_BINARY_STAGE_OWNER_SHA256}" "${RELAY_BINARY_STAGE_OWNER_TEMP_PATH}" || die 1 '恢复未完成 deploy 时中转 binary staging 清理失败'
-  cleanup_remote_residue exit "${EXIT_BINARY_STAGE_PATH}" "${EXIT_BINARY_STAGE_OWNER_SHA256}" "${EXIT_BINARY_STAGE_OWNER_TEMP_PATH}" || die 1 '恢复未完成 deploy 时出口机 binary staging 清理失败'
-  cleanup_local_stage_if_owned || die 1 '恢复未完成 deploy 时本地 staging 清理失败'
+  cleanup_remote_residue relay "${RELAY_STAGE_PATH}" "${RELAY_STAGE_OWNER_SHA256}" "${RELAY_STAGE_OWNER_TEMP_PATH}" || die 1 "$(L '恢复未完成 deploy 时中转配置 staging 清理失败' 'Cleaning up the relay config staging failed while recovering an unfinished deploy')"
+  cleanup_remote_residue exit "${EXIT_STAGE_PATH}" "${EXIT_STAGE_OWNER_SHA256}" "${EXIT_STAGE_OWNER_TEMP_PATH}" || die 1 "$(L '恢复未完成 deploy 时出口机配置 staging 清理失败' 'Cleaning up the exit config staging failed while recovering an unfinished deploy')"
+  cleanup_remote_residue relay "${RELAY_BINARY_STAGE_PATH}" "${RELAY_BINARY_STAGE_OWNER_SHA256}" "${RELAY_BINARY_STAGE_OWNER_TEMP_PATH}" || die 1 "$(L '恢复未完成 deploy 时中转 binary staging 清理失败' 'Cleaning up the relay binary staging failed while recovering an unfinished deploy')"
+  cleanup_remote_residue exit "${EXIT_BINARY_STAGE_PATH}" "${EXIT_BINARY_STAGE_OWNER_SHA256}" "${EXIT_BINARY_STAGE_OWNER_TEMP_PATH}" || die 1 "$(L '恢复未完成 deploy 时出口机 binary staging 清理失败' 'Cleaning up the exit binary staging failed while recovering an unfinished deploy')"
+  cleanup_local_stage_if_owned || die 1 "$(L '恢复未完成 deploy 时本地 staging 清理失败' 'Cleaning up the local staging failed while recovering an unfinished deploy')"
   if [[ -e "${CHAIN_STATE_DIR}/client" || -L "${CHAIN_STATE_DIR}/client" || -e "${CHAIN_STATE_DIR}/baseline" || -L "${CHAIN_STATE_DIR}/baseline" || -e "${STATE_FILE}" || -L "${STATE_FILE}" ]]; then
-    remove_active_local_artifacts || die 1 '恢复未完成 deploy 时本地产物清理失败'
+    remove_active_local_artifacts || die 1 "$(L '恢复未完成 deploy 时本地产物清理失败' 'Cleaning up local artifacts failed while recovering an unfinished deploy')"
   fi
-  archive_recovered_transaction || die 1 '未完成 deploy transaction 归档失败'
-  rm -f "${JOURNAL_FILE}" || die 1 '未完成 deploy transaction 删除失败'
-  sync || die 1 '未完成 deploy 恢复持久化失败'
-  log_info '未完成 deploy 已逆序恢复；两端共享 binary/目录按设计保留'
+  archive_recovered_transaction || die 1 "$(L '未完成 deploy transaction 归档失败' 'Archiving the unfinished deploy transaction failed')"
+  rm -f "${JOURNAL_FILE}" || die 1 "$(L '未完成 deploy transaction 删除失败' 'Deleting the unfinished deploy transaction failed')"
+  sync || die 1 "$(L '未完成 deploy 恢复持久化失败' 'Persisting the recovery of the unfinished deploy failed')"
+  log_info "$(L '未完成 deploy 已逆序恢复；两端共享 binary/目录按设计保留' 'The unfinished deploy was undone in reverse order; shared binary/directories on both ends are kept by design')"
 }
 
 recover_incomplete_transaction() {
@@ -5908,11 +6064,11 @@ recover_incomplete_transaction() {
     perform_rollback_steps
     return
   fi
-  [[ "${JOURNAL_OPERATION}" == deploy ]] || die 1 "未知 transaction operation：${JOURNAL_OPERATION}"
+  [[ "${JOURNAL_OPERATION}" == deploy ]] || die 1 "$(L "未知 transaction operation：${JOURNAL_OPERATION}" "Unknown transaction operation: ${JOURNAL_OPERATION}")"
   # 只有无副作用的完整一致性判定进入条件上下文；真正的 commit/cleanup 均作为独立命令执行。
   if deploy_commit_is_recoverable; then
     finish_verified_deploy_commit
-    log_info '未完成 deploy 已按全量一致状态补齐 commit'
+    log_info "$(L '未完成 deploy 已按全量一致状态补齐 commit' 'The unfinished deploy commit was completed from a fully consistent state')"
     return 0
   fi
   cleanup_incomplete_deploy
@@ -6009,10 +6165,10 @@ configured_local_resources_absent() {
 verify_command() {
   local rc
   if acquire_chain_lock 1; then rc=0; else rc="$?"; fi
-  [[ "${rc}" -eq 0 ]] || die 5 'verify 无法取得 chain lock'
+  [[ "${rc}" -eq 0 ]] || die 5 "$(L 'verify 无法取得 chain lock' 'verify cannot acquire the chain lock')"
   require_local_dependencies
-  [[ ! -e "${JOURNAL_FILE}" && ! -L "${JOURNAL_FILE}" ]] || die 5 '存在 incomplete transaction，verify 拒绝'
-  [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 'chain 尚未部署'
+  [[ ! -e "${JOURNAL_FILE}" && ! -L "${JOURNAL_FILE}" ]] || die 5 "$(L '存在 incomplete transaction，verify 拒绝' 'An incomplete transaction exists; verify refuses to run')"
+  [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 "$(L 'chain 尚未部署' 'The chain is not deployed yet')"
   render_ssh_config
   load_state_file "${STATE_FILE}"
   verify_loaded_binding
@@ -6022,7 +6178,7 @@ verify_command() {
     verify_fail_closed
     full_verify
   fi
-  log_info "verify 通过；chain=${CHAIN_ID} fail_closed=${WITH_FAIL_CLOSED} elapsed=$(elapsed_seconds)s"
+  log_info "$(L "verify 通过；chain=${CHAIN_ID} fail_closed=${WITH_FAIL_CLOSED} elapsed=$(elapsed_seconds)s" "verify passed; chain=${CHAIN_ID} fail_closed=${WITH_FAIL_CLOSED} elapsed=$(elapsed_seconds)s")"
 }
 
 # ---------- 中转连接治理：conns / kick / ban / unban / banlist ----------
@@ -6083,11 +6239,11 @@ ip_matches_entry() {
 read_blacklist() {
   local line normalized
   [[ -e "${BLACKLIST_FILE}" || -L "${BLACKLIST_FILE}" ]] || return 0
-  require_secure_user_file "${BLACKLIST_FILE}" 600 || die 5 "blacklist.txt 必须是本人 600 regular file：${BLACKLIST_FILE}"
+  require_secure_user_file "${BLACKLIST_FILE}" 600 || die 5 "$(L "blacklist.txt 必须是本人 600 regular file：${BLACKLIST_FILE}" "blacklist.txt must be a mode-600 regular file owned by you: ${BLACKLIST_FILE}")"
   while IFS= read -r line || [[ -n "${line}" ]]; do
     [[ -n "${line}" ]] || continue
-    normalized="$(normalize_ip_entry "${line}")" || die 5 "blacklist.txt 含非法条目：${line}"
-    [[ "${normalized}" == "${line}" ]] || die 5 "blacklist.txt 条目未规范化：${line}"
+    normalized="$(normalize_ip_entry "${line}")" || die 5 "$(L "blacklist.txt 含非法条目：${line}" "blacklist.txt contains an invalid entry: ${line}")"
+    [[ "${normalized}" == "${line}" ]] || die 5 "$(L "blacklist.txt 条目未规范化：${line}" "blacklist.txt entry is not normalised: ${line}")"
     printf '%s\n' "${line}"
   done < "${BLACKLIST_FILE}"
 }
@@ -6111,12 +6267,12 @@ write_blacklist_atomic() {
   local entries temp
   entries="$1"
   if [[ -z "${entries}" ]]; then
-    rm -f "${BLACKLIST_FILE}" || die 5 'blacklist.txt 删除失败'
+    rm -f "${BLACKLIST_FILE}" || die 5 "$(L 'blacklist.txt 删除失败' 'Deleting blacklist.txt failed')"
     return 0
   fi
   temp="${CHAIN_STATE_DIR}/.blacklist.${OPERATION_ID}.tmp"
-  ( umask 077; printf '%s\n' "${entries}" > "${temp}" ) || die 5 'blacklist.txt 临时文件写入失败'
-  mv -f "${temp}" "${BLACKLIST_FILE}" || { rm -f "${temp}"; die 5 'blacklist.txt 原子替换失败'; }
+  ( umask 077; printf '%s\n' "${entries}" > "${temp}" ) || die 5 "$(L 'blacklist.txt 临时文件写入失败' 'Writing the blacklist.txt temporary file failed')"
+  mv -f "${temp}" "${BLACKLIST_FILE}" || { rm -f "${temp}"; die 5 "$(L 'blacklist.txt 原子替换失败' 'Atomic replacement of blacklist.txt failed')"; }
 }
 
 # 治理命令的统一门禁：锁 + 依赖 + 无 incomplete transaction + state 可加载 + host/key 绑定未漂移。
@@ -6127,13 +6283,13 @@ require_deployed_for_control() {
   if acquire_chain_lock "${mutating}"; then rc=0; else rc="$?"; fi
   case "${rc}" in
     0) ;;
-    10) die 5 '同一 chain 有活动锁（busy）；稍后重试' ;;
-    11) die 5 '存在 stale lock；先运行 verify 或其它 mutating 命令归档' ;;
-    *) die 5 '无法安全取得 chain lock' ;;
+    10) die 5 "$(L '同一 chain 有活动锁（busy）；稍后重试' 'The same chain holds an active lock (busy); try again later')" ;;
+    11) die 5 "$(L '存在 stale lock；先运行 verify 或其它 mutating 命令归档' 'A stale lock exists; run verify or another modifying command first to archive it')" ;;
+    *) die 5 "$(L '无法安全取得 chain lock' 'Cannot safely acquire the chain lock')" ;;
   esac
   require_local_dependencies
-  [[ ! -e "${JOURNAL_FILE}" && ! -L "${JOURNAL_FILE}" ]] || die 5 "存在 incomplete transaction，${COMMAND} 拒绝"
-  [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 'chain 尚未部署'
+  [[ ! -e "${JOURNAL_FILE}" && ! -L "${JOURNAL_FILE}" ]] || die 5 "$(L "存在 incomplete transaction，${COMMAND} 拒绝" "An incomplete transaction exists; ${COMMAND} refuses to run")"
+  [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 "$(L 'chain 尚未部署' 'The chain is not deployed yet')"
   render_ssh_config
   load_state_file "${STATE_FILE}"
   verify_loaded_binding
@@ -6170,7 +6326,7 @@ relay_conns() {
   require_deployed_for_control 0
   script="${OP_TMP}/relay-conns.sh"
   write_relay_conns_script "${script}"
-  output="$(ssh_relay_stdin bash -s -- "${RELAY_PORT}" "ownexit-chain-relay-${CHAIN_ID}.service" < "${script}")" || die 5 '中转连接列表采集失败'
+  output="$(ssh_relay_stdin bash -s -- "${RELAY_PORT}" "ownexit-chain-relay-${CHAIN_ID}.service" < "${script}")" || die 5 "$(L '中转连接列表采集失败' 'Collecting the relay connection list failed')"
   entries="$(read_blacklist)"
   fd_used="$(printf '%s\n' "${output}" | awk '$1 == "FD" {print $2}')"
   fd_limit="$(printf '%s\n' "${output}" | awk '$1 == "FD" {print $3}')"
@@ -6222,16 +6378,16 @@ kick_relay_target() {
   target="$1"
   script="${OP_TMP}/relay-kick.sh"
   write_relay_kick_script "${script}"
-  output="$(ssh_relay_stdin bash -s -- "${RELAY_PORT}" "${target}" < "${script}")" || die 5 '中转 ss -K 失败（内核可能不支持 SOCK_DESTROY）'
+  output="$(ssh_relay_stdin bash -s -- "${RELAY_PORT}" "${target}" < "${script}")" || die 5 "$(L '中转 ss -K 失败（内核可能不支持 SOCK_DESTROY）' 'ss -K failed on the relay (the kernel may not support SOCK_DESTROY)')"
   killed="${output#KICKED=}"
-  [[ "${killed}" =~ ^[0-9]+$ ]] || die 5 '中转 kick 返回格式异常'
+  [[ "${killed}" =~ ^[0-9]+$ ]] || die 5 "$(L '中转 kick 返回格式异常' 'Unexpected kick output from the relay')"
   printf '%s\n' "${killed}"
 }
 
 relay_kick() {
   local entry killed
-  entry="$(normalize_ip_entry "${TARGET_IP}")" || die 2 "kick 需要合法 IPv4：${TARGET_IP}"
-  [[ "${entry}" == */32 ]] || die 2 'kick 只接受单个 IPv4，不接受网段'
+  entry="$(normalize_ip_entry "${TARGET_IP}")" || die 2 "$(L "kick 需要合法 IPv4：${TARGET_IP}" "kick needs a valid IPv4: ${TARGET_IP}")"
+  [[ "${entry}" == */32 ]] || die 2 "$(L 'kick 只接受单个 IPv4，不接受网段' 'kick only accepts a single IPv4, not a range')"
   require_deployed_for_control 1
   killed="$(kick_relay_target "${entry%/32}")"
   printf 'kicked ip=%s destroyed=%s\n' "${entry%/32}" "${killed}"
@@ -6317,13 +6473,13 @@ push_relay_blacklist() {
   service_b64="$(render_blacklist_dropin Service "${entries}" | openssl base64 -A)"
   script="${OP_TMP}/relay-blacklist.sh"
   write_relay_blacklist_script "${script}"
-  output="$(ssh_relay_stdin bash -s -- "${CHAIN_ID}" "${RELAY_BLACKLIST_DROPIN}" "${expected}" "${socket_b64}" "${service_b64}" < "${script}")" || die 5 '中转黑名单 drop-in 写入或回读核对失败（目录内有非受管文件、或平台不支持 IPAddressDeny）'
-  [[ "${output}" == BLACKLIST=ok ]] || die 5 '中转黑名单脚本输出异常'
+  output="$(ssh_relay_stdin bash -s -- "${CHAIN_ID}" "${RELAY_BLACKLIST_DROPIN}" "${expected}" "${socket_b64}" "${service_b64}" < "${script}")" || die 5 "$(L '中转黑名单 drop-in 写入或回读核对失败（目录内有非受管文件、或平台不支持 IPAddressDeny）' 'Writing or reading back the relay blocklist drop-in failed (the directory has unmanaged files, or the platform does not support IPAddressDeny)')"
+  [[ "${output}" == BLACKLIST=ok ]] || die 5 "$(L '中转黑名单脚本输出异常' 'Unexpected output from the relay blocklist script')"
 }
 
 relay_ban() {
   local entry current updated count killed existing
-  entry="$(normalize_ip_entry "${TARGET_IP}")" || die 2 "ban 需要合法 IPv4 或 CIDR（主机位须为 0）：${TARGET_IP}"
+  entry="$(normalize_ip_entry "${TARGET_IP}")" || die 2 "$(L "ban 需要合法 IPv4 或 CIDR（主机位须为 0）：${TARGET_IP}" "ban needs a valid IPv4 or CIDR (host bits must be 0): ${TARGET_IP}")"
   require_deployed_for_control 1
   current="$(read_blacklist)"
   # 已被更宽的旧条目覆盖：不改任何东西（否则 systemd 折叠后回读值与本地对不上）。
@@ -6352,10 +6508,10 @@ relay_ban() {
 
 relay_unban() {
   local entry current updated count
-  entry="$(normalize_ip_entry "${TARGET_IP}")" || die 2 "unban 需要合法 IPv4 或 CIDR：${TARGET_IP}"
+  entry="$(normalize_ip_entry "${TARGET_IP}")" || die 2 "$(L "unban 需要合法 IPv4 或 CIDR：${TARGET_IP}" "unban needs a valid IPv4 or CIDR: ${TARGET_IP}")"
   require_deployed_for_control 1
   current="$(read_blacklist)"
-  printf '%s\n' "${current}" | grep -qx -- "${entry}" || die 2 "黑名单中不存在：${entry}"
+  printf '%s\n' "${current}" | grep -qx -- "${entry}" || die 2 "$(L "黑名单中不存在：${entry}" "Not in the blocklist: ${entry}")"
   updated="$(printf '%s\n' "${current}" | grep -vx -- "${entry}" | awk 'NF' || true)"
   push_relay_blacklist "${updated}"
   write_blacklist_atomic "${updated}"
@@ -6368,8 +6524,8 @@ relay_banlist() {
   local expected socket_deny service_deny
   require_deployed_for_control 0
   expected="$(render_expected_deny)"
-  socket_deny="$(ssh_relay systemctl show "ownexit-chain-relay-${CHAIN_ID}.socket" -p IPAddressDeny --value)" || die 5 '中转 socket IPAddressDeny 读取失败'
-  service_deny="$(ssh_relay systemctl show "ownexit-chain-relay-${CHAIN_ID}.service" -p IPAddressDeny --value)" || die 5 '中转 service IPAddressDeny 读取失败'
+  socket_deny="$(ssh_relay systemctl show "ownexit-chain-relay-${CHAIN_ID}.socket" -p IPAddressDeny --value)" || die 5 "$(L '中转 socket IPAddressDeny 读取失败' 'Reading IPAddressDeny of the relay socket failed')"
+  service_deny="$(ssh_relay systemctl show "ownexit-chain-relay-${CHAIN_ID}.service" -p IPAddressDeny --value)" || die 5 "$(L '中转 service IPAddressDeny 读取失败' 'Reading IPAddressDeny of the relay service failed')"
   printf 'local:   %s\n' "${expected:-<empty>}"
   printf 'socket:  %s\n' "${socket_deny:-<empty>}"
   printf 'service: %s\n' "${service_deny:-<empty>}"
@@ -6411,19 +6567,19 @@ load_state_for_rehost() {
     return 0
   fi
   # rc=12 才表示 schema 与 checksum 都已通过、只在配置绑定上不一致；其它 rc 说明 state 本身损坏。
-  [[ "${rc}" -eq 12 ]] || die 5 "state.env 校验失败：${STATE_PROBE_REASON}"
+  [[ "${rc}" -eq 12 ]] || die 5 "$(L "state.env 校验失败：${STATE_PROBE_REASON}" "state.env verification failed: ${STATE_PROBE_REASON}")"
   new_host="${EXIT_HOST}"
   new_exit="${EXPECTED_EXIT_IPV4}"
   new_config="${CONFIG_SHA256}"
-  old_host="$(kv_get "${STATE_FILE}" EXIT_HOST)" || die 5 'state.env 缺少 EXIT_HOST'
-  old_exit="$(kv_get "${STATE_FILE}" EXPECTED_EXIT_IPV4)" || die 5 'state.env 缺少 EXPECTED_EXIT_IPV4'
-  is_ipv4 "${old_host}" && is_ipv4 "${old_exit}" || die 5 'state.env 中的 EXIT_HOST / EXPECTED_EXIT_IPV4 不是 IPv4'
+  old_host="$(kv_get "${STATE_FILE}" EXIT_HOST)" || die 5 "$(L 'state.env 缺少 EXIT_HOST' 'state.env lacks EXIT_HOST')"
+  old_exit="$(kv_get "${STATE_FILE}" EXPECTED_EXIT_IPV4)" || die 5 "$(L 'state.env 缺少 EXPECTED_EXIT_IPV4' 'state.env lacks EXPECTED_EXIT_IPV4')"
+  is_ipv4 "${old_host}" && is_ipv4 "${old_exit}" || die 5 "$(L 'state.env 中的 EXIT_HOST / EXPECTED_EXIT_IPV4 不是 IPv4' 'EXIT_HOST / EXPECTED_EXIT_IPV4 in state.env are not IPv4')"
   EXIT_HOST="${old_host}"
   EXPECTED_EXIT_IPV4="${old_exit}"
   # 与 parse_config 同一算法重算旧配置摘要；只有其余 10 个键都与 state 一致时，它才会等于 state 里的 CONFIG_SHA256。
   CONFIG_SHA256="$(normalized_config | sha256_text)"
   if probe_state_file "${STATE_FILE}"; then rc=0; else rc="$?"; fi
-  [[ "${rc}" -eq 0 ]] || die 2 '除 EXIT_HOST / EXPECTED_EXIT_IPV4 外还有配置键与 state 不一致；同机切换只迁移这两个键'
+  [[ "${rc}" -eq 0 ]] || die 2 "$(L '除 EXIT_HOST / EXPECTED_EXIT_IPV4 外还有配置键与 state 不一致；同机切换只迁移这两个键' 'Configuration keys other than EXIT_HOST / EXPECTED_EXIT_IPV4 differ from the state; a same-machine switch only migrates these two keys')"
   REHOST_OLD_EXIT_HOST="${old_host}"
   REHOST_OLD_EXPECTED_EXIT_IPV4="${old_exit}"
   REHOST_OLD_CONFIG_SHA256="${CONFIG_SHA256}"
@@ -6541,15 +6697,15 @@ REHOST_REMOTE
 # 远端退出码 → 可读原因，让 die 信息直接指向哪一类问题。
 rehost_remote_reason() {
   case "$1" in
-    171) printf '171 owner 文件身份或权限异常（要求 root:root 600）' ;;
-    172) printf '172 owner 中 CONFIG_SHA256=<旧摘要> 不是恰好 1 行' ;;
-    173) printf '173 owner 与 state 记录的哈希不符，且不是已迁移形态（drift）' ;;
-    174) printf '174 relay service 文件身份或权限异常（要求 root:root 644）' ;;
-    175) printf '175 relay service 中以旧目标结尾的 ExecStart 不是恰好 1 行' ;;
-    176) printf '176 relay service 与 state 记录的哈希不符，且不是已迁移形态（drift）' ;;
-    177) printf '177 relay service 重启后未进入 active' ;;
-    255) printf '255 SSH 不可达或会话中断' ;;
-    *) printf '%s 远端脚本异常退出' "$1" ;;
+    171) printf "$(L '171 owner 文件身份或权限异常（要求 root:root 600）' '171 owner file identity or permissions abnormal (root:root 600 required)')" ;;
+    172) printf "$(L '172 owner 中 CONFIG_SHA256=<旧摘要> 不是恰好 1 行' '172 CONFIG_SHA256=<old digest> in the owner is not exactly 1 line')" ;;
+    173) printf "$(L '173 owner 与 state 记录的哈希不符，且不是已迁移形态（drift）' '173 owner does not match the hash recorded in the state and is not in the migrated form (drift)')" ;;
+    174) printf "$(L '174 relay service 文件身份或权限异常（要求 root:root 644）' '174 relay service file identity or permissions abnormal (root:root 644 required)')" ;;
+    175) printf "$(L '175 relay service 中以旧目标结尾的 ExecStart 不是恰好 1 行' '175 the ExecStart ending with the old target in the relay service is not exactly 1 line')" ;;
+    176) printf "$(L '176 relay service 与 state 记录的哈希不符，且不是已迁移形态（drift）' '176 relay service does not match the hash recorded in the state and is not in the migrated form (drift)')" ;;
+    177) printf "$(L '177 relay service 重启后未进入 active' '177 relay service did not become active after the restart')" ;;
+    255) printf "$(L '255 SSH 不可达或会话中断' '255 SSH unreachable or session dropped')" ;;
+    *) printf "$(L '%s 远端脚本异常退出' '%s the remote script exited abnormally')" "$1" ;;
   esac
 }
 
@@ -6563,10 +6719,10 @@ rehost_exit_owner() {
   script="${OP_TMP}/rehost-remote.sh"
   write_rehost_remote_script "${script}"
   if output="$(ssh_exit_stdin bash -s -- exit "${CHAIN_ID}" "${EXIT_OWNER_SHA256}" "${REHOST_OLD_CONFIG_SHA256}" "${CONFIG_SHA256}" < "${script}")"; then rc=0; else rc="$?"; fi
-  [[ "${rc}" -eq 0 ]] || die 1 "出口机 owner 迁移失败：$(rehost_remote_reason "${rc}")"
+  [[ "${rc}" -eq 0 ]] || die 1 "$(L "出口机 owner 迁移失败：$(rehost_remote_reason "${rc}")" "Migrating the exit owner failed: $(rehost_remote_reason "${rc}")")"
   result="$(rehost_output_value "${output}" OWNER)"
   hash="$(rehost_output_value "${output}" OWNER_SHA256)"
-  [[ "${result}" =~ ^(changed|already)$ && "${hash}" =~ ^[0-9a-f]{64}$ ]] || die 1 '出口机 owner 迁移输出格式异常'
+  [[ "${result}" =~ ^(changed|already)$ && "${hash}" =~ ^[0-9a-f]{64}$ ]] || die 1 "$(L '出口机 owner 迁移输出格式异常' 'Unexpected output format from the exit owner migration')"
   EXIT_OWNER_SHA256="${hash}"
   log_info "[rehost] exit-owner=${result}"
 }
@@ -6576,15 +6732,15 @@ rehost_relay() {
   script="${OP_TMP}/rehost-remote.sh"
   write_rehost_remote_script "${script}"
   if output="$(ssh_relay_stdin bash -s -- relay "${CHAIN_ID}" "${RELAY_OWNER_SHA256}" "${REHOST_OLD_CONFIG_SHA256}" "${CONFIG_SHA256}" "${RELAY_SERVICE_SHA256}" "${REHOST_OLD_EXIT_HOST}:${EXIT_REALITY_PORT}" "${EXIT_HOST}:${EXIT_REALITY_PORT}" < "${script}")"; then rc=0; else rc="$?"; fi
-  [[ "${rc}" -eq 0 ]] || die 1 "中转迁移失败：$(rehost_remote_reason "${rc}")"
+  [[ "${rc}" -eq 0 ]] || die 1 "$(L "中转迁移失败：$(rehost_remote_reason "${rc}")" "Migrating the relay failed: $(rehost_remote_reason "${rc}")")"
   owner_result="$(rehost_output_value "${output}" OWNER)"
   owner_hash="$(rehost_output_value "${output}" OWNER_SHA256)"
   service_result="$(rehost_output_value "${output}" SERVICE)"
   service_hash="$(rehost_output_value "${output}" SERVICE_SHA256)"
   restarted="$(rehost_output_value "${output}" RESTARTED)"
-  [[ "${owner_result}" =~ ^(changed|already)$ && "${owner_hash}" =~ ^[0-9a-f]{64}$ ]] || die 1 '中转 owner 迁移输出格式异常'
-  [[ "${service_result}" =~ ^(changed|already|unchanged)$ && "${service_hash}" =~ ^[0-9a-f]{64}$ ]] || die 1 '中转 service 迁移输出格式异常'
-  [[ "${restarted}" =~ ^(yes|no|inactive)$ ]] || die 1 '中转 service 重启结果格式异常'
+  [[ "${owner_result}" =~ ^(changed|already)$ && "${owner_hash}" =~ ^[0-9a-f]{64}$ ]] || die 1 "$(L '中转 owner 迁移输出格式异常' 'Unexpected output format from the relay owner migration')"
+  [[ "${service_result}" =~ ^(changed|already|unchanged)$ && "${service_hash}" =~ ^[0-9a-f]{64}$ ]] || die 1 "$(L '中转 service 迁移输出格式异常' 'Unexpected output format from the relay service migration')"
+  [[ "${restarted}" =~ ^(yes|no|inactive)$ ]] || die 1 "$(L '中转 service 重启结果格式异常' 'Unexpected format of the relay service restart result')"
   RELAY_OWNER_SHA256="${owner_hash}"
   RELAY_SERVICE_SHA256="${service_hash}"
   log_info "[rehost] relay-owner=${owner_result} relay-service=${service_result} restarted=${restarted}"
@@ -6594,21 +6750,21 @@ rehost_relay() {
 # 旧 state 先归档再替换，便于人工回溯迁移前的哈希。
 commit_rehost_state() {
   local audit payload
-  ensure_private_dir "${CHAIN_STATE_DIR}/audit" || die 1 'rehost audit 父目录不安全'
+  ensure_private_dir "${CHAIN_STATE_DIR}/audit" || die 1 "$(L 'rehost audit 父目录不安全' 'The rehost audit parent directory is unsafe')"
   audit="${CHAIN_STATE_DIR}/audit/rehosted.${DEPLOYMENT_ID}.${OPERATION_ID}"
-  [[ ! -e "${audit}" && ! -L "${audit}" ]] || die 1 "rehost audit 目录碰撞：${audit}"
-  mkdir "${audit}" || die 1 'rehost audit 目录创建失败'
-  chmod 700 "${audit}" || die 1 'rehost audit 目录权限设置失败'
+  [[ ! -e "${audit}" && ! -L "${audit}" ]] || die 1 "$(L "rehost audit 目录碰撞：${audit}" "Rehost audit directory collision: ${audit}")"
+  mkdir "${audit}" || die 1 "$(L 'rehost audit 目录创建失败' 'Creating the rehost audit directory failed')"
+  chmod 700 "${audit}" || die 1 "$(L 'rehost audit 目录权限设置失败' 'Setting the rehost audit directory'\''s permissions failed')"
   # 直接写最终文件名：audit 下以 . 开头的 *.tmp 会被残留检查判 drift。
-  cp "${STATE_FILE}" "${audit}/state.env" || die 1 'rehost 旧 state 归档失败'
-  chmod 600 "${audit}/state.env" || die 1 'rehost 旧 state 归档权限设置失败'
-  [[ "$(sha256_file "${audit}/state.env")" == "$(sha256_file "${STATE_FILE}")" ]] || die 1 'rehost 旧 state 归档复核失败'
+  cp "${STATE_FILE}" "${audit}/state.env" || die 1 "$(L 'rehost 旧 state 归档失败' 'Archiving the old state for rehost failed')"
+  chmod 600 "${audit}/state.env" || die 1 "$(L 'rehost 旧 state 归档权限设置失败' 'Setting permissions on the archived old state for rehost failed')"
+  [[ "$(sha256_file "${audit}/state.env")" == "$(sha256_file "${STATE_FILE}")" ]] || die 1 "$(L 'rehost 旧 state 归档复核失败' 'Re-checking the archived old state for rehost failed')"
   payload="${OP_TMP}/state-payload"
   # 此时全局变量里 EXIT_HOST / EXPECTED_EXIT_IPV4 / CONFIG_SHA256 是新值，三个远端哈希来自迁移输出，
   # 其余字段（含 CREATED_AT）原样沿用 state，所以凭据与端口不会变化。
-  render_state_payload "${payload}" || die 1 'rehost state payload 生成失败'
+  render_state_payload "${payload}" || die 1 "$(L 'rehost state payload 生成失败' 'Generating the rehost state payload failed')"
   write_checksummed_file "${STATE_FILE}" replace "${payload}"
-  if probe_state_file "${STATE_FILE}"; then :; else die 1 "rehost 后 state 与新 config 绑定失败：${STATE_PROBE_REASON}"; fi
+  if probe_state_file "${STATE_FILE}"; then :; else die 1 "$(L "rehost 后 state 与新 config 绑定失败：${STATE_PROBE_REASON}" "Binding the state to the new config after rehost failed: ${STATE_PROBE_REASON}")"; fi
   log_info "[rehost] state committed audit=${audit}"
 }
 
@@ -6617,9 +6773,9 @@ rehost_exit_chain() {
   if acquire_chain_lock 1; then rc=0; else rc="$?"; fi
   case "${rc}" in
     0) ;;
-    10) die 5 '同一 chain 有活动锁（busy）；稍后重试' ;;
-    11) die 5 '存在 stale lock；先运行 verify 或其它 mutating 命令归档' ;;
-    *) die 5 '无法安全取得 chain lock' ;;
+    10) die 5 "$(L '同一 chain 有活动锁（busy）；稍后重试' 'The same chain holds an active lock (busy); try again later')" ;;
+    11) die 5 "$(L '存在 stale lock；先运行 verify 或其它 mutating 命令归档' 'A stale lock exists; run verify or another modifying command first to archive it')" ;;
+    *) die 5 "$(L '无法安全取得 chain lock' 'Cannot safely acquire the chain lock')" ;;
   esac
   migrate_gate
   rehost_exit_body
@@ -6631,12 +6787,12 @@ rehost_exit_chain() {
 rehost_exit_body() {
   local rc
   require_local_dependencies
-  [[ ! -e "${JOURNAL_FILE}" && ! -L "${JOURNAL_FILE}" ]] || die 5 '存在 incomplete transaction，拒绝同机切换'
-  [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 'chain 尚未部署'
+  [[ ! -e "${JOURNAL_FILE}" && ! -L "${JOURNAL_FILE}" ]] || die 5 "$(L '存在 incomplete transaction，拒绝同机切换' 'An incomplete transaction exists; refusing the same-machine switch')"
+  [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 "$(L 'chain 尚未部署' 'The chain is not deployed yet')"
   load_state_for_rehost
   if [[ "${REHOST_IS_NOOP}" == 1 ]]; then
     printf 'rehost=noop chain=%s next=run-verify\n' "${CHAIN_ID}"
-    log_info "[rehost] noop chain=${CHAIN_ID}：state 已绑定当前 config"
+    log_info "$(L "[rehost] noop chain=${CHAIN_ID}：state 已绑定当前 config" "[rehost] noop chain=${CHAIN_ID}: the state is already bound to the current config")"
     return 0
   fi
   # SSH 配置里的出口机地址此时已是新 IP；旧 IP 不需要可达。
@@ -6644,14 +6800,14 @@ rehost_exit_body() {
   if probe_loaded_binding; then rc=0; else rc="$?"; fi
   case "${rc}" in
     0) ;;
-    11) die 5 '中转 SSH key 指纹漂移' ;;
-    12) die 5 '出口机 SSH key 指纹漂移' ;;
-    21) die 3 '中转实际协商 host-key 探针不可达' ;;
-    22) die 3 "经中转访问新 EXIT_HOST=${EXIT_HOST} 失败；确认 ~/.ssh/known_hosts 已有该 IP 的 ed25519 条目，且中转到新 IP 的 SSH 可达" ;;
-    31) die 3 '中转实际协商 host-key 指纹漂移' ;;
+    11) die 5 "$(L '中转 SSH key 指纹漂移' 'Relay SSH key fingerprint drifted')" ;;
+    12) die 5 "$(L '出口机 SSH key 指纹漂移' 'Exit SSH key fingerprint drifted')" ;;
+    21) die 3 "$(L '中转实际协商 host-key 探针不可达' 'Probe of the relay'\''s actually negotiated host key unreachable')" ;;
+    22) die 3 "$(L "经中转访问新 EXIT_HOST=${EXIT_HOST} 失败；确认 ~/.ssh/known_hosts 已有该 IP 的 ed25519 条目，且中转到新 IP 的 SSH 可达" "Reaching the new EXIT_HOST=${EXIT_HOST} through the relay failed; make sure ~/.ssh/known_hosts has an ed25519 entry for that IP and that the relay can reach the new IP over SSH")" ;;
+    31) die 3 "$(L '中转实际协商 host-key 指纹漂移' 'The relay'\''s actually negotiated host key fingerprint drifted')" ;;
     # 同机判据：指纹不同就是换了机器，凭据和 exit 服务都不在新机器上，原地迁移没有意义。
-    32) die 3 "新 EXIT_HOST=${EXIT_HOST} 的主机指纹与 state 不一致：不是同一台出口机，应走 rollback + deploy" ;;
-    *) die 5 '主机/密钥绑定核验异常' ;;
+    32) die 3 "$(L "新 EXIT_HOST=${EXIT_HOST} 的主机指纹与 state 不一致：不是同一台出口机，应走 rollback + deploy" "The host fingerprint of the new EXIT_HOST=${EXIT_HOST} does not match the state: it is not the same exit; use rollback + deploy")" ;;
+    *) die 5 "$(L '主机/密钥绑定核验异常' 'Host/key binding verification failed unexpectedly')" ;;
   esac
   log_info "[rehost] start chain=${CHAIN_ID} old_host=${REHOST_OLD_EXIT_HOST} new_host=${EXIT_HOST} old_exit=${REHOST_OLD_EXPECTED_EXIT_IPV4} new_exit=${EXPECTED_EXIT_IPV4}"
   # 顺序与 deploy 一致：先出口机后中转，本地 state 最后。
@@ -6660,7 +6816,7 @@ rehost_exit_body() {
   commit_rehost_state
   ensure_local_assets_match_state
   full_verify
-  log_info "同机切换通过；chain=${CHAIN_ID} elapsed=$(elapsed_seconds)s"
+  log_info "$(L "同机切换通过；chain=${CHAIN_ID} elapsed=$(elapsed_seconds)s" "Same-machine switch passed; chain=${CHAIN_ID} elapsed=$(elapsed_seconds)s")"
 }
 
 # ---------- migrate-exit 遇同一台出口机：自动原地切换（docs/feature/feature-grammar-v15.md §5.1.3） ----------
@@ -6675,7 +6831,7 @@ MIGRATE_PROBE_EXIT_IP=''
 # 同机切换只改地址：SSH 端口必须不变（rehost 只迁移 EXIT_HOST / EXPECTED_EXIT_IPV4 两个键，端口变了 state 对不上）。
 migrate_same_host_port_check() {
   [[ "${MIGRATE_TO_PORT_GIVEN}" != 1 || "${MIGRATE_TO_PORT}" == "${EXIT_SSH_PORT}" ]] \
-    || die 2 "新地址 ${MIGRATE_TO} 是同一台出口机，SSH 端口要保持 ${EXIT_SSH_PORT}（同机切换只改地址）"
+    || die 2 "$(L "新地址 ${MIGRATE_TO} 是同一台出口机，SSH 端口要保持 ${EXIT_SSH_PORT}（同机切换只改地址）" "The new address ${MIGRATE_TO} is the same exit; the SSH port must stay ${EXIT_SSH_PORT} (a same-machine switch only changes the address)")"
 }
 
 # 经中转用当前出口机私钥连 --to，在同一条会话里取协商到的主机指纹、主机公钥与公网 IP。
@@ -6693,7 +6849,7 @@ migrate_probe_same_host() {
   log="${OP_TMP}/ssh-probe-same-host.${LOCK_OPERATION_ID}.log"
   out="${OP_TMP}/ssh-probe-same-host.${LOCK_OPERATION_ID}.out"
   pub_file="${OP_TMP}/ssh-probe-same-host.${LOCK_OPERATION_ID}.pub"
-  rm -f "${conf}" "${log}" "${out}" "${pub_file}" || die 1 '同机探测临时文件清理失败'
+  rm -f "${conf}" "${log}" "${out}" "${pub_file}" || die 1 "$(L '同机探测临时文件清理失败' 'Cleaning up the same-machine probe temporary files failed')"
   # ssh 配置按“先匹配到的值生效”：chain-probe 段必须写在 Host * 之前，否则 Host * 的严格校验会盖掉这里的宽松项；
   # 后面原样接上受管配置里的 chain-relay 段与 Host * 加固段，中转那一跳仍按 known_hosts 严格校验。
   {
@@ -6708,8 +6864,8 @@ migrate_probe_same_host() {
     printf '    GlobalKnownHostsFile /dev/null\n'
     printf '    UpdateHostKeys no\n\n'
     sed -n '/^Host chain-relay/,$p' "${SSH_CONFIG}"
-  } > "${conf}" || die 1 '同机探测 ssh 配置写入失败'
-  chmod 600 "${conf}" || die 1 '同机探测 ssh 配置权限设置失败'
+  } > "${conf}" || die 1 "$(L '同机探测 ssh 配置写入失败' 'Writing the same-machine probe ssh configuration failed')"
+  chmod 600 "${conf}" || die 1 "$(L '同机探测 ssh 配置权限设置失败' 'Setting permissions on the same-machine probe ssh configuration failed')"
   # 不看退出码：远端 curl 失败也要拿到指纹与公钥；连不上时日志里没有 Server host key 行，下面按“连不上”处理。
   ssh -vv -E "${log}" -n -F "${conf}" chain-probe \
     'cat /etc/ssh/ssh_host_ed25519_key.pub; echo ---ownexit---; curl -4 -fsS -m 15 ipinfo.io/ip || true' > "${out}" 2>/dev/null || true
@@ -6723,14 +6879,14 @@ migrate_probe_same_host() {
     rm -f "${conf}" "${log}" "${out}" || true
     return 1
   fi
-  awk '$0 == "---ownexit---" {exit} $1 == "ssh-ed25519" && $2 ~ /^[A-Za-z0-9+\/]+=*$/ {print $1, $2; exit}' "${out}" > "${pub_file}" || die 1 '同机探测公钥解析失败'
-  [[ -s "${pub_file}" ]] || die 3 "新地址 ${MIGRATE_TO} 指纹相同，但读不到 /etc/ssh/ssh_host_ed25519_key.pub"
+  awk '$0 == "---ownexit---" {exit} $1 == "ssh-ed25519" && $2 ~ /^[A-Za-z0-9+\/]+=*$/ {print $1, $2; exit}' "${out}" > "${pub_file}" || die 1 "$(L '同机探测公钥解析失败' 'Parsing the public key from the same-machine probe failed')"
+  [[ -s "${pub_file}" ]] || die 3 "$(L "新地址 ${MIGRATE_TO} 指纹相同，但读不到 /etc/ssh/ssh_host_ed25519_key.pub" "The new address ${MIGRATE_TO} has the same fingerprint, but /etc/ssh/ssh_host_ed25519_key.pub cannot be read")"
   pub_fp="$(ssh-keygen -lf "${pub_file}" -E sha256 2>/dev/null | awk '{print $2; exit}')" || pub_fp=''
-  [[ "${pub_fp}" == "${EXIT_HOSTKEY_FINGERPRINT}" ]] || die 3 "新地址 ${MIGRATE_TO} 返回的主机公钥摘要与协商指纹不符，拒绝登记"
+  [[ "${pub_fp}" == "${EXIT_HOSTKEY_FINGERPRINT}" ]] || die 3 "$(L "新地址 ${MIGRATE_TO} 返回的主机公钥摘要与协商指纹不符，拒绝登记" "The host public key digest returned by the new address ${MIGRATE_TO} does not match the negotiated fingerprint; refusing to register it")"
   MIGRATE_PROBE_PUB="$(cat "${pub_file}")"
   MIGRATE_PROBE_EXIT_IP="$(awk 'f {print} $0 == "---ownexit---" {f=1}' "${out}" | tr -d '[:space:]')"
   rm -f "${conf}" "${log}" "${out}" "${pub_file}" || true
-  log_info "[migrate] 新地址 ${MIGRATE_TO} 与当前出口机是同一台（指纹 ${EXIT_HOSTKEY_FINGERPRINT}）"
+  log_info "$(L "[migrate] 新地址 ${MIGRATE_TO} 与当前出口机是同一台（指纹 ${EXIT_HOSTKEY_FINGERPRINT}）" "[migrate] The new address ${MIGRATE_TO} is the same machine as the current exit (fingerprint ${EXIT_HOSTKEY_FINGERPRINT})")"
   return 0
 }
 
@@ -6746,18 +6902,18 @@ migrate_register_hostkey() {
   while read -r _ type key; do
     [[ "${type}" == ssh-ed25519 ]] || continue
     has_ed25519=1
-    printf '%s %s\n' "${type}" "${key}" > "${line_file}" || die 1 'known_hosts 比对临时文件写入失败'
+    printf '%s %s\n' "${type}" "${key}" > "${line_file}" || die 1 "$(L 'known_hosts 比对临时文件写入失败' 'Writing the known_hosts comparison temporary file failed')"
     fp="$(ssh-keygen -lf "${line_file}" -E sha256 2>/dev/null | awk '{print $2; exit}')" || fp=''
     rm -f "${line_file}" || true
     if [[ "${fp}" == "${EXIT_HOSTKEY_FINGERPRINT}" ]]; then
-      log_info "[migrate] known_hosts 已有 ${entry} 的 ed25519 主机密钥，不重复登记"
+      log_info "$(L "[migrate] known_hosts 已有 ${entry} 的 ed25519 主机密钥，不重复登记" "[migrate] known_hosts already has the ed25519 host key for ${entry}; not registering it again")"
       return 0
     fi
   done < <(ssh-keygen -F "${entry}" -f "${HOME}/.ssh/known_hosts" 2>/dev/null | awk '$1 !~ /^#/' || true)
-  [[ "${has_ed25519}" == 0 ]] || die 3 "known_hosts 里 ${entry} 的 ed25519 主机密钥与该出口机不符，请人工核对"
-  [[ "${MIGRATE_PROBE_PUB}" == ssh-ed25519\ * ]] || die 1 '内部错误：没有可登记的主机公钥'
-  printf '%s %s\n' "${entry}" "${MIGRATE_PROBE_PUB}" >> "${HOME}/.ssh/known_hosts" || die 1 'known_hosts 写入失败'
-  log_info "[migrate] 已登记 ${entry} 的 ed25519 主机密钥"
+  [[ "${has_ed25519}" == 0 ]] || die 3 "$(L "known_hosts 里 ${entry} 的 ed25519 主机密钥与该出口机不符，请人工核对" "The ed25519 host key for ${entry} in known_hosts does not match this exit; check it by hand")"
+  [[ "${MIGRATE_PROBE_PUB}" == ssh-ed25519\ * ]] || die 1 "$(L '内部错误：没有可登记的主机公钥' 'Internal error: no host public key to register')"
+  printf '%s %s\n' "${entry}" "${MIGRATE_PROBE_PUB}" >> "${HOME}/.ssh/known_hosts" || die 1 "$(L 'known_hosts 写入失败' 'Writing known_hosts failed')"
+  log_info "$(L "[migrate] 已登记 ${entry} 的 ed25519 主机密钥" "[migrate] Registered the ed25519 host key for ${entry}")"
 }
 
 # rc=0 时的同机路径：确认出口 IP、登记主机密钥、备份并改写配置，再原地切换。调用方已持有全局锁与链锁。
@@ -6765,32 +6921,32 @@ migrate_register_hostkey() {
 # migrate-exit --to 走续跑分支（配置已改、state 未改）。
 migrate_rehost_same_host() {
   local answer backup tmp key count
-  log_info "[migrate] 新地址 ${MIGRATE_TO} 与当前出口机是同一台，原地切换（不换凭据，客户端不用动）"
+  log_info "$(L "[migrate] 新地址 ${MIGRATE_TO} 与当前出口机是同一台，原地切换（不换凭据，客户端不用动）" "[migrate] The new address ${MIGRATE_TO} is the same machine as the current exit; switching in place (no credential change, clients need nothing)")"
   migrate_same_host_port_check
-  is_ipv4 "${MIGRATE_PROBE_EXIT_IP}" || die 3 "无法在出口机上取得新的公网 IPv4（需要 curl 能访问 ipinfo.io）；读到：${MIGRATE_PROBE_EXIT_IP:-空}；配置未改动"
-  log_info "[migrate] 出口机经新地址测到的公网 IP：${MIGRATE_PROBE_EXIT_IP}"
+  is_ipv4 "${MIGRATE_PROBE_EXIT_IP}" || die 3 "$(L "无法在出口机上取得新的公网 IPv4（需要 curl 能访问 ipinfo.io）；读到：${MIGRATE_PROBE_EXIT_IP:-空}；配置未改动" "Cannot get the new public IPv4 on the exit (curl must reach ipinfo.io); read: ${MIGRATE_PROBE_EXIT_IP:-empty}; the configuration was not changed")"
+  log_info "$(L "[migrate] 出口机经新地址测到的公网 IP：${MIGRATE_PROBE_EXIT_IP}" "[migrate] Public IP measured on the exit through the new address: ${MIGRATE_PROBE_EXIT_IP}")"
   if [[ -t 0 ]]; then
-    read -r -p "确认切换后客户端经这条链出去的 IP 应当是 ${MIGRATE_PROBE_EXIT_IP}？[y/N] " answer
-    [[ "${answer}" == y || "${answer}" == Y ]] || die 2 '未确认出口 IP，配置与 state 未改动'
+    read -r -p "$(L "确认切换后客户端经这条链出去的 IP 应当是 ${MIGRATE_PROBE_EXIT_IP}？[y/N] " "After the switch, should clients leave through this chain with IP ${MIGRATE_PROBE_EXIT_IP}? [y/N] ")" answer
+    [[ "${answer}" == y || "${answer}" == Y ]] || die 2 "$(L '未确认出口 IP，配置与 state 未改动' 'Exit IP not confirmed; configuration and state unchanged')"
   fi
   migrate_register_hostkey
   for key in EXIT_HOST EXPECTED_EXIT_IPV4; do
     count="$(awk -v k="${key}=" 'index($0, k) == 1 {n++} END {print n + 0}' "${CONFIG_PATH}")"
-    [[ "${count}" == 1 ]] || die 2 "配置文件中 ${key}= 不是恰好 1 行：${CONFIG_PATH}"
+    [[ "${count}" == 1 ]] || die 2 "$(L "配置文件中 ${key}= 不是恰好 1 行：${CONFIG_PATH}" "${key}= is not exactly 1 line in the configuration file: ${CONFIG_PATH}")"
   done
   backup="${CONFIG_PATH}.bak.$(date '+%Y%m%d_%H%M%S')"
-  [[ ! -e "${backup}" && ! -L "${backup}" ]] || die 1 "配置备份路径碰撞：${backup}"
-  ( set -o noclobber; cat "${CONFIG_PATH}" > "${backup}" ) || die 1 '配置备份失败'
-  chmod 600 "${backup}" || die 1 '配置备份权限设置失败'
+  [[ ! -e "${backup}" && ! -L "${backup}" ]] || die 1 "$(L "配置备份路径碰撞：${backup}" "Configuration backup path collision: ${backup}")"
+  ( set -o noclobber; cat "${CONFIG_PATH}" > "${backup}" ) || die 1 "$(L '配置备份失败' 'Backing up the configuration failed')"
+  chmod 600 "${backup}" || die 1 "$(L '配置备份权限设置失败' 'Setting the configuration backup'\''s permissions failed')"
   # 临时文件 + mv 原子替换：中途被打断时配置要么是旧版、要么是新版，不会是半份。
   tmp="$(dirname "${CONFIG_PATH}")/.$(basename "${CONFIG_PATH}").rehost.$$.tmp"
   awk -v h="EXIT_HOST=${MIGRATE_TO}" -v e="EXPECTED_EXIT_IPV4=${MIGRATE_PROBE_EXIT_IP}" '{
     if (index($0, "EXIT_HOST=") == 1) print h
     else if (index($0, "EXPECTED_EXIT_IPV4=") == 1) print e
     else print
-  }' "${CONFIG_PATH}" > "${tmp}" || die 1 '配置改写失败'
-  chmod 600 "${tmp}" || die 1 '配置临时文件权限设置失败'
-  mv -f "${tmp}" "${CONFIG_PATH}" || die 1 '配置原子替换失败'
+  }' "${CONFIG_PATH}" > "${tmp}" || die 1 "$(L '配置改写失败' 'Rewriting the configuration failed')"
+  chmod 600 "${tmp}" || die 1 "$(L '配置临时文件权限设置失败' 'Setting the configuration temporary file'\''s permissions failed')"
+  mv -f "${tmp}" "${CONFIG_PATH}" || die 1 "$(L '配置原子替换失败' 'Atomic replacement of the configuration failed')"
   EXIT_HOST="${MIGRATE_TO}"
   EXPECTED_EXIT_IPV4="${MIGRATE_PROBE_EXIT_IP}"
   CONFIG_SHA256="$(normalized_config | sha256_text)"
@@ -6819,7 +6975,7 @@ REBASELINE_OWNER_CHANGED=0
 # 测试钩子：在指定阶段后以退出码 99 结束，用于中断恢复用例；正常使用不要设置。
 rebaseline_test_stop() {
   if [[ "${OWNEXIT_TEST_CHAIN_STOP_AFTER:-}" == "$1" ]]; then
-    log_warn "测试钩子：rebaseline 在 $1 之后停止"
+    log_warn "$(L "测试钩子：rebaseline 在 $1 之后停止" "Test hook: rebaseline stops after $1")"
     exit 99
   fi
 }
@@ -6840,15 +6996,15 @@ load_state_for_rebaseline() {
   if [[ "${rc}" -eq 0 ]]; then
     REBASELINE_BINDING=current
   else
-    [[ "${rc}" -eq 12 ]] || die 5 "state.env 校验失败：${STATE_PROBE_REASON}"
+    [[ "${rc}" -eq 12 ]] || die 5 "$(L "state.env 校验失败：${STATE_PROBE_REASON}" "state.env verification failed: ${STATE_PROBE_REASON}")"
     # 配置里只有 RELAY_COHOSTS_SINGBOX 与 state 不同（上次 rebaseline 改了配置未提交，或用户手工改了这一键）才放行。
     config_cohost="${RELAY_COHOSTS_SINGBOX}"
-    RELAY_COHOSTS_SINGBOX="$(kv_get "${STATE_FILE}" RELAY_COHOSTS_SINGBOX)" || die 5 'state.env 缺少 RELAY_COHOSTS_SINGBOX'
+    RELAY_COHOSTS_SINGBOX="$(kv_get "${STATE_FILE}" RELAY_COHOSTS_SINGBOX)" || die 5 "$(L 'state.env 缺少 RELAY_COHOSTS_SINGBOX' 'state.env lacks RELAY_COHOSTS_SINGBOX')"
     CONFIG_SHA256="$(normalized_config | sha256_text)"
     if probe_state_file "${STATE_FILE}"; then rc=0; else rc="$?"; fi
-    [[ "${rc}" -eq 0 ]] || die 2 '除 RELAY_COHOSTS_SINGBOX 外还有配置键与 state 不一致；rebaseline 只处理这一个键'
+    [[ "${rc}" -eq 0 ]] || die 2 "$(L '除 RELAY_COHOSTS_SINGBOX 外还有配置键与 state 不一致；rebaseline 只处理这一个键' 'Configuration keys other than RELAY_COHOSTS_SINGBOX differ from the state; rebaseline only handles this one key')"
     REBASELINE_BINDING='config-ahead'
-    log_info "[rebaseline] 配置里的 RELAY_COHOSTS_SINGBOX=${config_cohost} 与 state 不同（config-ahead）"
+    log_info "$(L "[rebaseline] 配置里的 RELAY_COHOSTS_SINGBOX=${config_cohost} 与 state 不同（config-ahead）" "[rebaseline] RELAY_COHOSTS_SINGBOX=${config_cohost} in the configuration differs from the state (config-ahead)")"
   fi
   REBASELINE_STATE_COHOST="$(kv_get "${STATE_FILE}" RELAY_COHOSTS_SINGBOX)"
   REBASELINE_STATE_CONFIG_SHA256="$(kv_get "${STATE_FILE}" CONFIG_SHA256)"
@@ -6902,11 +7058,11 @@ REBASELINE_OWNER
 
 rebaseline_owner_reason() {
   case "$1" in
-    180) printf '180 owner 文件身份或权限异常（要求 root:root 600）' ;;
-    181) printf '181 owner 规范形态与 state 不符（外部改动）' ;;
-    182) printf '182 owner 中的配置摘要不是 state 值或三种合法取值的摘要之一' ;;
-    255) printf '255 SSH 不可达或会话中断' ;;
-    *) printf '%s 远端脚本异常退出' "$1" ;;
+    180) printf "$(L '180 owner 文件身份或权限异常（要求 root:root 600）' '180 owner file identity or permissions abnormal (root:root 600 required)')" ;;
+    181) printf "$(L '181 owner 规范形态与 state 不符（外部改动）' '181 the owner'\''s canonical form does not match the state (changed externally)')" ;;
+    182) printf "$(L '182 owner 中的配置摘要不是 state 值或三种合法取值的摘要之一' '182 the configuration digest in the owner is neither the state value nor the digest of one of the three allowed values')" ;;
+    255) printf "$(L '255 SSH 不可达或会话中断' '255 SSH unreachable or session dropped')" ;;
+    *) printf "$(L '%s 远端脚本异常退出' '%s the remote script exited abnormally')" "$1" ;;
   esac
 }
 
@@ -6925,10 +7081,10 @@ rebaseline_owner() {
   else
     if output="$(ssh_relay_stdin bash -s -- "${CHAIN_ID}" "${state_hash}" "${REBASELINE_STATE_CONFIG_SHA256}" "${REBASELINE_NEW_CONFIG_SHA256}" "${legal_yes}" "${legal_no}" "${legal_direct}" < "${script}")"; then rc=0; else rc="$?"; fi
   fi
-  [[ "${rc}" -eq 0 ]] || die 1 "${role} owner 迁移失败：$(rebaseline_owner_reason "${rc}")"
+  [[ "${rc}" -eq 0 ]] || die 1 "$(L "${role} owner 迁移失败：$(rebaseline_owner_reason "${rc}")" "${role} owner migration failed: $(rebaseline_owner_reason "${rc}")")"
   REBASELINE_OWNER_RESULT="$(printf '%s\n' "${output}" | awk -F= '$1 == "OWNER" {print $2}')"
   REBASELINE_OWNER_HASH="$(printf '%s\n' "${output}" | awk -F= '$1 == "OWNER_SHA256" {print $2}')"
-  [[ "${REBASELINE_OWNER_RESULT}" =~ ^(changed|already)$ && "${REBASELINE_OWNER_HASH}" =~ ^[0-9a-f]{64}$ ]] || die 1 "${role} owner 迁移输出格式异常"
+  [[ "${REBASELINE_OWNER_RESULT}" =~ ^(changed|already)$ && "${REBASELINE_OWNER_HASH}" =~ ^[0-9a-f]{64}$ ]] || die 1 "$(L "${role} owner 迁移输出格式异常" "Unexpected output format from the ${role} owner migration")"
   [[ "${REBASELINE_OWNER_RESULT}" == already ]] || REBASELINE_OWNER_CHANGED=1
   log_info "[rebaseline] ${role}-owner=${REBASELINE_OWNER_RESULT}"
 }
@@ -6940,14 +7096,14 @@ rewrite_config_cohost() {
   current="$(awk -F= '$1 == "RELAY_COHOSTS_SINGBOX" {print $2}' "${CONFIG_PATH}")"
   [[ "${current}" != "${REBASELINE_LIVE_COHOST}" ]] || return 0
   count="$(awk 'index($0, "RELAY_COHOSTS_SINGBOX=") == 1 {n++} END {print n + 0}' "${CONFIG_PATH}")"
-  [[ "${count}" == 1 ]] || die 2 "配置文件中 RELAY_COHOSTS_SINGBOX= 不是恰好 1 行：${CONFIG_PATH}"
-  cp "${CONFIG_PATH}" "${audit}/config.env" || die 1 'rebaseline 旧配置归档失败'
+  [[ "${count}" == 1 ]] || die 2 "$(L "配置文件中 RELAY_COHOSTS_SINGBOX= 不是恰好 1 行：${CONFIG_PATH}" "RELAY_COHOSTS_SINGBOX= is not exactly 1 line in the configuration file: ${CONFIG_PATH}")"
+  cp "${CONFIG_PATH}" "${audit}/config.env" || die 1 "$(L 'rebaseline 旧配置归档失败' 'Archiving the old configuration for rebaseline failed')"
   chmod 600 "${audit}/config.env"
   tmp="$(dirname "${CONFIG_PATH}")/.$(basename "${CONFIG_PATH}").rebaseline.$$.tmp"
-  awk -v to="RELAY_COHOSTS_SINGBOX=${REBASELINE_LIVE_COHOST}" '{ if (index($0, "RELAY_COHOSTS_SINGBOX=") == 1) print to; else print }' "${CONFIG_PATH}" > "${tmp}" || die 1 'rebaseline 配置改写失败'
+  awk -v to="RELAY_COHOSTS_SINGBOX=${REBASELINE_LIVE_COHOST}" '{ if (index($0, "RELAY_COHOSTS_SINGBOX=") == 1) print to; else print }' "${CONFIG_PATH}" > "${tmp}" || die 1 "$(L 'rebaseline 配置改写失败' 'Rewriting the configuration for rebaseline failed')"
   chmod 600 "${tmp}"
-  mv -f "${tmp}" "${CONFIG_PATH}" || die 1 'rebaseline 配置原子替换失败'
-  log_info "[rebaseline] 配置 RELAY_COHOSTS_SINGBOX ${current} -> ${REBASELINE_LIVE_COHOST}"
+  mv -f "${tmp}" "${CONFIG_PATH}" || die 1 "$(L 'rebaseline 配置原子替换失败' 'Atomic replacement of the configuration for rebaseline failed')"
+  log_info "$(L "[rebaseline] 配置 RELAY_COHOSTS_SINGBOX ${current} -> ${REBASELINE_LIVE_COHOST}" "[rebaseline] configuration RELAY_COHOSTS_SINGBOX ${current} -> ${REBASELINE_LIVE_COHOST}")"
 }
 
 # 旧 state 与旧基线归档，新基线替换 baseline/ 下 4 个文件，再按新值写 state。
@@ -6955,10 +7111,10 @@ publish_rebaseline() {
   local audit fresh file payload
   audit="$1"
   fresh="$2"
-  cp "${STATE_FILE}" "${audit}/state.env" || die 1 'rebaseline 旧 state 归档失败'
+  cp "${STATE_FILE}" "${audit}/state.env" || die 1 "$(L 'rebaseline 旧 state 归档失败' 'Archiving the old state for rebaseline failed')"
   chmod 600 "${audit}/state.env"
-  ensure_private_dir "${audit}/baseline" || die 1 'rebaseline baseline 审计目录不安全'
-  ensure_private_dir "${CHAIN_STATE_DIR}/baseline" || die 1 'baseline 目录不安全'
+  ensure_private_dir "${audit}/baseline" || die 1 "$(L 'rebaseline baseline 审计目录不安全' 'The rebaseline baseline audit directory is unsafe')"
+  ensure_private_dir "${CHAIN_STATE_DIR}/baseline" || die 1 "$(L 'baseline 目录不安全' 'The baseline directory is unsafe')"
   for file in relay-config-manifest.txt relay-unit-manifest.txt relay-binary-manifest.txt relay-listeners.txt; do
     if [[ -f "${CHAIN_STATE_DIR}/baseline/${file}" ]]; then
       cp "${CHAIN_STATE_DIR}/baseline/${file}" "${audit}/baseline/${file}"
@@ -6970,9 +7126,9 @@ publish_rebaseline() {
   done
   rebaseline_test_stop baseline
   payload="${OP_TMP}/state-payload"
-  render_state_payload "${payload}" || die 1 'rebaseline state payload 生成失败'
+  render_state_payload "${payload}" || die 1 "$(L 'rebaseline state payload 生成失败' 'Generating the rebaseline state payload failed')"
   write_checksummed_file "${STATE_FILE}" replace "${payload}"
-  if probe_state_file "${STATE_FILE}"; then :; else die 1 "rebaseline 后 state 与配置绑定失败：${STATE_PROBE_REASON}"; fi
+  if probe_state_file "${STATE_FILE}"; then :; else die 1 "$(L "rebaseline 后 state 与配置绑定失败：${STATE_PROBE_REASON}" "Binding the state to the configuration after rebaseline failed: ${STATE_PROBE_REASON}")"; fi
   log_info "[rebaseline] state committed audit=${audit}"
 }
 
@@ -6981,30 +7137,30 @@ rebaseline_chain() {
   if acquire_chain_lock 1; then rc=0; else rc="$?"; fi
   case "${rc}" in
     0) ;;
-    10) die 5 '同一 chain 有活动锁（busy）；稍后重试' ;;
-    11) die 5 '存在 stale lock；先运行 verify 或其它 mutating 命令归档' ;;
-    *) die 5 '无法安全取得 chain lock' ;;
+    10) die 5 "$(L '同一 chain 有活动锁（busy）；稍后重试' 'The same chain holds an active lock (busy); try again later')" ;;
+    11) die 5 "$(L '存在 stale lock；先运行 verify 或其它 mutating 命令归档' 'A stale lock exists; run verify or another modifying command first to archive it')" ;;
+    *) die 5 "$(L '无法安全取得 chain lock' 'Cannot safely acquire the chain lock')" ;;
   esac
   migrate_gate
   require_local_dependencies
-  [[ ! -e "${JOURNAL_FILE}" && ! -L "${JOURNAL_FILE}" ]] || die 5 '存在 incomplete transaction，rebaseline 拒绝'
-  [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 'chain 尚未部署'
+  [[ ! -e "${JOURNAL_FILE}" && ! -L "${JOURNAL_FILE}" ]] || die 5 "$(L '存在 incomplete transaction，rebaseline 拒绝' 'An incomplete transaction exists; rebaseline refuses to run')"
+  [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 "$(L 'chain 尚未部署' 'The chain is not deployed yet')"
   config_cohost="${RELAY_COHOSTS_SINGBOX}"
   load_state_for_rebaseline
   render_ssh_config
   if probe_loaded_binding; then rc=0; else rc="$?"; fi
   case "${rc}" in
     0) ;;
-    11) die 5 '中转 SSH key 指纹漂移' ;;
-    12) die 5 '出口机 SSH key 指纹漂移' ;;
-    21) die 3 '中转实际协商 host-key 探针不可达' ;;
-    22) die 3 '经中转访问出口机失败' ;;
-    31) die 3 '中转实际协商 host-key 指纹漂移' ;;
-    32) die 3 '出口机实际协商 host-key 指纹漂移' ;;
-    *) die 5 '主机/密钥绑定核验异常' ;;
+    11) die 5 "$(L '中转 SSH key 指纹漂移' 'Relay SSH key fingerprint drifted')" ;;
+    12) die 5 "$(L '出口机 SSH key 指纹漂移' 'Exit SSH key fingerprint drifted')" ;;
+    21) die 3 "$(L '中转实际协商 host-key 探针不可达' 'Probe of the relay'\''s actually negotiated host key unreachable')" ;;
+    22) die 3 "$(L '经中转访问出口机失败' 'Reaching the exit through the relay failed')" ;;
+    31) die 3 "$(L '中转实际协商 host-key 指纹漂移' 'The relay'\''s actually negotiated host key fingerprint drifted')" ;;
+    32) die 3 "$(L '出口机实际协商 host-key 指纹漂移' 'The exit'\''s actually negotiated host key fingerprint drifted')" ;;
+    *) die 5 "$(L '主机/密钥绑定核验异常' 'Host/key binding verification failed unexpectedly')" ;;
   esac
   REBASELINE_LIVE_COHOST="$(relay_cohost_kind_via "${RELAY_SSH_KEY}" "${RELAY_SSH_PORT}" "${RELAY_HOST}")" \
-    || die 3 "中转机上的 sing-box 状态不完整（${REBASELINE_LIVE_COHOST}）；先让既有服务完整运行或彻底移除再重跑"
+    || die 3 "$(L "中转机上的 sing-box 状态不完整（${REBASELINE_LIVE_COHOST}）；先让既有服务完整运行或彻底移除再重跑" "The sing-box state on the relay is incomplete (${REBASELINE_LIVE_COHOST}); get the existing service fully running or remove it completely, then rerun")"
   log_info "[rebaseline] kind state=${REBASELINE_STATE_COHOST} config=${config_cohost} live=${REBASELINE_LIVE_COHOST}"
 
   # 第 5 步：按现场取值采集基线、算新配置摘要（采集脚本按全局 RELAY_COHOSTS_SINGBOX 分支）。
@@ -7040,11 +7196,11 @@ rebaseline_chain() {
   fi
 
   # 第 6b 步：审计目录（第 7 步复用）与配置改写。
-  ensure_private_dir "${CHAIN_STATE_DIR}/audit" || die 1 'rebaseline audit 父目录不安全'
+  ensure_private_dir "${CHAIN_STATE_DIR}/audit" || die 1 "$(L 'rebaseline audit 父目录不安全' 'The rebaseline audit parent directory is unsafe')"
   audit="${CHAIN_STATE_DIR}/audit/rebaselined.${DEPLOYMENT_ID}.${OPERATION_ID}"
-  [[ ! -e "${audit}" && ! -L "${audit}" ]] || die 1 "rebaseline audit 目录碰撞：${audit}"
-  mkdir "${audit}" || die 1 'rebaseline audit 目录创建失败'
-  chmod 700 "${audit}" || die 1 'rebaseline audit 目录权限设置失败'
+  [[ ! -e "${audit}" && ! -L "${audit}" ]] || die 1 "$(L "rebaseline audit 目录碰撞：${audit}" "Rebaseline audit directory collision: ${audit}")"
+  mkdir "${audit}" || die 1 "$(L 'rebaseline audit 目录创建失败' 'Creating the rebaseline audit directory failed')"
+  chmod 700 "${audit}" || die 1 "$(L 'rebaseline audit 目录权限设置失败' 'Setting the rebaseline audit directory'\''s permissions failed')"
   rewrite_config_cohost "${audit}"
   rebaseline_test_stop config
 
@@ -7063,7 +7219,7 @@ rebaseline_chain() {
   # 第 8 步。
   ensure_local_assets_match_state
   full_verify
-  log_info "rebaseline 通过；chain=${CHAIN_ID} kind=${REBASELINE_LIVE_COHOST} elapsed=$(elapsed_seconds)s"
+  log_info "$(L "rebaseline 通过；chain=${CHAIN_ID} kind=${REBASELINE_LIVE_COHOST} elapsed=$(elapsed_seconds)s" "rebaseline passed; chain=${CHAIN_ID} kind=${REBASELINE_LIVE_COHOST} elapsed=$(elapsed_seconds)s")"
 }
 
 # ---------- 出口机凭据与设备操作：rotate-keys / add-device / remove-device ----------
@@ -7087,7 +7243,7 @@ DEVICE_NAME=''
 # 对 rotate-keys / add-device / remove-device 都生效。
 rotate_test_stop() {
   if [[ "${OWNEXIT_TEST_ROTATE_STOP_AFTER:-}" == "$1" ]]; then
-    log_warn "测试钩子：${COMMAND} 在 $1 之后停止"
+    log_warn "$(L "测试钩子：${COMMAND} 在 $1 之后停止" "Test hook: ${COMMAND} stops after $1")"
     exit 99
   fi
 }
@@ -7368,22 +7524,22 @@ ROTATE_REMOTE
 # 远端退出码 → 可读原因。
 rotate_remote_reason() {
   case "$1" in
-    191) printf '191 出口机配置文件身份或权限异常（要求 root:root 600、非软链）' ;;
-    192) printf '192 出口机配置的 users / 私钥 / short id 行不是 deploy 生成的形态' ;;
-    193) printf '193 出口机配置与 state 记录的哈希不符，且不是本命令生成的新配置（外部改动）' ;;
-    194) printf '194 新凭据生成失败或新配置 sing-box check 未通过（线上未改动）' ;;
-    195) printf '195 新配置启动失败，已恢复旧配置（线上仍是操作前的状态）' ;;
-    196) printf '196 新配置启动失败，恢复旧配置后仍未起来（需人工检查出口机）' ;;
-    197) printf '197 清理时线上配置不是新配置，拒绝删除辅助文件' ;;
-    198) printf '198 出口机固定 sing-box 二进制缺失' ;;
-    199) printf '199 出口机上有另一个未完成的操作' ;;
-    200) printf '200 操作参数不合法' ;;
-    201) printf '201 设备已存在' ;;
-    202) printf '202 设备数已达上限 32（含 default）' ;;
-    203) printf '203 没有这台设备' ;;
-    204) printf '204 default 不能吊销' ;;
-    255) printf '255 SSH 不可达或会话中断' ;;
-    *) printf '%s 远端脚本异常退出' "$1" ;;
+    191) printf "$(L '191 出口机配置文件身份或权限异常（要求 root:root 600、非软链）' '191 exit configuration file identity or permissions abnormal (root:root 600, not a symlink, required)')" ;;
+    192) printf "$(L '192 出口机配置的 users / 私钥 / short id 行不是 deploy 生成的形态' '192 the users / private key / short id lines of the exit configuration are not in the form deploy generated')" ;;
+    193) printf "$(L '193 出口机配置与 state 记录的哈希不符，且不是本命令生成的新配置（外部改动）' '193 the exit configuration does not match the hash recorded in the state and is not the new configuration from this command (changed externally)')" ;;
+    194) printf "$(L '194 新凭据生成失败或新配置 sing-box check 未通过（线上未改动）' '194 generating new credentials failed or sing-box check of the new configuration did not pass (nothing changed live)')" ;;
+    195) printf "$(L '195 新配置启动失败，已恢复旧配置（线上仍是操作前的状态）' '195 the new configuration failed to start; the old configuration was restored (live state is as before the operation)')" ;;
+    196) printf "$(L '196 新配置启动失败，恢复旧配置后仍未起来（需人工检查出口机）' '196 the new configuration failed to start and it still did not come up after restoring the old one (check the exit by hand)')" ;;
+    197) printf "$(L '197 清理时线上配置不是新配置，拒绝删除辅助文件' '197 the live configuration is not the new one during cleanup; refusing to delete the helper files')" ;;
+    198) printf "$(L '198 出口机固定 sing-box 二进制缺失' '198 the exit'\''s pinned sing-box binary is missing')" ;;
+    199) printf "$(L '199 出口机上有另一个未完成的操作' '199 another unfinished operation exists on the exit')" ;;
+    200) printf "$(L '200 操作参数不合法' '200 invalid operation parameters')" ;;
+    201) printf "$(L '201 设备已存在' '201 the device already exists')" ;;
+    202) printf "$(L '202 设备数已达上限 32（含 default）' '202 the device limit of 32 (including default) is reached')" ;;
+    203) printf "$(L '203 没有这台设备' '203 no such device')" ;;
+    204) printf "$(L '204 default 不能吊销' '204 default cannot be revoked')" ;;
+    255) printf "$(L '255 SSH 不可达或会话中断' '255 SSH unreachable or session dropped')" ;;
+    *) printf "$(L '%s 远端脚本异常退出' '%s the remote script exited abnormally')" "$1" ;;
   esac
 }
 
@@ -7410,33 +7566,33 @@ exit_op_apply() {
   break_port="${OWNEXIT_TEST_ROTATE_BREAK_PORT:--}"
   if output="$(ssh_exit_stdin bash -s -- apply "${CHAIN_ID}" "${op}" "${EXIT_REALITY_PORT}" "${EXIT_EXIT_SHA256}" "${REMOTE_BIN}" "${test_stop}" "${break_port}" < "${script}")"; then rc=0; else rc="$?"; fi
   if [[ "${rc}" -eq 99 && "${test_stop}" != - ]]; then
-    log_warn "测试钩子：${COMMAND} 在远端 ${test_stop} 之后停止"
+    log_warn "$(L "测试钩子：${COMMAND} 在远端 ${test_stop} 之后停止" "Test hook: ${COMMAND} stops after remote ${test_stop}")"
     exit 99
   fi
   case "${rc}" in
     0) ;;
-    255) die 3 "出口机操作失败：$(rotate_remote_reason 255)" ;;
+    255) die 3 "$(L "出口机操作失败：$(rotate_remote_reason 255)" "The operation on the exit failed: $(rotate_remote_reason 255)")" ;;
     199)
       pending="$(rehost_output_value "${output}" PENDING_MODE)"
-      die 1 "出口机上有未完成的操作（$(exit_op_command_of "${pending}")）；先重跑 setup_chain.sh --id ${CHAIN_ID} $(exit_op_command_of "${pending}") 收敛，本次请求未执行"
+      die 1 "$(L "出口机上有未完成的操作（$(exit_op_command_of "${pending}")）；先重跑 setup_chain.sh --id ${CHAIN_ID} $(exit_op_command_of "${pending}") 收敛，本次请求未执行" "The exit has an unfinished operation ($(exit_op_command_of "${pending}")); rerun setup_chain.sh --id ${CHAIN_ID} $(exit_op_command_of "${pending}") first to converge; this request was not carried out")"
       ;;
-    201|202|203|204) die 2 "出口机操作被拒绝：$(rotate_remote_reason "${rc}")；出口机未改动" ;;
-    *) die 1 "出口机操作失败：$(rotate_remote_reason "${rc}")" ;;
+    201|202|203|204) die 2 "$(L "出口机操作被拒绝：$(rotate_remote_reason "${rc}")；出口机未改动" "The operation on the exit was refused: $(rotate_remote_reason "${rc}"); the exit was not changed")" ;;
+    *) die 1 "$(L "出口机操作失败：$(rotate_remote_reason "${rc}")" "The operation on the exit failed: $(rotate_remote_reason "${rc}")")" ;;
   esac
   EXIT_OP_RESULT="$(rehost_output_value "${output}" RESULT)"
   EXIT_OP_DEVICES="$(printf '%s\n' "${output}" | awk -F= '$1 ~ /^DEVICE_/ { sub(/^DEVICE_/, ""); print }')"
   ROTATE_NEW_EXIT_SHA256="$(rehost_output_value "${output}" EXIT_EXIT_SHA256)"
-  [[ "${EXIT_OP_RESULT}" =~ ^(fresh|resumed|already|resumed-after-commit)$ ]] || die 1 '出口机操作输出格式异常（RESULT）'
-  [[ "${ROTATE_NEW_EXIT_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die 1 '出口机操作输出格式异常（EXIT_EXIT_SHA256）'
+  [[ "${EXIT_OP_RESULT}" =~ ^(fresh|resumed|already|resumed-after-commit)$ ]] || die 1 "$(L '出口机操作输出格式异常（RESULT）' 'Unexpected output format from the exit operation (RESULT)')"
+  [[ "${ROTATE_NEW_EXIT_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die 1 "$(L '出口机操作输出格式异常（EXIT_EXIT_SHA256）' 'Unexpected output format from the exit operation (EXIT_EXIT_SHA256)')"
   printf '%s\n' "${EXIT_OP_DEVICES}" | awk -F= '
     $1 !~ /^[a-z0-9][a-z0-9-]*$/ || length($1) > 32 || $2 !~ /^[0-9a-f-]+$/ || length($2) != 36 {bad=1}
     $1 == "default" {d++}
-    END {exit (bad || d != 1) ? 1 : 0}' || die 1 '出口机返回的设备表不完整'
+    END {exit (bad || d != 1) ? 1 : 0}' || die 1 "$(L '出口机返回的设备表不完整' 'The device list returned by the exit is incomplete')"
   VLESS_UUID="$(printf '%s\n' "${EXIT_OP_DEVICES}" | awk -F= '$1 == "default" {print $2; exit}')"
   pbk="$(rehost_output_value "${output}" REALITY_PUBLIC_KEY)"
   sid="$(rehost_output_value "${output}" REALITY_SHORT_ID)"
   if [[ "${op}" == rotate ]]; then
-    [[ "${pbk}" =~ ^[A-Za-z0-9_-]+$ && "${sid}" =~ ^[0-9a-f]{16}$ ]] || die 1 '出口机未返回新的公钥与 short id'
+    [[ "${pbk}" =~ ^[A-Za-z0-9_-]+$ && "${sid}" =~ ^[0-9a-f]{16}$ ]] || die 1 "$(L '出口机未返回新的公钥与 short id' 'The exit did not return the new public key and short id')"
     REALITY_PUBLIC_KEY="${pbk}"
     REALITY_SHORT_ID="${sid}"
   fi
@@ -7464,27 +7620,27 @@ publish_exit_op_artifacts() {
   tmp="${CHAIN_STATE_DIR}/.node.txt.rotate.${OPERATION_ID}.tmp"
   render_node_artifact "${tmp}"
   NODE_SHA256="$(sha256_file "${tmp}")"
-  mv -f "${tmp}" "${CHAIN_STATE_DIR}/client/node.txt" || die 1 'node.txt 替换失败'
-  require_secure_user_file "${CHAIN_STATE_DIR}/client/node.txt" 600 || die 1 'node.txt 替换后身份异常'
-  [[ "$(sha256_file "${CHAIN_STATE_DIR}/client/node.txt")" == "${NODE_SHA256}" ]] || die 1 'node.txt 替换后 hash 不符'
+  mv -f "${tmp}" "${CHAIN_STATE_DIR}/client/node.txt" || die 1 "$(L 'node.txt 替换失败' 'Replacing node.txt failed')"
+  require_secure_user_file "${CHAIN_STATE_DIR}/client/node.txt" 600 || die 1 "$(L 'node.txt 替换后身份异常' 'node.txt has an unexpected identity after replacement')"
+  [[ "$(sha256_file "${CHAIN_STATE_DIR}/client/node.txt")" == "${NODE_SHA256}" ]] || die 1 "$(L 'node.txt 替换后 hash 不符' 'node.txt hash mismatch after replacement')"
   devices_dir="${CHAIN_STATE_DIR}/devices"
   keep="$(printf '%s\n' "${EXIT_OP_DEVICES}" | awk -F= 'NF && $1 != "default"')"
   if [[ -n "${keep}" ]]; then
     if [[ ! -d "${devices_dir}" ]]; then
-      mkdir "${devices_dir}" || die 1 'devices 目录创建失败'
-      chmod 700 "${devices_dir}" || die 1 'devices 目录权限设置失败'
+      mkdir "${devices_dir}" || die 1 "$(L 'devices 目录创建失败' 'Creating the devices directory failed')"
+      chmod 700 "${devices_dir}" || die 1 "$(L 'devices 目录权限设置失败' 'Setting the devices directory'\''s permissions failed')"
     fi
-    private_dir_is_safe "${devices_dir}" || die 1 'devices 目录身份异常'
+    private_dir_is_safe "${devices_dir}" || die 1 "$(L 'devices 目录身份异常' 'The devices directory has an unexpected identity')"
     while IFS='=' read -r name uuid; do
       [[ -n "${name}" ]] || continue
       tmp="${devices_dir}/.node-${name}.txt.${OPERATION_ID}.tmp"
       render_device_node "${tmp}" "${name}" "${uuid}"
-      mv -f "${tmp}" "${devices_dir}/node-${name}.txt" || die 1 "设备 ${name} 节点文件替换失败"
+      mv -f "${tmp}" "${devices_dir}/node-${name}.txt" || die 1 "$(L "设备 ${name} 节点文件替换失败" "Replacing the node file of device ${name} failed")"
     done <<< "${keep}"
     tmp="${devices_dir}/.devices.env.${OPERATION_ID}.tmp"
     printf '%s\n' "${keep}" > "${tmp}"
     chmod 600 "${tmp}"
-    mv -f "${tmp}" "${devices_dir}/devices.env" || die 1 'devices.env 替换失败'
+    mv -f "${tmp}" "${devices_dir}/devices.env" || die 1 "$(L 'devices.env 替换失败' 'Replacing devices.env failed')"
   fi
   if [[ -d "${devices_dir}" ]]; then
     # 不在新表里的设备（吊销的）：删掉它的节点文件。
@@ -7493,13 +7649,13 @@ publish_exit_op_artifacts() {
       name="$(basename "${file}" .txt)"
       name="${name#node-}"
       printf '%s\n' "${keep}" | awk -F= -v n="${name}" '$1 == n {f=1} END {exit f ? 0 : 1}' && continue
-      require_secure_user_file "${file}" 600 || die 1 "设备节点文件身份异常：${file}"
-      rm -f "${file}" || die 1 "设备节点文件删除失败：${file}"
+      require_secure_user_file "${file}" 600 || die 1 "$(L "设备节点文件身份异常：${file}" "A device node file has an unexpected identity: ${file}")"
+      rm -f "${file}" || die 1 "$(L "设备节点文件删除失败：${file}" "Deleting a device node file failed: ${file}")"
     done
     if [[ -z "${keep}" ]]; then
       if [[ -e "${devices_dir}/devices.env" ]]; then
-        require_secure_user_file "${devices_dir}/devices.env" 600 || die 1 'devices.env 身份异常'
-        rm -f "${devices_dir}/devices.env" || die 1 'devices.env 删除失败'
+        require_secure_user_file "${devices_dir}/devices.env" 600 || die 1 "$(L 'devices.env 身份异常' 'devices.env has an unexpected identity')"
+        rm -f "${devices_dir}/devices.env" || die 1 "$(L 'devices.env 删除失败' 'Deleting devices.env failed')"
       fi
       rmdir "${devices_dir}" 2>/dev/null || true
     fi
@@ -7512,20 +7668,20 @@ publish_exit_op_artifacts() {
 commit_exit_op_state() {
   local prefix audit payload
   prefix="$1"
-  ensure_private_dir "${CHAIN_STATE_DIR}/audit" || die 1 'audit 父目录不安全'
+  ensure_private_dir "${CHAIN_STATE_DIR}/audit" || die 1 "$(L 'audit 父目录不安全' 'The audit parent directory is unsafe')"
   audit="${CHAIN_STATE_DIR}/audit/${prefix}.${DEPLOYMENT_ID}.${OPERATION_ID}"
-  [[ ! -e "${audit}" && ! -L "${audit}" ]] || die 1 "audit 目录碰撞：${audit}"
-  mkdir "${audit}" || die 1 'audit 目录创建失败'
-  chmod 700 "${audit}" || die 1 'audit 目录权限设置失败'
+  [[ ! -e "${audit}" && ! -L "${audit}" ]] || die 1 "$(L "audit 目录碰撞：${audit}" "Audit directory collision: ${audit}")"
+  mkdir "${audit}" || die 1 "$(L 'audit 目录创建失败' 'Creating the audit directory failed')"
+  chmod 700 "${audit}" || die 1 "$(L 'audit 目录权限设置失败' 'Setting the audit directory'\''s permissions failed')"
   # 直接写最终文件名：audit 下以 . 开头的 *.tmp 会被残留检查判 drift。
-  cp "${STATE_FILE}" "${audit}/state.env" || die 1 '旧 state 归档失败'
-  chmod 600 "${audit}/state.env" || die 1 '旧 state 归档权限设置失败'
-  [[ "$(sha256_file "${audit}/state.env")" == "$(sha256_file "${STATE_FILE}")" ]] || die 1 '旧 state 归档复核失败'
+  cp "${STATE_FILE}" "${audit}/state.env" || die 1 "$(L '旧 state 归档失败' 'Archiving the old state failed')"
+  chmod 600 "${audit}/state.env" || die 1 "$(L '旧 state 归档权限设置失败' 'Setting permissions on the archived old state failed')"
+  [[ "$(sha256_file "${audit}/state.env")" == "$(sha256_file "${STATE_FILE}")" ]] || die 1 "$(L '旧 state 归档复核失败' 'Re-checking the archived old state failed')"
   EXIT_EXIT_SHA256="${ROTATE_NEW_EXIT_SHA256}"
   payload="${OP_TMP}/state-payload"
-  render_state_payload "${payload}" || die 1 'state payload 生成失败'
+  render_state_payload "${payload}" || die 1 "$(L 'state payload 生成失败' 'Generating the state payload failed')"
   write_checksummed_file "${STATE_FILE}" replace "${payload}"
-  if probe_state_file "${STATE_FILE}"; then :; else die 1 "提交后 state 校验失败：${STATE_PROBE_REASON}"; fi
+  if probe_state_file "${STATE_FILE}"; then :; else die 1 "$(L "提交后 state 校验失败：${STATE_PROBE_REASON}" "State verification after the commit failed: ${STATE_PROBE_REASON}")"; fi
   log_info "[exit-op] state committed audit=${audit}"
 }
 
@@ -7534,8 +7690,8 @@ rotate_cleanup_remote() {
   script="${OP_TMP}/rotate-remote.sh"
   write_rotate_remote_script "${script}"
   if ssh_exit_stdin bash -s -- cleanup "${CHAIN_ID}" "${EXIT_EXIT_SHA256}" < "${script}" >/dev/null; then rc=0; else rc="$?"; fi
-  [[ "${rc}" -ne 255 ]] || die 3 "出口机辅助文件清理失败：$(rotate_remote_reason 255)；重跑 ${COMMAND} 收敛"
-  [[ "${rc}" -eq 0 ]] || die 1 "出口机辅助文件清理失败：$(rotate_remote_reason "${rc}")"
+  [[ "${rc}" -ne 255 ]] || die 3 "$(L "出口机辅助文件清理失败：$(rotate_remote_reason 255)；重跑 ${COMMAND} 收敛" "Cleaning up the exit helper files failed: $(rotate_remote_reason 255); rerun ${COMMAND} to converge")"
+  [[ "${rc}" -eq 0 ]] || die 1 "$(L "出口机辅助文件清理失败：$(rotate_remote_reason "${rc}")" "Cleaning up the exit helper files failed: $(rotate_remote_reason "${rc}")")"
   log_info '[exit-op] remote cleanup done'
 }
 
@@ -7545,34 +7701,34 @@ exit_op_prepare() {
   if acquire_chain_lock 1; then rc=0; else rc="$?"; fi
   case "${rc}" in
     0) ;;
-    10) die 5 '同一 chain 有活动锁（busy）；稍后重试' ;;
-    11) die 5 '存在 stale lock；先运行 verify 或其它 mutating 命令归档' ;;
-    *) die 5 '无法安全取得 chain lock' ;;
+    10) die 5 "$(L '同一 chain 有活动锁（busy）；稍后重试' 'The same chain holds an active lock (busy); try again later')" ;;
+    11) die 5 "$(L '存在 stale lock；先运行 verify 或其它 mutating 命令归档' 'A stale lock exists; run verify or another modifying command first to archive it')" ;;
+    *) die 5 "$(L '无法安全取得 chain lock' 'Cannot safely acquire the chain lock')" ;;
   esac
   # 迁移闸门放在 state 核对之前：迁移中配置与 state 必然不一致，否则会先报“配置与 state 不一致”而看不到迁移提示。
   # list-devices 只读，不拦。
   [[ "${COMMAND}" == list-devices ]] || migrate_gate
   require_local_dependencies
-  [[ ! -e "${JOURNAL_FILE}" && ! -L "${JOURNAL_FILE}" ]] || die 5 "存在 incomplete transaction，${COMMAND} 拒绝"
-  [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 'chain 尚未部署'
+  [[ ! -e "${JOURNAL_FILE}" && ! -L "${JOURNAL_FILE}" ]] || die 5 "$(L "存在 incomplete transaction，${COMMAND} 拒绝" "An incomplete transaction exists; ${COMMAND} refuses to run")"
+  [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 "$(L 'chain 尚未部署' 'The chain is not deployed yet')"
   if probe_state_file "${STATE_FILE}"; then rc=0; else rc="$?"; fi
   case "${rc}" in
     0) ;;
     # rc=12：schema 与 checksum 通过、只是配置与 state 绑定不一致；这些命令不迁移任何配置键。
-    12) die 2 "配置与 state 不一致；${COMMAND} 要求配置未改动（换出口 IP 用 migrate-exit，中转现状变化用 rebaseline）" ;;
-    *) die 5 "state.env 校验失败：${STATE_PROBE_REASON}" ;;
+    12) die 2 "$(L "配置与 state 不一致；${COMMAND} 要求配置未改动（换出口 IP 用 migrate-exit，中转现状变化用 rebaseline）" "Configuration and state disagree; ${COMMAND} requires an unchanged configuration (use migrate-exit for a new exit IP, rebaseline for changes on the relay)")" ;;
+    *) die 5 "$(L "state.env 校验失败：${STATE_PROBE_REASON}" "state.env verification failed: ${STATE_PROBE_REASON}")" ;;
   esac
   render_ssh_config
   if probe_loaded_binding; then rc=0; else rc="$?"; fi
   case "${rc}" in
     0) ;;
-    11) die 5 '中转 SSH key 指纹漂移' ;;
-    12) die 5 '出口机 SSH key 指纹漂移' ;;
-    21) die 3 '中转实际协商 host-key 探针不可达' ;;
-    22) die 3 '经中转访问出口机失败' ;;
-    31) die 3 '中转实际协商 host-key 指纹漂移' ;;
-    32) die 3 '出口机实际协商 host-key 指纹漂移' ;;
-    *) die 5 '主机/密钥绑定核验异常' ;;
+    11) die 5 "$(L '中转 SSH key 指纹漂移' 'Relay SSH key fingerprint drifted')" ;;
+    12) die 5 "$(L '出口机 SSH key 指纹漂移' 'Exit SSH key fingerprint drifted')" ;;
+    21) die 3 "$(L '中转实际协商 host-key 探针不可达' 'Probe of the relay'\''s actually negotiated host key unreachable')" ;;
+    22) die 3 "$(L '经中转访问出口机失败' 'Reaching the exit through the relay failed')" ;;
+    31) die 3 "$(L '中转实际协商 host-key 指纹漂移' 'The relay'\''s actually negotiated host key fingerprint drifted')" ;;
+    32) die 3 "$(L '出口机实际协商 host-key 指纹漂移' 'The exit'\''s actually negotiated host key fingerprint drifted')" ;;
+    *) die 5 "$(L '主机/密钥绑定核验异常' 'Host/key binding verification failed unexpectedly')" ;;
   esac
 }
 
@@ -7586,8 +7742,8 @@ exit_op_chain() {
   # 上次中断留下的本机临时文件：与 rollback 侧同一口径，身份正常才删。
   for leftover in "${CHAIN_STATE_DIR}"/.node.txt.rotate.*.tmp "${CHAIN_STATE_DIR}"/devices/.*.tmp; do
     [[ -e "${leftover}" || -L "${leftover}" ]] || continue
-    require_secure_user_file "${leftover}" 600 || die 5 "${COMMAND} 本机残留身份异常：${leftover}"
-    rm -f "${leftover}" || die 5 "${COMMAND} 本机残留删除失败：${leftover}"
+    require_secure_user_file "${leftover}" 600 || die 5 "$(L "${COMMAND} 本机残留身份异常：${leftover}" "${COMMAND} local leftover has an unexpected identity: ${leftover}")"
+    rm -f "${leftover}" || die 5 "$(L "${COMMAND} 本机残留删除失败：${leftover}" "Deleting the ${COMMAND} local leftover failed: ${leftover}")"
   done
   log_info "[exit-op] start chain=${CHAIN_ID} mode=${op} deployment=${DEPLOYMENT_ID:0:12}"
   old_uuid="${VLESS_UUID}"
@@ -7596,9 +7752,9 @@ exit_op_chain() {
   if [[ "${EXIT_OP_RESULT}" == resumed-after-commit ]]; then
     # state 已在上一次提交：出口机报告的 default 与配置哈希必须与 state 一致，否则说明现场与记录对不上，不做清理。
     [[ "${VLESS_UUID}" == "${old_uuid}" && "${ROTATE_NEW_EXIT_SHA256}" == "${old_sha}" ]] \
-      || die 1 '出口机辅助文件中的参数与已提交的 state 不一致，拒绝清理；请人工核对出口机 /etc/ownexit-chain'
+      || die 1 "$(L '出口机辅助文件中的参数与已提交的 state 不一致，拒绝清理；请人工核对出口机 /etc/ownexit-chain' 'The parameters in the exit helper files differ from the committed state; refusing to clean up; check /etc/ownexit-chain on the exit by hand')"
     publish_exit_op_artifacts
-    [[ "${NODE_SHA256}" == "$(kv_get "${STATE_FILE}" NODE_SHA256)" ]] || die 1 '重建的 node.txt 与 state 记录不一致'
+    [[ "${NODE_SHA256}" == "$(kv_get "${STATE_FILE}" NODE_SHA256)" ]] || die 1 "$(L '重建的 node.txt 与 state 记录不一致' 'The rebuilt node.txt does not match the state')"
   else
     publish_exit_op_artifacts
     rotate_test_stop node
@@ -7614,19 +7770,19 @@ exit_op_chain() {
 rotate_keys_chain() {
   exit_op_chain rotate rotated
   printf 'rotate=done chain=%s result=%s\n' "${CHAIN_ID}" "${EXIT_OP_RESULT}"
-  log_info "[exit-op] 所有客户端需要重新导入 ${CHAIN_STATE_DIR}/client/node.txt 与 devices/ 下的设备节点（多链聚合需重新 render）"
-  log_info "rotate-keys 通过；chain=${CHAIN_ID} result=${EXIT_OP_RESULT} elapsed=$(elapsed_seconds)s"
+  log_info "$(L "[exit-op] 所有客户端需要重新导入 ${CHAIN_STATE_DIR}/client/node.txt 与 devices/ 下的设备节点（多链聚合需重新 render）" "[exit-op] Every client must import ${CHAIN_STATE_DIR}/client/node.txt and the device nodes under devices/ again (multi-chain output must be rendered again)")"
+  log_info "$(L "rotate-keys 通过；chain=${CHAIN_ID} result=${EXIT_OP_RESULT} elapsed=$(elapsed_seconds)s" "rotate-keys passed; chain=${CHAIN_ID} result=${EXIT_OP_RESULT} elapsed=$(elapsed_seconds)s")"
 }
 
 device_op_chain() {
   if [[ "${COMMAND}" == add-device ]]; then
     exit_op_chain "add:${DEVICE_NAME}" devices
     printf 'device=added chain=%s name=%s node=%s result=%s\n' "${CHAIN_ID}" "${DEVICE_NAME}" "${CHAIN_STATE_DIR}/devices/node-${DEVICE_NAME}.txt" "${EXIT_OP_RESULT}"
-    log_info "add-device 通过；chain=${CHAIN_ID} device=${DEVICE_NAME} elapsed=$(elapsed_seconds)s"
+    log_info "$(L "add-device 通过；chain=${CHAIN_ID} device=${DEVICE_NAME} elapsed=$(elapsed_seconds)s" "add-device passed; chain=${CHAIN_ID} device=${DEVICE_NAME} elapsed=$(elapsed_seconds)s")"
   else
     exit_op_chain "remove:${DEVICE_NAME}" devices
     printf 'device=removed chain=%s name=%s result=%s\n' "${CHAIN_ID}" "${DEVICE_NAME}" "${EXIT_OP_RESULT}"
-    log_info "remove-device 通过；chain=${CHAIN_ID} device=${DEVICE_NAME} elapsed=$(elapsed_seconds)s"
+    log_info "$(L "remove-device 通过；chain=${CHAIN_ID} device=${DEVICE_NAME} elapsed=$(elapsed_seconds)s" "remove-device passed; chain=${CHAIN_ID} device=${DEVICE_NAME} elapsed=$(elapsed_seconds)s")"
   fi
 }
 
@@ -7635,7 +7791,7 @@ list_devices_chain() {
   local names name node
   exit_op_prepare
   # name 字段只出现在 users 行；旧形态没有 name，grep 无匹配时远端用 || true 兜住，结果为空即只有 default。
-  names="$(ssh_exit "grep -o '\"name\": \"[^\"]*\"' /etc/ownexit-chain/${CHAIN_ID}.exit.json || true")" || die 3 '读取出口机配置失败'
+  names="$(ssh_exit "grep -o '\"name\": \"[^\"]*\"' /etc/ownexit-chain/${CHAIN_ID}.exit.json || true")" || die 3 "$(L '读取出口机配置失败' 'Reading the exit configuration failed')"
   names="$(printf '%s\n' "${names}" | sed -n 's/^"name": "\(.*\)"$/\1/p')"
   [[ -n "${names}" ]] || names=default
   while IFS= read -r name; do
@@ -7645,7 +7801,7 @@ list_devices_chain() {
     else
       node="${CHAIN_STATE_DIR}/devices/node-${name}.txt"
     fi
-    [[ -f "${node}" ]] || node='missing（运行 rotate-keys 或任一设备命令可重建）'
+    [[ -f "${node}" ]] || node="$(L 'missing（运行 rotate-keys 或任一设备命令可重建）' 'missing (run rotate-keys or any device command to rebuild it)')"
     printf 'device=%s node=%s\n' "${name}" "${node}"
   done <<< "${names}"
 }
@@ -7724,7 +7880,7 @@ unset migrate_key
 # 测试钩子：在指定步骤后以退出码 99 结束，用于中断恢复用例；正常使用不要设置。
 migrate_test_stop() {
   if [[ "${OWNEXIT_TEST_MIGRATE_STOP_AFTER:-}" == "$1" ]]; then
-    log_warn "测试钩子：migrate-exit 在 $1 之后停止"
+    log_warn "$(L "测试钩子：migrate-exit 在 $1 之后停止" "Test hook: migrate-exit stops after $1")"
     exit 99
   fi
 }
@@ -7733,16 +7889,16 @@ migrate_test_stop() {
 # 退出码由 die 按命令映射（rollback 为 6，deploy 为 4），其余为 5。
 migrate_gate() {
   [[ -e "${CHAIN_STATE_DIR}/migrate-exit.env" || -L "${CHAIN_STATE_DIR}/migrate-exit.env" ]] || return 0
-  die 5 "链 ${CHAIN_ID} 正在迁移出口机，先重跑 migrate-exit（或 --abort / --abandon-cleanup）"
+  die 5 "$(L "链 ${CHAIN_ID} 正在迁移出口机，先重跑 migrate-exit（或 --abort / --abandon-cleanup）" "Chain ${CHAIN_ID} is migrating its exit; rerun migrate-exit first (or --abort / --abandon-cleanup)")"
 }
 
 # 写迁移记录：同目录临时文件 + mv 原子替换，读者只会看到完整的旧记录或完整的新记录。
 migrate_write_record() {
   local tmp key value
-  ensure_private_dir "${CHAIN_STATE_DIR}" || die 1 'chain state 目录身份或权限不安全'
+  ensure_private_dir "${CHAIN_STATE_DIR}" || die 1 "$(L 'chain state 目录身份或权限不安全' 'The chain state directory'\''s ownership or permissions are unsafe')"
   tmp="${CHAIN_STATE_DIR}/.migrate-exit.env.${LOCK_OPERATION_ID}.tmp"
-  ( set -o noclobber; : > "${tmp}" ) 2>/dev/null || die 1 '迁移记录临时文件碰撞'
-  chmod 600 "${tmp}" || die 1 '迁移记录临时文件权限设置失败'
+  ( set -o noclobber; : > "${tmp}" ) 2>/dev/null || die 1 "$(L '迁移记录临时文件碰撞' 'Migration record temporary file collision')"
+  chmod 600 "${tmp}" || die 1 "$(L '迁移记录临时文件权限设置失败' 'Setting the migration record temporary file'\''s permissions failed')"
   while IFS= read -r key; do
     case "${key}" in
       SCHEMA_VERSION) value=1 ;;
@@ -7750,38 +7906,38 @@ migrate_write_record() {
       *) eval "value=\"\${MIGRATE_${key}:-}\"" ;;
     esac
     [[ -n "${value}" ]] || value='-'
-    printf '%s=%s\n' "${key}" "${value}" >> "${tmp}" || die 1 '迁移记录写入失败'
+    printf '%s=%s\n' "${key}" "${value}" >> "${tmp}" || die 1 "$(L '迁移记录写入失败' 'Writing the migration record failed')"
   done < <(migrate_record_keys)
-  sync || die 1 '迁移记录持久化失败'
-  mv -f "${tmp}" "${MIGRATE_FILE}" || die 1 '迁移记录原子替换失败'
-  sync || die 1 '迁移记录持久化失败'
+  sync || die 1 "$(L '迁移记录持久化失败' 'Persisting the migration record failed')"
+  mv -f "${tmp}" "${MIGRATE_FILE}" || die 1 "$(L '迁移记录原子替换失败' 'Atomic replacement of the migration record failed')"
+  sync || die 1 "$(L '迁移记录持久化失败' 'Persisting the migration record failed')"
 }
 
 # 读迁移记录到 MIGRATE_<键>；格式不对就拒绝（记录是迁移中唯一的新出口机参数来源，猜测会拆错机器）。
 migrate_load_record() {
   local expected actual key value
-  require_secure_user_file "${MIGRATE_FILE}" 600 || die 5 "迁移记录身份或权限异常：${MIGRATE_FILE}"
+  require_secure_user_file "${MIGRATE_FILE}" 600 || die 5 "$(L "迁移记录身份或权限异常：${MIGRATE_FILE}" "The migration record's ownership or permissions are abnormal: ${MIGRATE_FILE}")"
   expected="$(migrate_record_keys)"
   actual="$(awk -F= 'NF >= 2 {print $1}' "${MIGRATE_FILE}")"
-  [[ "${actual}" == "${expected}" ]] || die 5 "迁移记录键不完整或顺序不符：${MIGRATE_FILE}"
-  [[ -z "$(grep -nEv '^[A-Z][A-Z0-9_]*=[A-Za-z0-9._/@+,=:~-]+$' "${MIGRATE_FILE}" || true)" ]] || die 5 "迁移记录含非法字符：${MIGRATE_FILE}"
-  [[ "$(kv_get "${MIGRATE_FILE}" SCHEMA_VERSION)" == 1 ]] || die 5 '迁移记录 SCHEMA_VERSION 不认识'
-  [[ "$(kv_get "${MIGRATE_FILE}" CHAIN_ID)" == "${CHAIN_ID}" ]] || die 5 '迁移记录不属于本链'
+  [[ "${actual}" == "${expected}" ]] || die 5 "$(L "迁移记录键不完整或顺序不符：${MIGRATE_FILE}" "The migration record's keys are incomplete or out of order: ${MIGRATE_FILE}")"
+  [[ -z "$(grep -nEv '^[A-Z][A-Z0-9_]*=[A-Za-z0-9._/@+,=:~-]+$' "${MIGRATE_FILE}" || true)" ]] || die 5 "$(L "迁移记录含非法字符：${MIGRATE_FILE}" "The migration record contains invalid characters: ${MIGRATE_FILE}")"
+  [[ "$(kv_get "${MIGRATE_FILE}" SCHEMA_VERSION)" == 1 ]] || die 5 "$(L '迁移记录 SCHEMA_VERSION 不认识' 'Unrecognised SCHEMA_VERSION in the migration record')"
+  [[ "$(kv_get "${MIGRATE_FILE}" CHAIN_ID)" == "${CHAIN_ID}" ]] || die 5 "$(L '迁移记录不属于本链' 'The migration record does not belong to this chain')"
   while IFS= read -r key; do
     case "${key}" in SCHEMA_VERSION|CHAIN_ID) continue ;; esac
     value="$(kv_get "${MIGRATE_FILE}" "${key}")"
     [[ "${value}" != - ]] || value=''
     eval "MIGRATE_${key}=\"\${value}\""
   done < <(migrate_record_keys)
-  [[ "${MIGRATE_PHASE}" =~ ^(recorded|config-rewritten|relay-switched|committed)$ ]] || die 5 "迁移记录 PHASE 不认识：${MIGRATE_PHASE}"
-  [[ "${MIGRATE_MIGRATE_ID}" =~ ^[0-9a-f]{32}$ ]] || die 5 '迁移记录 MIGRATE_ID 格式错误'
-  is_ipv4 "${MIGRATE_OLD_EXIT_HOST}" && is_ipv4 "${MIGRATE_NEW_EXIT_HOST}" || die 5 '迁移记录中的出口机地址不是 IPv4'
-  is_ipv4 "${MIGRATE_OLD_EXPECTED_EXIT_IPV4}" && is_ipv4 "${MIGRATE_NEW_EXPECTED_EXIT_IPV4}" || die 5 '迁移记录中的出口 IP 不是 IPv4'
+  [[ "${MIGRATE_PHASE}" =~ ^(recorded|config-rewritten|relay-switched|committed)$ ]] || die 5 "$(L "迁移记录 PHASE 不认识：${MIGRATE_PHASE}" "Unrecognised PHASE in the migration record: ${MIGRATE_PHASE}")"
+  [[ "${MIGRATE_MIGRATE_ID}" =~ ^[0-9a-f]{32}$ ]] || die 5 "$(L '迁移记录 MIGRATE_ID 格式错误' 'Malformed MIGRATE_ID in the migration record')"
+  is_ipv4 "${MIGRATE_OLD_EXIT_HOST}" && is_ipv4 "${MIGRATE_NEW_EXIT_HOST}" || die 5 "$(L '迁移记录中的出口机地址不是 IPv4' 'An exit address in the migration record is not IPv4')"
+  is_ipv4 "${MIGRATE_OLD_EXPECTED_EXIT_IPV4}" && is_ipv4 "${MIGRATE_NEW_EXPECTED_EXIT_IPV4}" || die 5 "$(L '迁移记录中的出口 IP 不是 IPv4' 'An exit IP in the migration record is not IPv4')"
   for value in "${MIGRATE_OLD_CONFIG_SHA256}" "${MIGRATE_NEW_CONFIG_SHA256}" "${MIGRATE_OLD_EXIT_OWNER_SHA256}" "${MIGRATE_OLD_EXIT_EXIT_SHA256}" "${MIGRATE_OLD_EXIT_SERVICE_SHA256}"; do
-    [[ "${value}" =~ ^[0-9a-f]{64}$ ]] || die 5 '迁移记录中的旧哈希格式错误'
+    [[ "${value}" =~ ^[0-9a-f]{64}$ ]] || die 5 "$(L '迁移记录中的旧哈希格式错误' 'Malformed old hash in the migration record')"
   done
-  [[ "${MIGRATE_OLD_EXIT_HOSTKEY_FINGERPRINT}" == SHA256:* && "${MIGRATE_NEW_EXIT_HOSTKEY_FINGERPRINT}" == SHA256:* ]] || die 5 '迁移记录中的主机指纹格式错误'
-  [[ "${MIGRATE_OLD_EXIT_SSH_KEY_FINGERPRINT}" == SHA256:* && "${MIGRATE_NEW_EXIT_SSH_KEY_FINGERPRINT}" == SHA256:* ]] || die 5 '迁移记录中的密钥指纹格式错误'
+  [[ "${MIGRATE_OLD_EXIT_HOSTKEY_FINGERPRINT}" == SHA256:* && "${MIGRATE_NEW_EXIT_HOSTKEY_FINGERPRINT}" == SHA256:* ]] || die 5 "$(L '迁移记录中的主机指纹格式错误' 'Malformed host fingerprint in the migration record')"
+  [[ "${MIGRATE_OLD_EXIT_SSH_KEY_FINGERPRINT}" == SHA256:* && "${MIGRATE_NEW_EXIT_SSH_KEY_FINGERPRINT}" == SHA256:* ]] || die 5 "$(L '迁移记录中的密钥指纹格式错误' 'Malformed key fingerprint in the migration record')"
 }
 
 # 把出口机相关全局变量切到旧机或新机，然后重渲染 SSH 配置；之后 ssh_exit / ssh_exit_stdin 就指向这台机器（经中转机转接）。
@@ -7818,12 +7974,12 @@ migrate_use_exit() {
 # 中转与当前上下文出口机的身份核验：私钥指纹、实际协商的主机指纹都必须等于期望值。
 migrate_check_binding() {
   local fingerprint
-  [[ "$(fingerprint_private_key "${RELAY_SSH_KEY}")" == "${RELAY_SSH_KEY_FINGERPRINT}" ]] || die 5 '中转 SSH key 指纹漂移'
-  [[ "$(fingerprint_private_key "${EXIT_SSH_KEY}")" == "${EXIT_SSH_KEY_FINGERPRINT}" ]] || die 5 "出口机 ${EXIT_HOST} 的 SSH key 指纹与迁移记录不符"
-  fingerprint="$(negotiated_hostkey_fingerprint chain-relay)" || die 3 '中转实际协商 host-key 探针不可达'
-  [[ "${fingerprint}" == "${RELAY_HOSTKEY_FINGERPRINT}" ]] || die 3 '中转实际协商 host-key 指纹漂移'
-  fingerprint="$(negotiated_hostkey_fingerprint chain-exit)" || die 3 "经中转访问出口机 ${EXIT_HOST} 失败"
-  [[ "${fingerprint}" == "${EXIT_HOSTKEY_FINGERPRINT}" ]] || die 3 "出口机 ${EXIT_HOST} 的主机指纹与迁移记录不符"
+  [[ "$(fingerprint_private_key "${RELAY_SSH_KEY}")" == "${RELAY_SSH_KEY_FINGERPRINT}" ]] || die 5 "$(L '中转 SSH key 指纹漂移' 'Relay SSH key fingerprint drifted')"
+  [[ "$(fingerprint_private_key "${EXIT_SSH_KEY}")" == "${EXIT_SSH_KEY_FINGERPRINT}" ]] || die 5 "$(L "出口机 ${EXIT_HOST} 的 SSH key 指纹与迁移记录不符" "The SSH key fingerprint of the exit ${EXIT_HOST} does not match the migration record")"
+  fingerprint="$(negotiated_hostkey_fingerprint chain-relay)" || die 3 "$(L '中转实际协商 host-key 探针不可达' 'Probe of the relay'\''s actually negotiated host key unreachable')"
+  [[ "${fingerprint}" == "${RELAY_HOSTKEY_FINGERPRINT}" ]] || die 3 "$(L '中转实际协商 host-key 指纹漂移' 'The relay'\''s actually negotiated host key fingerprint drifted')"
+  fingerprint="$(negotiated_hostkey_fingerprint chain-exit)" || die 3 "$(L "经中转访问出口机 ${EXIT_HOST} 失败" "Reaching the exit ${EXIT_HOST} through the relay failed")"
+  [[ "${fingerprint}" == "${EXIT_HOSTKEY_FINGERPRINT}" ]] || die 3 "$(L "出口机 ${EXIT_HOST} 的主机指纹与迁移记录不符" "The host fingerprint of the exit ${EXIT_HOST} does not match the migration record")"
 }
 
 # 当前配置的四个出口键属于迁移前（old）、迁移后（new）还是都不是（other）。
@@ -7903,9 +8059,9 @@ migrate_relay_status() {
   fi
   script="${OP_TMP}/migrate-relay-probe.sh"
   write_migrate_relay_probe_script "${script}"
-  output="$(ssh_relay_stdin bash -s -- "${CHAIN_ID}" "${MIGRATE_STATE_RELAY_OWNER_SHA256}" "${MIGRATE_OLD_CONFIG_SHA256}" "${MIGRATE_NEW_CONFIG_SHA256}" "${MIGRATE_STATE_RELAY_SERVICE_SHA256}" "${MIGRATE_OLD_RELAY_TARGET}" "${MIGRATE_NEW_RELAY_TARGET}" < "${script}")" || die 3 '中转现场检查失败（SSH 不可达或远端脚本异常）'
+  output="$(ssh_relay_stdin bash -s -- "${CHAIN_ID}" "${MIGRATE_STATE_RELAY_OWNER_SHA256}" "${MIGRATE_OLD_CONFIG_SHA256}" "${MIGRATE_NEW_CONFIG_SHA256}" "${MIGRATE_STATE_RELAY_SERVICE_SHA256}" "${MIGRATE_OLD_RELAY_TARGET}" "${MIGRATE_NEW_RELAY_TARGET}" < "${script}")" || die 3 "$(L '中转现场检查失败（SSH 不可达或远端脚本异常）' 'Checking the relay'\''s live state failed (SSH unreachable or the remote script failed)')"
   output="$(printf '%s\n' "${output}" | awk '$1 ~ /^RELAY=/ {sub(/^RELAY=/, ""); print; exit}')"
-  [[ -n "${output}" ]] || die 3 '中转现场检查输出格式异常'
+  [[ -n "${output}" ]] || die 3 "$(L '中转现场检查输出格式异常' 'Unexpected output format from the relay live check')"
   printf '%s' "${output}"
 }
 
@@ -7915,10 +8071,10 @@ migrate_derive_stage() {
   local side rc relay saved_host saved_port saved_key saved_exit
   side="$(migrate_config_side)"
   case "${side}" in
-    other) die 2 "配置里的出口机参数既不是迁移前也不是迁移后的值；请人工核对 ${CONFIG_PATH} 与 ${MIGRATE_CONFIG_BACKUP:-（无备份）}" ;;
+    other) die 2 "$(L "配置里的出口机参数既不是迁移前也不是迁移后的值；请人工核对 ${CONFIG_PATH} 与 ${MIGRATE_CONFIG_BACKUP:-（无备份）}" "The exit parameters in the configuration are neither the pre-migration nor the post-migration values; check ${CONFIG_PATH} and ${MIGRATE_CONFIG_BACKUP:-(no backup)} by hand")" ;;
     old)
       if probe_state_file "${STATE_FILE}"; then rc=0; else rc="$?"; fi
-      [[ "${rc}" -eq 0 ]] || die 2 "配置为迁移前的值，但 state 与它不一致（${STATE_PROBE_REASON}）；请人工核对"
+      [[ "${rc}" -eq 0 ]] || die 2 "$(L "配置为迁移前的值，但 state 与它不一致（${STATE_PROBE_REASON}）；请人工核对" "The configuration has the pre-migration values but the state does not match it (${STATE_PROBE_REASON}); check by hand")"
       MIGRATE_STAGE=recorded
       return 0
       ;;
@@ -7928,7 +8084,7 @@ migrate_derive_stage() {
     MIGRATE_STAGE=cleanup
     return 0
   fi
-  [[ "${rc}" -eq 12 ]] || die 5 "state.env 校验失败：${STATE_PROBE_REASON}"
+  [[ "${rc}" -eq 12 ]] || die 5 "$(L "state.env 校验失败：${STATE_PROBE_REASON}" "state.env verification failed: ${STATE_PROBE_REASON}")"
   # 临时换回迁移前的四个键重算摘要再核 state；其余 9 个键与校验和仍按原逻辑逐项核验，豁免范围不会被放宽。
   saved_host="${EXIT_HOST}"; saved_port="${EXIT_SSH_PORT}"; saved_key="${EXIT_SSH_KEY}"; saved_exit="${EXPECTED_EXIT_IPV4}"
   EXIT_HOST="${MIGRATE_OLD_EXIT_HOST}"; EXIT_SSH_PORT="${MIGRATE_OLD_EXIT_SSH_PORT}"; EXIT_SSH_KEY="${MIGRATE_OLD_EXIT_SSH_KEY}"; EXPECTED_EXIT_IPV4="${MIGRATE_OLD_EXPECTED_EXIT_IPV4}"
@@ -7936,8 +8092,8 @@ migrate_derive_stage() {
   if probe_state_file "${STATE_FILE}"; then rc=0; else rc="$?"; fi
   EXIT_HOST="${saved_host}"; EXIT_SSH_PORT="${saved_port}"; EXIT_SSH_KEY="${saved_key}"; EXPECTED_EXIT_IPV4="${saved_exit}"
   CONFIG_SHA256="$(normalized_config | sha256_text)"
-  [[ "${rc}" -eq 0 ]] || die 2 'state 既不绑定当前配置也不绑定迁移前的配置；请人工核对配置与 state'
-  [[ "${CONFIG_SHA256}" == "${MIGRATE_NEW_CONFIG_SHA256}" ]] || die 2 '当前配置摘要与迁移记录不符；除四个出口键外配置还被改过'
+  [[ "${rc}" -eq 0 ]] || die 2 "$(L 'state 既不绑定当前配置也不绑定迁移前的配置；请人工核对配置与 state' 'The state is bound to neither the current configuration nor the pre-migration configuration; check the configuration and state by hand')"
+  [[ "${CONFIG_SHA256}" == "${MIGRATE_NEW_CONFIG_SHA256}" ]] || die 2 "$(L '当前配置摘要与迁移记录不符；除四个出口键外配置还被改过' 'The current configuration digest does not match the migration record; the configuration was changed beyond the four exit keys')"
   MIGRATE_STATE_RELAY_OWNER_SHA256="${RELAY_OWNER_SHA256}"
   MIGRATE_STATE_RELAY_SERVICE_SHA256="${RELAY_SERVICE_SHA256}"
   migrate_use_exit new
@@ -7946,7 +8102,7 @@ migrate_derive_stage() {
     none) MIGRATE_STAGE=executing ;;
     partial) MIGRATE_STAGE=partial ;;
     switched) MIGRATE_STAGE=switched ;;
-    *) die 1 "中转上本链的 owner / service 被外部改动（${relay}），迁移不再继续；请人工核对中转 /etc/ownexit-chain 与 relay service" ;;
+    *) die 1 "$(L "中转上本链的 owner / service 被外部改动（${relay}），迁移不再继续；请人工核对中转 /etc/ownexit-chain 与 relay service" "This chain's owner / service on the relay was changed externally (${relay}); the migration will not continue; check /etc/ownexit-chain and the relay service on the relay by hand")" ;;
   esac
 }
 
@@ -7955,15 +8111,15 @@ migrate_rewrite_config() {
   local tmp key value count
   if [[ -z "${MIGRATE_CONFIG_BACKUP}" ]]; then
     MIGRATE_CONFIG_BACKUP="${CONFIG_PATH}.bak.$(date '+%Y%m%d_%H%M%S')"
-    [[ ! -e "${MIGRATE_CONFIG_BACKUP}" && ! -L "${MIGRATE_CONFIG_BACKUP}" ]] || die 1 "配置备份路径碰撞：${MIGRATE_CONFIG_BACKUP}"
-    ( set -o noclobber; cat "${CONFIG_PATH}" > "${MIGRATE_CONFIG_BACKUP}" ) || die 1 '配置备份失败'
-    chmod 600 "${MIGRATE_CONFIG_BACKUP}" || die 1 '配置备份权限设置失败'
+    [[ ! -e "${MIGRATE_CONFIG_BACKUP}" && ! -L "${MIGRATE_CONFIG_BACKUP}" ]] || die 1 "$(L "配置备份路径碰撞：${MIGRATE_CONFIG_BACKUP}" "Configuration backup path collision: ${MIGRATE_CONFIG_BACKUP}")"
+    ( set -o noclobber; cat "${CONFIG_PATH}" > "${MIGRATE_CONFIG_BACKUP}" ) || die 1 "$(L '配置备份失败' 'Backing up the configuration failed')"
+    chmod 600 "${MIGRATE_CONFIG_BACKUP}" || die 1 "$(L '配置备份权限设置失败' 'Setting the configuration backup'\''s permissions failed')"
     migrate_write_record
   fi
-  require_secure_user_file "${MIGRATE_CONFIG_BACKUP}" 600 || die 1 "配置备份身份或权限异常：${MIGRATE_CONFIG_BACKUP}"
+  require_secure_user_file "${MIGRATE_CONFIG_BACKUP}" 600 || die 1 "$(L "配置备份身份或权限异常：${MIGRATE_CONFIG_BACKUP}" "The configuration backup's ownership or permissions are abnormal: ${MIGRATE_CONFIG_BACKUP}")"
   for key in EXIT_HOST EXIT_SSH_PORT EXIT_SSH_KEY EXPECTED_EXIT_IPV4; do
     count="$(awk -v k="${key}=" 'index($0, k) == 1 {n++} END {print n + 0}' "${CONFIG_PATH}")"
-    [[ "${count}" == 1 ]] || die 2 "配置文件中 ${key}= 不是恰好 1 行：${CONFIG_PATH}"
+    [[ "${count}" == 1 ]] || die 2 "$(L "配置文件中 ${key}= 不是恰好 1 行：${CONFIG_PATH}" "${key}= is not exactly 1 line in the configuration file: ${CONFIG_PATH}")"
   done
   tmp="$(dirname "${CONFIG_PATH}")/.$(basename "${CONFIG_PATH}").migrate.$$.tmp"
   awk -v h="EXIT_HOST=${MIGRATE_NEW_EXIT_HOST}" -v p="EXIT_SSH_PORT=${MIGRATE_NEW_EXIT_SSH_PORT}" \
@@ -7973,15 +8129,15 @@ migrate_rewrite_config() {
     else if (index($0, "EXIT_SSH_KEY=") == 1) print k
     else if (index($0, "EXPECTED_EXIT_IPV4=") == 1) print e
     else print
-  }' "${CONFIG_PATH}" > "${tmp}" || die 1 '配置改写失败'
-  chmod 600 "${tmp}" || die 1 '配置临时文件权限设置失败'
-  mv -f "${tmp}" "${CONFIG_PATH}" || die 1 '配置原子替换失败'
+  }' "${CONFIG_PATH}" > "${tmp}" || die 1 "$(L '配置改写失败' 'Rewriting the configuration failed')"
+  chmod 600 "${tmp}" || die 1 "$(L '配置临时文件权限设置失败' 'Setting the configuration temporary file'\''s permissions failed')"
+  mv -f "${tmp}" "${CONFIG_PATH}" || die 1 "$(L '配置原子替换失败' 'Atomic replacement of the configuration failed')"
   EXIT_HOST="${MIGRATE_NEW_EXIT_HOST}"
   EXIT_SSH_PORT="${MIGRATE_NEW_EXIT_SSH_PORT}"
   EXIT_SSH_KEY="${MIGRATE_NEW_EXIT_SSH_KEY}"
   EXPECTED_EXIT_IPV4="${MIGRATE_NEW_EXPECTED_EXIT_IPV4}"
   value="$(normalized_config | sha256_text)"
-  [[ "${value}" == "${MIGRATE_NEW_CONFIG_SHA256}" ]] || die 1 '改写后的配置摘要与迁移记录不符'
+  [[ "${value}" == "${MIGRATE_NEW_CONFIG_SHA256}" ]] || die 1 "$(L '改写后的配置摘要与迁移记录不符' 'The rewritten configuration digest does not match the migration record')"
   CONFIG_SHA256="${value}"
   MIGRATE_PHASE='config-rewritten'
   migrate_write_record
@@ -7992,22 +8148,22 @@ migrate_rewrite_config() {
 migrate_setup_new_host() {
   local key rc
   key="$(init_key_path "${MIGRATE_TO}" "${MIGRATE_TO_PORT}")"
-  log_info "[migrate] 新出口机 ${MIGRATE_TO}:${MIGRATE_TO_PORT} 配置免密"
+  log_info "$(L "[migrate] 新出口机 ${MIGRATE_TO}:${MIGRATE_TO_PORT} 配置免密" "[migrate] Setting up key login to the new exit ${MIGRATE_TO}:${MIGRATE_TO_PORT}")"
   rc=0
   # connect_to.sh 的进度行写在 stdout；转到 stderr，stdout 只留 migrate= 这一行机器可读输出。
   bash "${SCRIPT_DIR}/../direct/connect_to.sh" --setup-only --host "${MIGRATE_TO}" --port "${MIGRATE_TO_PORT}" --user root >&2 || rc="$?"
-  [[ "${rc}" -eq 0 ]] || die 3 "新出口机 ${MIGRATE_TO}:${MIGRATE_TO_PORT} 配置免密失败（原因见上方 reason=...）；配置与 state 未改动"
+  [[ "${rc}" -eq 0 ]] || die 3 "$(L "新出口机 ${MIGRATE_TO}:${MIGRATE_TO_PORT} 配置免密失败（原因见上方 reason=...）；配置与 state 未改动" "Setting up key login to the new exit ${MIGRATE_TO}:${MIGRATE_TO_PORT} failed (see reason=... above); configuration and state unchanged")"
   if ! init_probe_ed25519 "${key}" "${MIGRATE_TO}" "${MIGRATE_TO_PORT}"; then
     init_record_ed25519_hostkey "${key}" "${MIGRATE_TO}" "${MIGRATE_TO_PORT}" \
-      || die 3 "新出口机 ${MIGRATE_TO}:${MIGRATE_TO_PORT} 无法取得 ed25519 host key（chain 只接受 ed25519）"
+      || die 3 "$(L "新出口机 ${MIGRATE_TO}:${MIGRATE_TO_PORT} 无法取得 ed25519 host key（chain 只接受 ed25519）" "Cannot get an ed25519 host key from the new exit ${MIGRATE_TO}:${MIGRATE_TO_PORT} (chains only accept ed25519)")"
     init_probe_ed25519 "${key}" "${MIGRATE_TO}" "${MIGRATE_TO_PORT}" \
-      || die 3 "新出口机 ${MIGRATE_TO}:${MIGRATE_TO_PORT} 补记 ed25519 host key 后仍无法用 ed25519 登录"
+      || die 3 "$(L "新出口机 ${MIGRATE_TO}:${MIGRATE_TO_PORT} 补记 ed25519 host key 后仍无法用 ed25519 登录" "Still cannot log in to the new exit ${MIGRATE_TO}:${MIGRATE_TO_PORT} with ed25519 after recording its ed25519 host key")"
   fi
-  require_private_key_file "${key}" || die 3 "新出口机私钥身份或权限异常：${key}"
+  require_private_key_file "${key}" || die 3 "$(L "新出口机私钥身份或权限异常：${key}" "The new exit's private key has an abnormal identity or permissions: ${key}")"
   MIGRATE_NEW_EXIT_SSH_KEY="${key}"
-  MIGRATE_NEW_EXIT_SSH_KEY_FINGERPRINT="$(fingerprint_private_key "${key}")" || die 3 '无法读取新出口机私钥指纹'
-  [[ "${MIGRATE_NEW_EXIT_SSH_KEY_FINGERPRINT}" == SHA256:* ]] || die 3 '新出口机私钥指纹格式错误'
-  [[ "${MIGRATE_NEW_EXIT_SSH_KEY_FINGERPRINT}" != "${RELAY_SSH_KEY_FINGERPRINT}" ]] || die 2 '新出口机与中转使用了同一把私钥；chain 要求两把不同的私钥'
+  MIGRATE_NEW_EXIT_SSH_KEY_FINGERPRINT="$(fingerprint_private_key "${key}")" || die 3 "$(L '无法读取新出口机私钥指纹' 'Cannot read the new exit'\''s private key fingerprint')"
+  [[ "${MIGRATE_NEW_EXIT_SSH_KEY_FINGERPRINT}" == SHA256:* ]] || die 3 "$(L '新出口机私钥指纹格式错误' 'Malformed new exit private key fingerprint')"
+  [[ "${MIGRATE_NEW_EXIT_SSH_KEY_FINGERPRINT}" != "${RELAY_SSH_KEY_FINGERPRINT}" ]] || die 2 "$(L '新出口机与中转使用了同一把私钥；chain 要求两把不同的私钥' 'The new exit and the relay use the same private key; chains require two different private keys')"
 }
 
 # 准备阶段（没有迁移记录时）：核旧链健康、探新机器，写迁移记录并改写配置。远端不做任何修改。
@@ -8016,8 +8172,8 @@ migrate_prepare() {
   if probe_state_file "${STATE_FILE}"; then rc=0; else rc="$?"; fi
   case "${rc}" in
     0) ;;
-    12) die 2 '配置与 state 不一致；migrate-exit 要求配置未改动（出口机参数由本命令自己改写）' ;;
-    *) die 5 "state.env 校验失败：${STATE_PROBE_REASON}" ;;
+    12) die 2 "$(L '配置与 state 不一致；migrate-exit 要求配置未改动（出口机参数由本命令自己改写）' 'Configuration and state disagree; migrate-exit requires an unchanged configuration (it rewrites the exit parameters itself)')" ;;
+    *) die 5 "$(L "state.env 校验失败：${STATE_PROBE_REASON}" "state.env verification failed: ${STATE_PROBE_REASON}")" ;;
   esac
   # --to 的 IPv4 / 不是中转机两项校验已在 migrate_exit_chain 里先做；--to 等于当前出口机的情形也在那里按同机处理。
   # 旧链健康核验，顺序与 rollback 前置一致；同时让 remote_platform_preflight 给 SOCKET_PROXYD_PATH 赋值。
@@ -8025,20 +8181,20 @@ migrate_prepare() {
   if probe_loaded_binding; then rc=0; else rc="$?"; fi
   case "${rc}" in
     0) ;;
-    11) die 5 '中转 SSH key 指纹漂移' ;;
-    12) die 5 '出口机 SSH key 指纹漂移' ;;
-    21) die 3 '中转实际协商 host-key 探针不可达' ;;
+    11) die 5 "$(L '中转 SSH key 指纹漂移' 'Relay SSH key fingerprint drifted')" ;;
+    12) die 5 "$(L '出口机 SSH key 指纹漂移' 'Exit SSH key fingerprint drifted')" ;;
+    21) die 3 "$(L '中转实际协商 host-key 探针不可达' 'Probe of the relay'\''s actually negotiated host key unreachable')" ;;
     # 走到这里时同机探测已判定新地址不是同一台（或经中转连不上）。同一台机器换 IP 的情形已在 migrate_exit_chain
     # 自动处理，不能把用户引去 rollback + deploy（会换凭据、所有客户端重新导入）。
-    22) die 3 "经中转访问旧出口机失败，新地址 ${MIGRATE_TO} 也不是同一台出口机（或经中转连不上）。若新旧是同一台：确认中转能 SSH 到新地址后重跑本命令；若确实换了机器而旧机器登录不了：私钥只在旧机器上，只能 rollback + deploy" ;;
-    31) die 3 '中转实际协商 host-key 指纹漂移' ;;
-    32) die 3 '旧出口机实际协商 host-key 指纹漂移' ;;
-    *) die 5 '主机/密钥绑定核验异常' ;;
+    22) die 3 "$(L "经中转访问旧出口机失败，新地址 ${MIGRATE_TO} 也不是同一台出口机（或经中转连不上）。若新旧是同一台：确认中转能 SSH 到新地址后重跑本命令；若确实换了机器而旧机器登录不了：私钥只在旧机器上，只能 rollback + deploy" "Reaching the old exit through the relay failed, and the new address ${MIGRATE_TO} is not the same exit either (or cannot be reached through the relay). If old and new are the same machine: make sure the relay can SSH to the new address, then rerun this command; if you really moved to another machine and the old one can no longer be reached: the private key exists only on the old machine, so the only option is rollback + deploy")" ;;
+    31) die 3 "$(L '中转实际协商 host-key 指纹漂移' 'The relay'\''s actually negotiated host key fingerprint drifted')" ;;
+    32) die 3 "$(L '旧出口机实际协商 host-key 指纹漂移' 'The old exit'\''s actually negotiated host key fingerprint drifted')" ;;
+    *) die 5 "$(L '主机/密钥绑定核验异常' 'Host/key binding verification failed unexpectedly')" ;;
   esac
   remote_platform_preflight
   if probe_remote_resources no; then rc=0; else rc="$?"; fi
-  [[ "${rc}" -ne 33 ]] || die 5 '旧出口机上有未完成的凭据或设备操作（辅助文件未清理）；先重跑中断的那条命令（rotate-keys / add-device / remove-device）收敛'
-  [[ "${rc}" -eq 0 ]] || die 5 '旧链远端资源不健康；先运行 verify 查明并收敛'
+  [[ "${rc}" -ne 33 ]] || die 5 "$(L '旧出口机上有未完成的凭据或设备操作（辅助文件未清理）；先重跑中断的那条命令（rotate-keys / add-device / remove-device）收敛' 'The old exit has an unfinished credential or device operation (helper files not cleaned up); rerun the interrupted command (rotate-keys / add-device / remove-device) first to converge')"
+  [[ "${rc}" -eq 0 ]] || die 5 "$(L '旧链远端资源不健康；先运行 verify 查明并收敛' 'The old chain'\''s remote resources are unhealthy; run verify first to find and fix the problem')"
   MIGRATE_MIGRATE_ID="$(random_hex_128)"
   MIGRATE_OLD_EXIT_HOST="${EXIT_HOST}"
   MIGRATE_OLD_EXIT_SSH_PORT="${EXIT_SSH_PORT}"
@@ -8057,25 +8213,25 @@ migrate_prepare() {
   migrate_setup_new_host
   # 新机器指纹经中转取得：同时证明中转到新机器的 SSH 可达（迁移后的所有管理都走这条路）。
   migrate_use_exit new
-  new_fp="$(negotiated_hostkey_fingerprint chain-exit)" || die 3 "经中转访问新出口机 ${MIGRATE_TO}:${MIGRATE_TO_PORT} 失败；确认中转到新机器的 SSH 可达"
-  [[ "${new_fp}" != "${MIGRATE_OLD_EXIT_HOSTKEY_FINGERPRINT}" ]] || die 2 "新出口机 ${MIGRATE_TO} 与当前出口机是同一台机器：重跑 migrate-exit --to ${MIGRATE_TO}（不带 --to-port 或保持原 SSH 端口）即可原地切换"
+  new_fp="$(negotiated_hostkey_fingerprint chain-exit)" || die 3 "$(L "经中转访问新出口机 ${MIGRATE_TO}:${MIGRATE_TO_PORT} 失败；确认中转到新机器的 SSH 可达" "Reaching the new exit ${MIGRATE_TO}:${MIGRATE_TO_PORT} through the relay failed; make sure the relay can reach the new machine over SSH")"
+  [[ "${new_fp}" != "${MIGRATE_OLD_EXIT_HOSTKEY_FINGERPRINT}" ]] || die 2 "$(L "新出口机 ${MIGRATE_TO} 与当前出口机是同一台机器：重跑 migrate-exit --to ${MIGRATE_TO}（不带 --to-port 或保持原 SSH 端口）即可原地切换" "The new exit ${MIGRATE_TO} is the same machine as the current exit: rerun migrate-exit --to ${MIGRATE_TO} (without --to-port, or with the original SSH port) to switch in place")"
   MIGRATE_NEW_EXIT_HOSTKEY_FINGERPRINT="${new_fp}"
   EXIT_HOSTKEY_FINGERPRINT="${new_fp}"
   remote_platform_preflight
-  check_remote_shared_binary_or_absent exit || die 3 '新出口机共享 binary / 目录与固定版本不一致'
+  check_remote_shared_binary_or_absent exit || die 3 "$(L '新出口机共享 binary / 目录与固定版本不一致' 'The shared binary / directories on the new exit do not match the pinned version')"
   for path in "${REMOTE_CONFIG_DIR}/${CHAIN_ID}.owner.env" "${REMOTE_CONFIG_DIR}/${CHAIN_ID}.exit.json" \
     "/etc/systemd/system/ownexit-chain-exit-${CHAIN_ID}.service" \
     "/etc/systemd/system/multi-user.target.wants/ownexit-chain-exit-${CHAIN_ID}.service"; do
-    require_remote_path_absent exit "${path}" "新出口机上已有本链的文件：${path}；配置未改动"
+    require_remote_path_absent exit "${path}" "$(L "新出口机上已有本链的文件：${path}；配置未改动" "This chain's files already exist on the new exit: ${path}; the configuration was not changed")"
   done
-  require_remote_unit_absent exit "ownexit-chain-exit-${CHAIN_ID}.service" "新出口机上已有本链的 unit；配置未改动"
+  require_remote_unit_absent exit "ownexit-chain-exit-${CHAIN_ID}.service" "$(L "新出口机上已有本链的 unit；配置未改动" "This chain's unit already exists on the new exit; the configuration was not changed")"
   # 出口 IP 是 verify 的唯一允许值：在新机器上直接问 ipinfo.io，终端里要人确认。
   exit_ip="$(ssh_exit 'curl -4 -fsS -m 15 ipinfo.io/ip' 2>/dev/null | tr -d '[:space:]' || true)"
-  is_ipv4 "${exit_ip}" || die 3 "无法在新出口机上取得公网 IPv4（需要 curl 能访问 ipinfo.io）；读到：${exit_ip:-空}"
-  log_info "[migrate] 新出口机公网 IP：${exit_ip}"
+  is_ipv4 "${exit_ip}" || die 3 "$(L "无法在新出口机上取得公网 IPv4（需要 curl 能访问 ipinfo.io）；读到：${exit_ip:-空}" "Cannot get a public IPv4 on the new exit (curl must reach ipinfo.io); read: ${exit_ip:-empty}")"
+  log_info "$(L "[migrate] 新出口机公网 IP：${exit_ip}" "[migrate] Public IP of the new exit: ${exit_ip}")"
   if [[ -t 0 ]]; then
-    read -r -p "确认迁移后客户端经这条链出去的 IP 应当是 ${exit_ip}？[y/N] " answer
-    [[ "${answer}" == y || "${answer}" == Y ]] || die 2 '未确认出口 IP，配置与 state 未改动'
+    read -r -p "$(L "确认迁移后客户端经这条链出去的 IP 应当是 ${exit_ip}？[y/N] " "After the migration, should clients leave through this chain with IP ${exit_ip}? [y/N] ")" answer
+    [[ "${answer}" == y || "${answer}" == Y ]] || die 2 "$(L '未确认出口 IP，配置与 state 未改动' 'Exit IP not confirmed; configuration and state unchanged')"
   fi
   MIGRATE_NEW_EXPECTED_EXIT_IPV4="${exit_ip}"
   # 新配置摘要：四个出口键换成新值，其余与 parse_config 同一算法。
@@ -8083,7 +8239,7 @@ migrate_prepare() {
   (
     EXIT_HOST="${MIGRATE_NEW_EXIT_HOST}"; EXIT_SSH_PORT="${MIGRATE_NEW_EXIT_SSH_PORT}"; EXIT_SSH_KEY="${MIGRATE_NEW_EXIT_SSH_KEY}"; EXPECTED_EXIT_IPV4="${MIGRATE_NEW_EXPECTED_EXIT_IPV4}"
     normalized_config | sha256_text
-  ) > "${OP_TMP}/migrate-new-config-sha256" || die 1 '新配置摘要计算失败'
+  ) > "${OP_TMP}/migrate-new-config-sha256" || die 1 "$(L '新配置摘要计算失败' 'Computing the new configuration digest failed')"
   MIGRATE_NEW_CONFIG_SHA256="$(cat "${OP_TMP}/migrate-new-config-sha256")"
   MIGRATE_BINARY_STAGE_PATH="${REMOTE_BASE}/.stage-binary-${MIGRATE_MIGRATE_ID}"
   MIGRATE_BINARY_STAGE_OWNER_TEMP_PATH="${REMOTE_BASE}/.owner-exit-binary-${MIGRATE_MIGRATE_ID}"
@@ -8104,8 +8260,8 @@ migrate_cleanup_stage() {
   eval "path=\"\${MIGRATE_${kind}_STAGE_PATH}\"; hash=\"\${MIGRATE_${kind}_STAGE_OWNER_SHA256:-ABSENT}\"; temp=\"\${MIGRATE_${kind}_STAGE_OWNER_TEMP_PATH}\""
   [[ -n "${hash}" ]] || hash=ABSENT
   if cleanup_remote_residue exit "${path}" "${hash}" "${temp}"; then rc=0; else rc="$?"; fi
-  [[ "${rc}" -ne 255 ]] || die 3 "新出口机暂存清理时 SSH 不可达：${path}"
-  [[ "${rc}" -eq 0 ]] || die 1 "新出口机暂存清理失败（rc=${rc}）：${path}；请人工核对"
+  [[ "${rc}" -ne 255 ]] || die 3 "$(L "新出口机暂存清理时 SSH 不可达：${path}" "SSH unreachable while cleaning up staging on the new exit: ${path}")"
+  [[ "${rc}" -eq 0 ]] || die 1 "$(L "新出口机暂存清理失败（rc=${rc}）：${path}；请人工核对" "Cleaning up staging on the new exit failed (rc=${rc}): ${path}; check by hand")"
 }
 
 migrate_install_binary() {
@@ -8117,7 +8273,7 @@ migrate_install_binary() {
   MIGRATE_BINARY_STAGE_OWNER_SHA256="$(sha256_file "${owner_file}")"
   migrate_write_record
   install_remote_binary exit "${MIGRATE_BINARY_STAGE_PATH}" "${MIGRATE_BINARY_STAGE_OWNER_SHA256}" "${owner_file}" "${MIGRATE_BINARY_STAGE_OWNER_TEMP_PATH}"
-  cleanup_remote_stage exit "${MIGRATE_BINARY_STAGE_PATH}" "${MIGRATE_BINARY_STAGE_OWNER_SHA256}" || die 1 '新出口机 binary 暂存清理失败'
+  cleanup_remote_stage exit "${MIGRATE_BINARY_STAGE_PATH}" "${MIGRATE_BINARY_STAGE_OWNER_SHA256}" || die 1 "$(L '新出口机 binary 暂存清理失败' 'Cleaning up the binary staging on the new exit failed')"
   MIGRATE_BINARY_STAGE_OWNER_SHA256=''
   migrate_write_record
   log_info '[migrate] binary done'
@@ -8170,11 +8326,11 @@ migrate_published_state() {
   script="${OP_TMP}/migrate-published.sh"
   write_migrate_published_script "${script}"
   if output="$(ssh_exit_stdin bash -s -- "${CHAIN_ID}" "${MIGRATE_NEW_EXIT_OWNER_SHA256:--}" "${MIGRATE_NEW_EXIT_EXIT_SHA256:--}" "${MIGRATE_NEW_EXIT_SERVICE_SHA256:--}" "${EXIT_ENABLE_LINK_TARGET}" < "${script}")"; then rc=0; else rc="$?"; fi
-  [[ "${rc}" -ne 255 ]] || die 3 '检查新出口机发布情况时 SSH 不可达'
-  [[ "${rc}" -ne 61 ]] || die 1 '新出口机上本链的文件与迁移记录不符（外部改动），不覆盖；请人工核对新出口机 /etc/ownexit-chain'
-  [[ "${rc}" -eq 0 ]] || die 1 "检查新出口机发布情况失败（rc=${rc}）"
+  [[ "${rc}" -ne 255 ]] || die 3 "$(L '检查新出口机发布情况时 SSH 不可达' 'SSH unreachable while checking what is published on the new exit')"
+  [[ "${rc}" -ne 61 ]] || die 1 "$(L '新出口机上本链的文件与迁移记录不符（外部改动），不覆盖；请人工核对新出口机 /etc/ownexit-chain' 'This chain'\''s files on the new exit do not match the migration record (changed externally); not overwriting; check /etc/ownexit-chain on the new exit by hand')"
+  [[ "${rc}" -eq 0 ]] || die 1 "$(L "检查新出口机发布情况失败（rc=${rc}）" "Checking what is published on the new exit failed (rc=${rc})")"
   output="$(printf '%s\n' "${output}" | awk -F= '$1 == "PUBLISHED" {print $2}')"
-  [[ "${output}" =~ ^(none|partial|full)$ ]] || die 1 '新出口机发布情况输出格式异常'
+  [[ "${output}" =~ ^(none|partial|full)$ ]] || die 1 "$(L '新出口机发布情况输出格式异常' 'Unexpected output format from the new exit publish check')"
   printf '%s' "${output}"
 }
 
@@ -8185,10 +8341,10 @@ migrate_choose_port() {
   script="${OP_TMP}/port-check.sh"
   write_port_check_script "${script}"
   candidate="${MIGRATE_NEW_EXIT_REALITY_PORT:-${MIGRATE_OLD_EXIT_REALITY_PORT}}"
-  state="$(ssh_exit_stdin bash -s -- "${candidate}" < "${script}")" || die 3 '新出口机端口检查失败'
+  state="$(ssh_exit_stdin bash -s -- "${candidate}" < "${script}")" || die 3 "$(L '新出口机端口检查失败' 'Checking ports on the new exit failed')"
   if [[ "${state}" != free ]]; then
-    candidate="$(choose_remote_port exit)" || die 3 '无法在新出口机选择 Reality 端口'
-    log_info "[migrate] 新出口机上端口 ${MIGRATE_NEW_EXIT_REALITY_PORT:-${MIGRATE_OLD_EXIT_REALITY_PORT}} 已被占用，改用 ${candidate}"
+    candidate="$(choose_remote_port exit)" || die 3 "$(L '无法在新出口机选择 Reality 端口' 'Cannot choose a Reality port on the new exit')"
+    log_info "$(L "[migrate] 新出口机上端口 ${MIGRATE_NEW_EXIT_REALITY_PORT:-${MIGRATE_OLD_EXIT_REALITY_PORT}} 已被占用，改用 ${candidate}" "[migrate] Port ${MIGRATE_NEW_EXIT_REALITY_PORT:-${MIGRATE_OLD_EXIT_REALITY_PORT}} is already in use on the new exit; using ${candidate} instead")"
   fi
   MIGRATE_NEW_EXIT_REALITY_PORT="${candidate}"
   MIGRATE_NEW_RELAY_TARGET="${MIGRATE_NEW_EXIT_HOST}:${candidate}"
@@ -8215,24 +8371,24 @@ MIGRATE_READ_CONFIG
   if b64="$(ssh_exit_stdin bash -s -- "${CHAIN_ID}" "${MIGRATE_OLD_EXIT_EXIT_SHA256}" < "${script}")"; then rc=0; else rc="$?"; fi
   case "${rc}" in
     0) ;;
-    255) die 3 '读取旧出口机配置时 SSH 不可达；旧出口机恢复后重跑，或 --abort 放弃迁移' ;;
-    61|62) die 1 '旧出口机上本链的配置身份或哈希与 state 不符，拒绝搬运；请人工核对' ;;
-    *) die 1 "读取旧出口机配置失败（rc=${rc}）" ;;
+    255) die 3 "$(L '读取旧出口机配置时 SSH 不可达；旧出口机恢复后重跑，或 --abort 放弃迁移' 'SSH unreachable while reading the old exit'\''s configuration; rerun once the old exit is back, or give up the migration with --abort')" ;;
+    61|62) die 1 "$(L '旧出口机上本链的配置身份或哈希与 state 不符，拒绝搬运；请人工核对' 'This chain'\''s configuration on the old exit does not match the state in identity or hash; refusing to move it; check by hand')" ;;
+    *) die 1 "$(L "读取旧出口机配置失败（rc=${rc}）" "Reading the old exit's configuration failed (rc=${rc})")" ;;
   esac
-  [[ "${b64}" =~ ^[A-Za-z0-9+/]+=*$ ]] || die 1 '旧出口机返回的配置编码异常'
+  [[ "${b64}" =~ ^[A-Za-z0-9+/]+=*$ ]] || die 1 "$(L '旧出口机返回的配置编码异常' 'The configuration returned by the old exit has an unexpected encoding')"
   migrate_use_exit new
   target="${MIGRATE_CONFIG_STAGE_PATH}/${CHAIN_ID}.exit.json"
   # 进程替换是管道，不落本机临时文件（bash 3.2 的 here-string 会写临时文件，不能用）。
   if ssh_exit_stdin "set -C; umask 077; base64 -d > '${target}' && chown root:root '${target}' && chmod 600 '${target}'" < <(printf '%s\n' "${b64}"); then rc=0; else rc="$?"; fi
   b64=''
-  [[ "${rc}" -eq 0 ]] || die 1 "写入新出口机配置暂存失败（rc=${rc}）"
-  remote_hash="$(ssh_exit sha256sum "${target}" | awk '{print $1}')" || die 3 '新出口机配置哈希读取失败'
-  [[ "${remote_hash}" == "${MIGRATE_OLD_EXIT_EXIT_SHA256}" ]] || die 1 '新出口机上的配置哈希与旧出口机不一致'
+  [[ "${rc}" -eq 0 ]] || die 1 "$(L "写入新出口机配置暂存失败（rc=${rc}）" "Writing the configuration staging on the new exit failed (rc=${rc})")"
+  remote_hash="$(ssh_exit sha256sum "${target}" | awk '{print $1}')" || die 3 "$(L '新出口机配置哈希读取失败' 'Reading the configuration hash on the new exit failed')"
+  [[ "${remote_hash}" == "${MIGRATE_OLD_EXIT_EXIT_SHA256}" ]] || die 1 "$(L '新出口机上的配置哈希与旧出口机不一致' 'The configuration hash on the new exit differs from the old exit'\''s')"
   log_info "[migrate] exit config transferred sha256=${remote_hash:0:12}"
   if [[ "${MIGRATE_NEW_EXIT_REALITY_PORT}" != "${MIGRATE_OLD_EXIT_REALITY_PORT}" ]]; then
     # 与 rotate 的 apply_break_port 同一精确匹配：listen_port 行必须恰好 1 行，否则不改。
     if ssh_exit "awk -v from='    \"listen_port\": ${MIGRATE_OLD_EXIT_REALITY_PORT},' -v to='    \"listen_port\": ${MIGRATE_NEW_EXIT_REALITY_PORT},' '{ if (\$0 == from) { print to; n++ } else print } END { exit n == 1 ? 0 : 3 }' '${target}' > '${target}.port' && chown root:root '${target}.port' && chmod 600 '${target}.port' && mv -f '${target}.port' '${target}'"; then rc=0; else rc="$?"; fi
-    [[ "${rc}" -eq 0 ]] || die 1 "新出口机配置的 listen_port 改写失败（rc=${rc}）"
+    [[ "${rc}" -eq 0 ]] || die 1 "$(L "新出口机配置的 listen_port 改写失败（rc=${rc}）" "Rewriting listen_port in the new exit's configuration failed (rc=${rc})")"
     log_info "[migrate] listen_port ${MIGRATE_OLD_EXIT_REALITY_PORT} -> ${MIGRATE_NEW_EXIT_REALITY_PORT}"
   fi
 }
@@ -8248,7 +8404,7 @@ migrate_stage_config() {
   MIGRATE_NEW_EXIT_EXIT_SHA256=''
   MIGRATE_NEW_EXIT_SERVICE_SHA256=''
   migrate_write_record
-  create_remote_stage exit "${MIGRATE_CONFIG_STAGE_PATH}" "${MIGRATE_CONFIG_STAGE_OWNER_TEMP_PATH}" "${stage_owner}" "${MIGRATE_CONFIG_STAGE_OWNER_SHA256}" || die 1 '新出口机配置暂存创建失败'
+  create_remote_stage exit "${MIGRATE_CONFIG_STAGE_PATH}" "${MIGRATE_CONFIG_STAGE_OWNER_TEMP_PATH}" "${stage_owner}" "${MIGRATE_CONFIG_STAGE_OWNER_SHA256}" || die 1 "$(L '新出口机配置暂存创建失败' 'Creating the configuration staging on the new exit failed')"
   migrate_transfer_exit_config
   # owner 里是新主机指纹、新配置摘要与原部署 ID（CONFIG_SHA256 此时已是新值）。
   owner_file="${OP_TMP}/migrate-exit-owner.env"
@@ -8257,16 +8413,16 @@ migrate_stage_config() {
   relay_source='-'
   if [[ "${EXIT_SOURCE_FILTER}" == managed ]]; then
     relay_source="$(detect_relay_source_ip)"
-    [[ "${EXIT_NFT_PATH}" == /* ]] || die 1 '没有取得新出口机 nft 路径，无法配置 managed 白名单'
-    log_info "[migrate] 新出口机白名单放行来源=${relay_source}（EXIT_SOURCE_FILTER=managed）"
+    [[ "${EXIT_NFT_PATH}" == /* ]] || die 1 "$(L '没有取得新出口机 nft 路径，无法配置 managed 白名单' 'No nft path obtained on the new exit, so the managed allow-list cannot be configured')"
+    log_info "$(L "[migrate] 新出口机白名单放行来源=${relay_source}（EXIT_SOURCE_FILTER=managed）" "[migrate] New exit allow-list admits source=${relay_source} (EXIT_SOURCE_FILTER=managed)")"
   fi
   script="${OP_TMP}/prepare-exit.sh"
   write_prepare_exit_script "${script}"
-  output="$(ssh_exit_stdin bash -s -- "${MIGRATE_CONFIG_STAGE_PATH}" "${MIGRATE_CONFIG_STAGE_OWNER_SHA256}" "${REMOTE_BIN}" "${CHAIN_ID}" "${MIGRATE_NEW_EXIT_REALITY_PORT}" "${REALITY_SERVER_NAME}" "${owner_b64}" "${EXIT_SOURCE_FILTER}" "${EXIT_NFT_PATH:--}" "${relay_source}" reuse < "${script}")" || die 1 '新出口机 owner / unit 暂存失败'
+  output="$(ssh_exit_stdin bash -s -- "${MIGRATE_CONFIG_STAGE_PATH}" "${MIGRATE_CONFIG_STAGE_OWNER_SHA256}" "${REMOTE_BIN}" "${CHAIN_ID}" "${MIGRATE_NEW_EXIT_REALITY_PORT}" "${REALITY_SERVER_NAME}" "${owner_b64}" "${EXIT_SOURCE_FILTER}" "${EXIT_NFT_PATH:--}" "${relay_source}" reuse < "${script}")" || die 1 "$(L '新出口机 owner / unit 暂存失败' 'Owner / unit staging on the new exit failed')"
   MIGRATE_NEW_EXIT_OWNER_SHA256="$(printf '%s\n' "${output}" | awk -F= '$1 == "EXIT_OWNER_SHA256" {print $2}')"
   MIGRATE_NEW_EXIT_EXIT_SHA256="$(printf '%s\n' "${output}" | awk -F= '$1 == "EXIT_EXIT_SHA256" {print $2}')"
   MIGRATE_NEW_EXIT_SERVICE_SHA256="$(printf '%s\n' "${output}" | awk -F= '$1 == "EXIT_SERVICE_SHA256" {print $2}')"
-  [[ "${MIGRATE_NEW_EXIT_OWNER_SHA256}" =~ ^[0-9a-f]{64}$ && "${MIGRATE_NEW_EXIT_EXIT_SHA256}" =~ ^[0-9a-f]{64}$ && "${MIGRATE_NEW_EXIT_SERVICE_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die 1 '新出口机暂存哈希不完整'
+  [[ "${MIGRATE_NEW_EXIT_OWNER_SHA256}" =~ ^[0-9a-f]{64}$ && "${MIGRATE_NEW_EXIT_EXIT_SHA256}" =~ ^[0-9a-f]{64}$ && "${MIGRATE_NEW_EXIT_SERVICE_SHA256}" =~ ^[0-9a-f]{64}$ ]] || die 1 "$(L '新出口机暂存哈希不完整' 'Staging hashes on the new exit are incomplete')"
   migrate_write_record
   migrate_use_exit new
   log_info "[migrate] stage done exit_sha256=${MIGRATE_NEW_EXIT_EXIT_SHA256:0:12}"
@@ -8331,10 +8487,10 @@ migrate_promote() {
   [[ "${OWNEXIT_TEST_MIGRATE_STOP_AFTER:-}" != link1 ]] || test_stop=link1
   if ssh_exit_stdin bash -s -- "${MIGRATE_CONFIG_STAGE_PATH}" "${MIGRATE_CONFIG_STAGE_OWNER_SHA256}" "${CHAIN_ID}" "${MIGRATE_NEW_EXIT_OWNER_SHA256}" "${MIGRATE_NEW_EXIT_EXIT_SHA256}" "${MIGRATE_NEW_EXIT_SERVICE_SHA256}" "${EXIT_ENABLE_LINK_TARGET}" "${test_stop}" < "${script}"; then rc=0; else rc="$?"; fi
   if [[ "${rc}" -eq 99 && "${test_stop}" == link1 ]]; then
-    log_warn '测试钩子：migrate-exit 在 link1 之后停止'
+    log_warn "$(L '测试钩子：migrate-exit 在 link1 之后停止' 'Test hook: migrate-exit stops after link1')"
     exit 99
   fi
-  [[ "${rc}" -eq 0 ]] || die 1 "新出口机本链文件发布失败（rc=${rc}）"
+  [[ "${rc}" -eq 0 ]] || die 1 "$(L "新出口机本链文件发布失败（rc=${rc}）" "Publishing this chain's files on the new exit failed (rc=${rc})")"
 }
 
 # 发布新出口机上的本链文件并启动服务。只做 daemon-reload 与 start（同 activate_exit_exit）：启用链接已由 promote 创建。
@@ -8348,17 +8504,17 @@ migrate_publish() {
       ;;
     partial)
       # 暂存只在发布与启动全部完成后才清理；暂存不在而文件不全，只可能是外部改动。
-      remote_path_absent exit "${MIGRATE_CONFIG_STAGE_PATH}" && die 1 '新出口机上本链文件部分发布但暂存已不在；请 --abort 后重新迁移'
+      remote_path_absent exit "${MIGRATE_CONFIG_STAGE_PATH}" && die 1 "$(L '新出口机上本链文件部分发布但暂存已不在；请 --abort 后重新迁移' 'This chain'\''s files are partly published on the new exit but the staging is gone; run --abort and migrate again')"
       migrate_promote
       ;;
     full) ;;
   esac
   unit="ownexit-chain-exit-${CHAIN_ID}.service"
-  ssh_exit systemctl daemon-reload || die 1 '新出口机 daemon-reload 失败'
-  ssh_exit systemctl start "${unit}" || die 1 '新出口机 service 启动失败'
-  [[ "$(ssh_exit systemctl is-active "${unit}")" == active ]] || die 1 '新出口机 service 未进入 active'
-  [[ "$(ssh_exit systemctl is-enabled "${unit}")" == enabled ]] || die 1 '新出口机 service 未按预期 enabled'
-  ssh_exit "ss -H -ltnp | grep -q ':${MIGRATE_NEW_EXIT_REALITY_PORT} '" || die 1 '新出口机 Reality 端口未监听'
+  ssh_exit systemctl daemon-reload || die 1 "$(L '新出口机 daemon-reload 失败' 'daemon-reload on the new exit failed')"
+  ssh_exit systemctl start "${unit}" || die 1 "$(L '新出口机 service 启动失败' 'Starting the service on the new exit failed')"
+  [[ "$(ssh_exit systemctl is-active "${unit}")" == active ]] || die 1 "$(L '新出口机 service 未进入 active' 'The service on the new exit did not become active')"
+  [[ "$(ssh_exit systemctl is-enabled "${unit}")" == enabled ]] || die 1 "$(L '新出口机 service 未按预期 enabled' 'The service on the new exit is not enabled as expected')"
+  ssh_exit "ss -H -ltnp | grep -q ':${MIGRATE_NEW_EXIT_REALITY_PORT} '" || die 1 "$(L '新出口机 Reality 端口未监听' 'The Reality port on the new exit is not listening')"
   migrate_cleanup_stage CONFIG
   log_info "[migrate] publish done exit=${MIGRATE_NEW_EXIT_HOST}:${MIGRATE_NEW_EXIT_REALITY_PORT}"
   migrate_test_stop publish
@@ -8372,15 +8528,15 @@ migrate_switch_relay() {
   script="${OP_TMP}/rehost-remote.sh"
   write_rehost_remote_script "${script}"
   if output="$(ssh_relay_stdin bash -s -- relay "${CHAIN_ID}" "${MIGRATE_STATE_RELAY_OWNER_SHA256}" "${MIGRATE_OLD_CONFIG_SHA256}" "${MIGRATE_NEW_CONFIG_SHA256}" "${MIGRATE_STATE_RELAY_SERVICE_SHA256}" "${MIGRATE_OLD_RELAY_TARGET}" "${MIGRATE_NEW_RELAY_TARGET}" < "${script}")"; then rc=0; else rc="$?"; fi
-  [[ "${rc}" -eq 0 ]] || die 1 "中转切换失败：$(rehost_remote_reason "${rc}")"
+  [[ "${rc}" -eq 0 ]] || die 1 "$(L "中转切换失败：$(rehost_remote_reason "${rc}")" "Switching the relay failed: $(rehost_remote_reason "${rc}")")"
   owner_result="$(rehost_output_value "${output}" OWNER)"
   owner_hash="$(rehost_output_value "${output}" OWNER_SHA256)"
   service_result="$(rehost_output_value "${output}" SERVICE)"
   service_hash="$(rehost_output_value "${output}" SERVICE_SHA256)"
   restarted="$(rehost_output_value "${output}" RESTARTED)"
-  [[ "${owner_result}" =~ ^(changed|already)$ && "${owner_hash}" =~ ^[0-9a-f]{64}$ ]] || die 1 '中转 owner 切换输出格式异常'
-  [[ "${service_result}" =~ ^(changed|already)$ && "${service_hash}" =~ ^[0-9a-f]{64}$ ]] || die 1 '中转 service 切换输出格式异常'
-  [[ "${restarted}" =~ ^(yes|no|inactive)$ ]] || die 1 '中转 service 重启结果格式异常'
+  [[ "${owner_result}" =~ ^(changed|already)$ && "${owner_hash}" =~ ^[0-9a-f]{64}$ ]] || die 1 "$(L '中转 owner 切换输出格式异常' 'Unexpected output format from the relay owner switch')"
+  [[ "${service_result}" =~ ^(changed|already)$ && "${service_hash}" =~ ^[0-9a-f]{64}$ ]] || die 1 "$(L '中转 service 切换输出格式异常' 'Unexpected output format from the relay service switch')"
+  [[ "${restarted}" =~ ^(yes|no|inactive)$ ]] || die 1 "$(L '中转 service 重启结果格式异常' 'Unexpected format of the relay service restart result')"
   RELAY_OWNER_SHA256="${owner_hash}"
   RELAY_SERVICE_SHA256="${service_hash}"
   log_info "[migrate] relay owner=${owner_result} service=${service_result} restarted=${restarted} target=${MIGRATE_NEW_RELAY_TARGET}"
@@ -8389,23 +8545,23 @@ migrate_switch_relay() {
 # 提交 state：出口相关字段与两个中转哈希取新值，其余字段（部署 ID、凭据、中转端口、基线、资产哈希）原样沿用。
 migrate_commit_state() {
   local audit payload
-  ensure_private_dir "${CHAIN_STATE_DIR}/audit" || die 1 'migrate audit 父目录不安全'
+  ensure_private_dir "${CHAIN_STATE_DIR}/audit" || die 1 "$(L 'migrate audit 父目录不安全' 'The migrate audit parent directory is unsafe')"
   audit="${CHAIN_STATE_DIR}/audit/migrated.${DEPLOYMENT_ID}.${OPERATION_ID}"
-  [[ ! -e "${audit}" && ! -L "${audit}" ]] || die 1 "migrate audit 目录碰撞：${audit}"
-  mkdir "${audit}" || die 1 'migrate audit 目录创建失败'
-  chmod 700 "${audit}" || die 1 'migrate audit 目录权限设置失败'
+  [[ ! -e "${audit}" && ! -L "${audit}" ]] || die 1 "$(L "migrate audit 目录碰撞：${audit}" "Migrate audit directory collision: ${audit}")"
+  mkdir "${audit}" || die 1 "$(L 'migrate audit 目录创建失败' 'Creating the migrate audit directory failed')"
+  chmod 700 "${audit}" || die 1 "$(L 'migrate audit 目录权限设置失败' 'Setting the migrate audit directory'\''s permissions failed')"
   # 直接写最终文件名：audit 下以 . 开头的 *.tmp 会被残留检查判 drift。
-  cp "${STATE_FILE}" "${audit}/state.env" || die 1 'migrate 旧 state 归档失败'
-  chmod 600 "${audit}/state.env" || die 1 'migrate 旧 state 归档权限设置失败'
-  [[ "$(sha256_file "${audit}/state.env")" == "$(sha256_file "${STATE_FILE}")" ]] || die 1 'migrate 旧 state 归档复核失败'
+  cp "${STATE_FILE}" "${audit}/state.env" || die 1 "$(L 'migrate 旧 state 归档失败' 'Archiving the old state for migrate failed')"
+  chmod 600 "${audit}/state.env" || die 1 "$(L 'migrate 旧 state 归档权限设置失败' 'Setting permissions on the archived old state for migrate failed')"
+  [[ "$(sha256_file "${audit}/state.env")" == "$(sha256_file "${STATE_FILE}")" ]] || die 1 "$(L 'migrate 旧 state 归档复核失败' 'Re-checking the archived old state for migrate failed')"
   # migrate_use_exit new 已把出口字段设为新值；这里再显式确认配置摘要，防止前面的探针改写过全局变量。
   migrate_use_exit new
   CONFIG_SHA256="${MIGRATE_NEW_CONFIG_SHA256}"
   payload="${OP_TMP}/state-payload"
-  render_state_payload "${payload}" || die 1 'migrate state payload 生成失败'
+  render_state_payload "${payload}" || die 1 "$(L 'migrate state payload 生成失败' 'Generating the migrate state payload failed')"
   write_checksummed_file "${STATE_FILE}" replace "${payload}"
   migrate_test_stop state-nophase
-  if probe_state_file "${STATE_FILE}"; then :; else die 1 "migrate 后 state 与新配置绑定失败：${STATE_PROBE_REASON}"; fi
+  if probe_state_file "${STATE_FILE}"; then :; else die 1 "$(L "migrate 后 state 与新配置绑定失败：${STATE_PROBE_REASON}" "Binding the state to the new configuration after migrate failed: ${STATE_PROBE_REASON}")"; fi
   MIGRATE_PHASE=committed
   migrate_write_record
   log_info "[migrate] state committed audit=${audit}"
@@ -8449,7 +8605,7 @@ migrate_execute() {
   migrate_test_stop relay
   # 提交前核验：新出口机与中转都按新哈希健康，并经中转端口真实走一次代理。
   if probe_remote_resources yes; then rc=0; else rc="$?"; fi
-  [[ "${rc}" -eq 0 ]] || die 1 "提交前核验失败（rc=${rc}）：新出口机或中转的文件、unit、进程、listener 与预期不符；修好后重跑"
+  [[ "${rc}" -eq 0 ]] || die 1 "$(L "提交前核验失败（rc=${rc}）：新出口机或中转的文件、unit、进程、listener 与预期不符；修好后重跑" "The pre-commit check failed (rc=${rc}): files, units, processes or listeners on the new exit or the relay are not as expected; fix them and rerun")"
   smoke_from_relay 127.0.0.1 "${RELAY_PORT}" relay-full
   migrate_commit_state
 }
@@ -8493,10 +8649,10 @@ migrate_cleanup() {
   migrate_check_binding
   remote_platform_preflight
   if probe_remote_resources yes; then rc=0; else rc="$?"; fi
-  [[ "${rc}" -eq 0 ]] || die 1 "新链不健康（rc=${rc}），暂不清理旧出口机；先运行 verify 查明"
+  [[ "${rc}" -eq 0 ]] || die 1 "$(L "新链不健康（rc=${rc}），暂不清理旧出口机；先运行 verify 查明" "The new chain is unhealthy (rc=${rc}); not cleaning up the old exit yet; run verify first to find out why")"
   log_info "[migrate] phase=cleanup old=${MIGRATE_OLD_EXIT_HOST}"
   if [[ "${OWNEXIT_TEST_MIGRATE_SKIP_CLEANUP:-}" == 1 ]]; then
-    log_warn '测试钩子：跳过旧出口机清理'
+    log_warn "$(L '测试钩子：跳过旧出口机清理' 'Test hook: skipping the old exit cleanup')"
     MIGRATE_CLEANUP_RESULT=pending
     return 0
   fi
@@ -8512,16 +8668,16 @@ migrate_cleanup() {
       leftover) if ssh_exit_stdin bash -s -- "${CHAIN_ID}" < "${script}"; then rc=0; else rc="$?"; fi ;;
     esac
     if [[ "${rc}" -eq 255 ]]; then
-      log_warn "[migrate] old exit cleanup pending: ssh unreachable（${MIGRATE_OLD_EXIT_HOST}，step=${step}）；旧机器恢复后重跑 migrate-exit 补做，永久失联用 --abandon-cleanup"
+      log_warn "$(L "[migrate] old exit cleanup pending: ssh unreachable（${MIGRATE_OLD_EXIT_HOST}，step=${step}）；旧机器恢复后重跑 migrate-exit 补做，永久失联用 --abandon-cleanup" "[migrate] old exit cleanup pending: ssh unreachable (${MIGRATE_OLD_EXIT_HOST}, step=${step}); rerun migrate-exit once the old machine is back, or use --abandon-cleanup if it is gone for good")"
       MIGRATE_CLEANUP_RESULT=pending
       migrate_use_exit new
       return 0
     fi
-    [[ "${rc}" -eq 0 ]] || die 1 "旧出口机清理失败（step=${step} rc=${rc}）：文件身份或哈希与迁移记录不符；请人工核对 ${MIGRATE_OLD_EXIT_HOST}"
+    [[ "${rc}" -eq 0 ]] || die 1 "$(L "旧出口机清理失败（step=${step} rc=${rc}）：文件身份或哈希与迁移记录不符；请人工核对 ${MIGRATE_OLD_EXIT_HOST}" "Cleaning up the old exit failed (step=${step} rc=${rc}): file identity or hash does not match the migration record; check ${MIGRATE_OLD_EXIT_HOST} by hand")"
   done
-  rm -f "${MIGRATE_FILE}" || die 1 '迁移记录删除失败'
+  rm -f "${MIGRATE_FILE}" || die 1 "$(L '迁移记录删除失败' 'Deleting the migration record failed')"
   MIGRATE_CLEANUP_RESULT='done'
-  log_info "[migrate] old exit cleanup done（${MIGRATE_OLD_EXIT_HOST}）"
+  log_info "$(L "[migrate] old exit cleanup done（${MIGRATE_OLD_EXIT_HOST}）" "[migrate] old exit cleanup done (${MIGRATE_OLD_EXIT_HOST})")"
   migrate_use_exit new
 }
 
@@ -8530,7 +8686,7 @@ migrate_abort() {
   local rc key
   case "${MIGRATE_STAGE}" in
     recorded|executing) ;;
-    *) die 2 '中转已切换或 state 已提交，不能 --abort；重跑 migrate-exit 完成迁移' ;;
+    *) die 2 "$(L '中转已切换或 state 已提交，不能 --abort；重跑 migrate-exit 完成迁移' 'The relay has been switched or the state committed, so --abort is not possible; rerun migrate-exit to finish the migration')" ;;
   esac
   if [[ "${MIGRATE_STAGE}" == executing ]]; then
     migrate_check_binding
@@ -8543,23 +8699,23 @@ migrate_abort() {
     EXIT_EXIT_SHA256="${MIGRATE_NEW_EXIT_EXIT_SHA256:--}"
     EXIT_SERVICE_SHA256="${MIGRATE_NEW_EXIT_SERVICE_SHA256:--}"
     if stop_chain_role exit; then rc=0; else rc="$?"; fi
-    [[ "${rc}" -ne 255 ]] || die 3 '新出口机 SSH 不可达；恢复后重跑 --abort'
-    [[ "${rc}" -eq 0 ]] || die 1 "新出口机上本链的文件与迁移记录不符（rc=${rc}），不拆除；请人工核对"
-    remove_chain_role_files exit || die 1 '新出口机删除本链文件失败'
-    verify_removed_chain_role exit || die 1 '新出口机本链文件删除后复核失败'
-    [[ -n "${MIGRATE_CONFIG_BACKUP}" ]] || die 1 '迁移记录缺少配置备份路径'
-    require_secure_user_file "${MIGRATE_CONFIG_BACKUP}" 600 || die 1 "配置备份身份或权限异常：${MIGRATE_CONFIG_BACKUP}"
+    [[ "${rc}" -ne 255 ]] || die 3 "$(L '新出口机 SSH 不可达；恢复后重跑 --abort' 'The new exit is unreachable over SSH; rerun --abort once it is back')"
+    [[ "${rc}" -eq 0 ]] || die 1 "$(L "新出口机上本链的文件与迁移记录不符（rc=${rc}），不拆除；请人工核对" "This chain's files on the new exit do not match the migration record (rc=${rc}); not tearing them down; check by hand")"
+    remove_chain_role_files exit || die 1 "$(L '新出口机删除本链文件失败' 'Deleting this chain'\''s files on the new exit failed')"
+    verify_removed_chain_role exit || die 1 "$(L '新出口机本链文件删除后复核失败' 'The re-check after deleting this chain'\''s files on the new exit failed')"
+    [[ -n "${MIGRATE_CONFIG_BACKUP}" ]] || die 1 "$(L '迁移记录缺少配置备份路径' 'The migration record lacks the configuration backup path')"
+    require_secure_user_file "${MIGRATE_CONFIG_BACKUP}" 600 || die 1 "$(L "配置备份身份或权限异常：${MIGRATE_CONFIG_BACKUP}" "The configuration backup's ownership or permissions are abnormal: ${MIGRATE_CONFIG_BACKUP}")"
     for key in EXIT_HOST:OLD_EXIT_HOST EXIT_SSH_PORT:OLD_EXIT_SSH_PORT EXIT_SSH_KEY:OLD_EXIT_SSH_KEY EXPECTED_EXIT_IPV4:OLD_EXPECTED_EXIT_IPV4; do
-      eval "[[ \"\$(kv_get \"\${MIGRATE_CONFIG_BACKUP}\" ${key%%:*})\" == \"\${MIGRATE_${key#*:}}\" ]]" || die 1 "配置备份里的 ${key%%:*} 与迁移前的值不符，不恢复；请人工核对 ${MIGRATE_CONFIG_BACKUP}"
+      eval "[[ \"\$(kv_get \"\${MIGRATE_CONFIG_BACKUP}\" ${key%%:*})\" == \"\${MIGRATE_${key#*:}}\" ]]" || die 1 "$(L "配置备份里的 ${key%%:*} 与迁移前的值不符，不恢复；请人工核对 ${MIGRATE_CONFIG_BACKUP}" "${key%%:*} in the configuration backup differs from the pre-migration value; not restoring; check ${MIGRATE_CONFIG_BACKUP} by hand")"
     done
-    cp "${MIGRATE_CONFIG_BACKUP}" "$(dirname "${CONFIG_PATH}")/.$(basename "${CONFIG_PATH}").abort.$$.tmp" || die 1 '配置恢复失败'
-    chmod 600 "$(dirname "${CONFIG_PATH}")/.$(basename "${CONFIG_PATH}").abort.$$.tmp" || die 1 '配置恢复失败'
-    mv -f "$(dirname "${CONFIG_PATH}")/.$(basename "${CONFIG_PATH}").abort.$$.tmp" "${CONFIG_PATH}" || die 1 '配置恢复失败'
+    cp "${MIGRATE_CONFIG_BACKUP}" "$(dirname "${CONFIG_PATH}")/.$(basename "${CONFIG_PATH}").abort.$$.tmp" || die 1 "$(L '配置恢复失败' 'Restoring the configuration failed')"
+    chmod 600 "$(dirname "${CONFIG_PATH}")/.$(basename "${CONFIG_PATH}").abort.$$.tmp" || die 1 "$(L '配置恢复失败' 'Restoring the configuration failed')"
+    mv -f "$(dirname "${CONFIG_PATH}")/.$(basename "${CONFIG_PATH}").abort.$$.tmp" "${CONFIG_PATH}" || die 1 "$(L '配置恢复失败' 'Restoring the configuration failed')"
     log_info "[migrate] config restored from ${MIGRATE_CONFIG_BACKUP}"
   fi
-  rm -f "${MIGRATE_FILE}" || die 1 '迁移记录删除失败'
+  rm -f "${MIGRATE_FILE}" || die 1 "$(L '迁移记录删除失败' 'Deleting the migration record failed')"
   printf 'migrate=aborted chain=%s\n' "${CHAIN_ID}"
-  log_info "migrate-exit 已中止；chain=${CHAIN_ID} 仍使用出口机 ${MIGRATE_OLD_EXIT_HOST}；elapsed=$(elapsed_seconds)s"
+  log_info "$(L "migrate-exit 已中止；chain=${CHAIN_ID} 仍使用出口机 ${MIGRATE_OLD_EXIT_HOST}；elapsed=$(elapsed_seconds)s" "migrate-exit aborted; chain=${CHAIN_ID} still uses the exit ${MIGRATE_OLD_EXIT_HOST}; elapsed=$(elapsed_seconds)s")"
 }
 
 migrate_exit_chain() {
@@ -8568,25 +8724,25 @@ migrate_exit_chain() {
   if acquire_chain_lock 1; then rc=0; else rc="$?"; fi
   case "${rc}" in
     0) ;;
-    10) die 5 '同一 chain 有活动锁（busy）；稍后重试' ;;
-    11) die 5 '存在 stale lock；先运行 verify 或其它 mutating 命令归档' ;;
-    *) die 5 '无法安全取得 chain lock' ;;
+    10) die 5 "$(L '同一 chain 有活动锁（busy）；稍后重试' 'The same chain holds an active lock (busy); try again later')" ;;
+    11) die 5 "$(L '存在 stale lock；先运行 verify 或其它 mutating 命令归档' 'A stale lock exists; run verify or another modifying command first to archive it')" ;;
+    *) die 5 "$(L '无法安全取得 chain lock' 'Cannot safely acquire the chain lock')" ;;
   esac
   require_local_dependencies
-  [[ ! -e "${JOURNAL_FILE}" && ! -L "${JOURNAL_FILE}" ]] || die 5 '存在 incomplete transaction，migrate-exit 拒绝'
+  [[ ! -e "${JOURNAL_FILE}" && ! -L "${JOURNAL_FILE}" ]] || die 5 "$(L '存在 incomplete transaction，migrate-exit 拒绝' 'An incomplete transaction exists; migrate-exit refuses to run')"
   MIGRATE_FILE="${CHAIN_STATE_DIR}/migrate-exit.env"
   # 上次进程在写记录时中断留下的临时文件：身份正常才删。
   for leftover in "${CHAIN_STATE_DIR}"/.migrate-exit.env.*.tmp; do
     [[ -e "${leftover}" || -L "${leftover}" ]] || continue
-    require_secure_user_file "${leftover}" 600 || die 5 "迁移记录临时文件身份异常：${leftover}"
-    rm -f "${leftover}" || die 5 "迁移记录临时文件删除失败：${leftover}"
+    require_secure_user_file "${leftover}" 600 || die 5 "$(L "迁移记录临时文件身份异常：${leftover}" "A migration record temporary file has an unexpected identity: ${leftover}")"
+    rm -f "${leftover}" || die 5 "$(L "迁移记录临时文件删除失败：${leftover}" "Deleting a migration record temporary file failed: ${leftover}")"
   done
   if [[ ! -e "${MIGRATE_FILE}" && ! -L "${MIGRATE_FILE}" ]]; then
-    [[ "${MIGRATE_MODE}" == run ]] || die 2 "链 ${CHAIN_ID} 没有进行中的出口机迁移"
-    [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 'chain 尚未部署'
+    [[ "${MIGRATE_MODE}" == run ]] || die 2 "$(L "链 ${CHAIN_ID} 没有进行中的出口机迁移" "Chain ${CHAIN_ID} has no exit migration in progress")"
+    [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 "$(L 'chain 尚未部署' 'The chain is not deployed yet')"
     # 先校验 --to 再做任何 ssh：值会写进临时 ssh 配置的 HostName 行，未校验的值（主机名、含换行）不能进去。
-    is_ipv4 "${MIGRATE_TO}" || die 2 "--to 必须是 IPv4：${MIGRATE_TO}"
-    [[ "${MIGRATE_TO}" != "${RELAY_HOST}" ]] || die 2 '--to 不能是中转机'
+    is_ipv4 "${MIGRATE_TO}" || die 2 "$(L "--to 必须是 IPv4：${MIGRATE_TO}" "--to must be an IPv4: ${MIGRATE_TO}")"
+    [[ "${MIGRATE_TO}" != "${RELAY_HOST}" ]] || die 2 "$(L '--to 不能是中转机' '--to cannot be the relay')"
     # 同一台出口机只换了 IP 时原地切换（不搬配置、不换凭据），三个同机分支都在打印结果后直接返回，
     # 不能落到下面跨机迁移的阶段推导与清理（那里要求有迁移记录）。
     if probe_state_file "${STATE_FILE}"; then rc=0; else rc="$?"; fi
@@ -8602,9 +8758,9 @@ migrate_exit_chain() {
         return 0
       fi
       if [[ "${rc}" == 1 ]]; then
-        log_info "[migrate] 新地址 ${MIGRATE_TO} 的主机指纹与当前出口机不同（换了机器），按跨机迁移处理"
+        log_info "$(L "[migrate] 新地址 ${MIGRATE_TO} 的主机指纹与当前出口机不同（换了机器），按跨机迁移处理" "[migrate] The host fingerprint of the new address ${MIGRATE_TO} differs from the current exit (a new machine); treating it as a move to another machine")"
       else
-        log_info "[migrate] 经中转连不上新地址 ${MIGRATE_TO}（取不到主机指纹），按跨机迁移处理"
+        log_info "$(L "[migrate] 经中转连不上新地址 ${MIGRATE_TO}（取不到主机指纹），按跨机迁移处理" "[migrate] Cannot reach the new address ${MIGRATE_TO} through the relay (no host fingerprint); treating it as a move to another machine")"
       fi
     elif [[ "${rc}" == 12 && "${EXIT_HOST}" == "${MIGRATE_TO}" ]]; then
       # 配置已指向新地址、state 还是旧地址：上次同机切换在改写配置后中断，或用户按旧做法手改了配置。
@@ -8612,7 +8768,7 @@ migrate_exit_chain() {
       migrate_same_host_port_check
       load_state_for_rehost
       if migrate_probe_same_host; then rc=0; else rc="$?"; fi
-      [[ "${rc}" == 0 ]] || die 3 "新地址 ${MIGRATE_TO} 经中转连不上或不是同一台出口机；配置已指向它但 state 未改，请改回配置里的 EXIT_HOST 或换对地址后重跑"
+      [[ "${rc}" == 0 ]] || die 3 "$(L "新地址 ${MIGRATE_TO} 经中转连不上或不是同一台出口机；配置已指向它但 state 未改，请改回配置里的 EXIT_HOST 或换对地址后重跑" "The new address ${MIGRATE_TO} cannot be reached through the relay or is not the same exit; the configuration already points at it but the state was not changed; change EXIT_HOST in the configuration back, or use the right address, then rerun")"
       migrate_register_hostkey
       rehost_exit_body
       printf 'migrate=rehosted chain=%s exit=%s:%s\n' "${CHAIN_ID}" "${EXIT_HOST}" "${EXIT_REALITY_PORT}"
@@ -8620,11 +8776,11 @@ migrate_exit_chain() {
     fi
     migrate_prepare
   else
-    [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 "迁移记录存在但链没有 state；请人工确认后删除 ${CHAIN_STATE_DIR}/migrate-exit.env"
+    [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 "$(L "迁移记录存在但链没有 state；请人工确认后删除 ${CHAIN_STATE_DIR}/migrate-exit.env" "A migration record exists but the chain has no state; confirm by hand, then delete ${CHAIN_STATE_DIR}/migrate-exit.env")"
     migrate_load_record
     if [[ "${MIGRATE_MODE}" == run ]]; then
       [[ "${MIGRATE_TO}" == "${MIGRATE_NEW_EXIT_HOST}" && "${MIGRATE_TO_PORT}" == "${MIGRATE_NEW_EXIT_SSH_PORT}" ]] \
-        || die 2 "进行中的迁移目标是 ${MIGRATE_NEW_EXIT_HOST}:${MIGRATE_NEW_EXIT_SSH_PORT}；重跑时 --to / --to-port 必须一致（或先 --abort）"
+        || die 2 "$(L "进行中的迁移目标是 ${MIGRATE_NEW_EXIT_HOST}:${MIGRATE_NEW_EXIT_SSH_PORT}；重跑时 --to / --to-port 必须一致（或先 --abort）" "The migration in progress targets ${MIGRATE_NEW_EXIT_HOST}:${MIGRATE_NEW_EXIT_SSH_PORT}; --to / --to-port must be the same when rerunning (or --abort first)")"
     fi
   fi
   migrate_derive_stage
@@ -8635,9 +8791,9 @@ migrate_exit_chain() {
       return 0
       ;;
     abandon)
-      [[ "${MIGRATE_STAGE}" == cleanup ]] || die 2 '迁移尚未提交，不能 --abandon-cleanup；重跑 migrate-exit 或 --abort'
-      log_warn "[migrate] old exit cleanup abandoned; private key remains on ${MIGRATE_OLD_EXIT_HOST}：旧出口机上本链的配置（含私钥）未删除，请自行处理或销毁该机器"
-      rm -f "${MIGRATE_FILE}" || die 1 '迁移记录删除失败'
+      [[ "${MIGRATE_STAGE}" == cleanup ]] || die 2 "$(L '迁移尚未提交，不能 --abandon-cleanup；重跑 migrate-exit 或 --abort' 'The migration is not committed yet, so --abandon-cleanup is not possible; rerun migrate-exit or --abort')"
+      log_warn "$(L "[migrate] old exit cleanup abandoned; private key remains on ${MIGRATE_OLD_EXIT_HOST}：旧出口机上本链的配置（含私钥）未删除，请自行处理或销毁该机器" "[migrate] old exit cleanup abandoned; private key remains on ${MIGRATE_OLD_EXIT_HOST}: this chain's configuration (including the private key) on the old exit was not deleted; deal with it or destroy that machine yourself")"
+      rm -f "${MIGRATE_FILE}" || die 1 "$(L '迁移记录删除失败' 'Deleting the migration record failed')"
       return 0
       ;;
   esac
@@ -8652,7 +8808,7 @@ migrate_exit_chain() {
   ensure_local_assets_match_state
   full_verify
   printf 'migrate=done chain=%s exit=%s:%s old_exit_cleanup=%s\n' "${CHAIN_ID}" "${EXIT_HOST}" "${EXIT_REALITY_PORT}" "${MIGRATE_CLEANUP_RESULT}"
-  log_info "migrate-exit 通过；chain=${CHAIN_ID} exit=${EXIT_HOST}:${EXIT_REALITY_PORT} old_exit_cleanup=${MIGRATE_CLEANUP_RESULT} elapsed=$(elapsed_seconds)s"
+  log_info "$(L "migrate-exit 通过；chain=${CHAIN_ID} exit=${EXIT_HOST}:${EXIT_REALITY_PORT} old_exit_cleanup=${MIGRATE_CLEANUP_RESULT} elapsed=$(elapsed_seconds)s" "migrate-exit passed; chain=${CHAIN_ID} exit=${EXIT_HOST}:${EXIT_REALITY_PORT} old_exit_cleanup=${MIGRATE_CLEANUP_RESULT} elapsed=$(elapsed_seconds)s")"
 }
 
 # ---------- 少敲命令：省略 --id、up、qr、下一步提示、部署前 TUN 自检（docs/feature/feature-usability-v12.md） ----------
@@ -8695,7 +8851,7 @@ resolve_single_chain_config() {
     done
     return 11
   fi
-  log_info "自动选用链 $(basename "${CONFIG_PATH}" .env)（本机唯一）"
+  log_info "$(L "自动选用链 $(basename "${CONFIG_PATH}" .env)（本机唯一）" "Using chain $(basename "${CONFIG_PATH}" .env) automatically (the only one on this computer)")"
 }
 
 # 部署前自检：本机到每个服务器 IP 的出接口是不是代理的 TUN。经 TUN 时部署途中的 SSH 会被代理切断（历史上最常见的翻车），
@@ -8705,22 +8861,21 @@ tun_precheck() {
   local ip iface
   for ip in "$@"; do
     if ! is_ipv4 "${ip}"; then
-      log_warn "目标 ${ip} 不是 IPv4，跳过 TUN 自检"
+      log_warn "$(L "目标 ${ip} 不是 IPv4，跳过 TUN 自检" "Target ${ip} is not IPv4; skipping the TUN self-check")"
       continue
     fi
     iface="$(route_interface "${ip}" || true)"  # 缺 route / ip 命令时管道失败，set -e 下会静默退出；这里只要“取不到就跳过”
     if [[ -z "${iface}" ]]; then
-      log_warn "无法判定到 ${ip} 的出接口，跳过 TUN 自检"
+      log_warn "$(L "无法判定到 ${ip} 的出接口，跳过 TUN 自检" "Cannot determine the outgoing interface for ${ip}; skipping the TUN self-check")"
       continue
     fi
     interface_is_tunnel "${iface}" || continue
     if [[ "${ALLOW_TUN}" == 1 ]]; then
-      log_warn "到 ${ip} 的路由经过 TUN（${iface}），已加 --allow-tun 继续；部署期间 SSH 可能被代理切断"
+      log_warn "$(L "到 ${ip} 的路由经过 TUN（${iface}），已加 --allow-tun 继续；部署期间 SSH 可能被代理切断" "The route to ${ip} goes through TUN (${iface}); continuing because of --allow-tun; SSH may be cut off by the proxy during deployment")"
       continue
     fi
-    die 3 "到 ${ip} 的路由经过 TUN（${iface}），部署期间 SSH 会被代理切断。
-处理办法：关闭代理的 TUN 模式；或让这些 IP 走物理网卡（Clash Verge 见 docs/manual/clash-direct-ips.md）。
-已按手册加了直连规则且 SSH 正常，或确认要继续：加 --allow-tun。"
+    # 三行说明写成单行 L + 换行符（$'\n' 拼接），保证 check_ui_lang 能认出整条提示都在 L 里。
+    die 3 "$(L "到 ${ip} 的路由经过 TUN（${iface}），部署期间 SSH 会被代理切断。" "The route to ${ip} goes through TUN (${iface}); SSH would be cut off by the proxy during deployment.")"$'\n'"$(L '处理办法：关闭代理的 TUN 模式；或让这些 IP 走物理网卡（Clash Verge 见 docs/manual/clash-direct-ips.md）。' 'Fix: turn off the proxy'"'"'s TUN mode, or route these IPs through the physical interface (Clash Verge: docs/manual/clash-direct-ips.en.md).')"$'\n'"$(L '已按手册加了直连规则且 SSH 正常，或确认要继续：加 --allow-tun。' 'If you have added the direct rules as described and SSH works, or you really want to continue: add --allow-tun.')"
   done
 }
 
@@ -8729,18 +8884,18 @@ tun_precheck() {
 print_chain_next_steps() {
   local node uri
   node="${CHAIN_STATE_DIR}/client/node.txt"
-  require_secure_user_file "${node}" 600 || die 1 "node.txt 不存在或身份异常：${node}"
+  require_secure_user_file "${node}" 600 || die 1 "$(L "node.txt 不存在或身份异常：${node}" "node.txt is missing or has an unexpected identity: ${node}")"
   uri="$(head -n 1 "${node}")"
-  printf '==================== 下一步 ====================\n'
-  printf '1. 导入客户端：下面的二维码用 Shadowrocket / 安卓客户端扫；Clash Verge 等复制这一行链接：\n'
+  printf "$(L '==================== 下一步 ====================\n' '==================== Next steps ====================\n')"
+  printf "$(L '1. 导入客户端：下面的二维码用 Shadowrocket / 安卓客户端扫；Clash Verge 等复制这一行链接：\n' '1. Import into clients: scan the QR code below with Shadowrocket / Android clients; for Clash Verge and similar, copy this link:\n')"
   printf '   %s\n' "${uri}"
-  printf '   （更多设备：ownexit chain add-device <名字>；随时再看二维码：ownexit chain qr）\n'
-  printf '2. 在设备上打开 https://ipinfo.io，应显示 %s\n' "${EXPECTED_EXIT_IPV4}"
-  printf '3. 出问题先跑：ownexit doctor\n'
+  printf "$(L '   （更多设备：ownexit chain add-device <名字>；随时再看二维码：ownexit chain qr）\n' '   (more devices: ownexit chain add-device <name>; show the QR code again any time: ownexit chain qr)\n')"
+  printf "$(L '2. 在设备上打开 https://ipinfo.io，应显示 %s\n' '2. Open https://ipinfo.io on a device: it should show %s\n')" "${EXPECTED_EXIT_IPV4}"
+  printf "$(L '3. 出问题先跑：ownexit doctor\n' '3. If something is wrong, run first: ownexit doctor\n')"
   if command -v qrencode >/dev/null 2>&1; then
     qrencode -t ANSIUTF8 < "${node}"
   else
-    printf '（安装 qrencode 后可在终端显示二维码：macOS 用 brew install qrencode）\n'
+    printf "$(L '（安装 qrencode 后可在终端显示二维码：macOS 用 brew install qrencode）\n' '(install qrencode to show the QR code in the terminal: on macOS, brew install qrencode)\n')"
   fi
   printf '================================================\n'
 }
@@ -8753,32 +8908,32 @@ qr_chain() {
   if acquire_chain_lock 0; then rc=0; else rc="$?"; fi
   case "${rc}" in
     0) ;;
-    10) die 5 '同一 chain 有活动锁（busy）；稍后重试' ;;
-    11) die 5 '存在 stale lock；先运行 verify 或其它 mutating 命令归档' ;;
-    *) die 5 '无法安全取得 chain lock' ;;
+    10) die 5 "$(L '同一 chain 有活动锁（busy）；稍后重试' 'The same chain holds an active lock (busy); try again later')" ;;
+    11) die 5 "$(L '存在 stale lock；先运行 verify 或其它 mutating 命令归档' 'A stale lock exists; run verify or another modifying command first to archive it')" ;;
+    *) die 5 "$(L '无法安全取得 chain lock' 'Cannot safely acquire the chain lock')" ;;
   esac
-  [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 '链未部署；先运行 chain up（或 deploy）'
+  [[ -e "${STATE_FILE}" && ! -L "${STATE_FILE}" ]] || die 5 "$(L '链未部署；先运行 chain up（或 deploy）' 'The chain is not deployed; run chain up (or deploy) first')"
   load_state_file "${STATE_FILE}"
-  verify_local_artifacts || die 5 '本地节点文件与 state 不一致；运行 verify'
+  verify_local_artifacts || die 5 "$(L '本地节点文件与 state 不一致；运行 verify' 'The local node file does not match the state; run verify')"
   if [[ -z "${QR_DEVICE}" ]]; then
     file="${CHAIN_STATE_DIR}/client/node.txt"
   else
     file="${CHAIN_STATE_DIR}/devices/node-${QR_DEVICE}.txt"
-    [[ -e "${file}" || -L "${file}" ]] || die 2 "没有设备 ${QR_DEVICE}；运行 chain list-devices 查看"
-    require_secure_user_file "${file}" 600 || die 5 "设备节点文件身份异常：${file}"
-    require_secure_user_file "${CHAIN_STATE_DIR}/devices/devices.env" 600 || die 5 'devices.env 不存在或身份异常；运行 verify'
-    expected="$(kv_get "${CHAIN_STATE_DIR}/devices/devices.env" "${QR_DEVICE}")" || die 2 "设备表里没有 ${QR_DEVICE}；运行 chain list-devices 查看"
+    [[ -e "${file}" || -L "${file}" ]] || die 2 "$(L "没有设备 ${QR_DEVICE}；运行 chain list-devices 查看" "No device ${QR_DEVICE}; run chain list-devices to see the devices")"
+    require_secure_user_file "${file}" 600 || die 5 "$(L "设备节点文件身份异常：${file}" "A device node file has an unexpected identity: ${file}")"
+    require_secure_user_file "${CHAIN_STATE_DIR}/devices/devices.env" 600 || die 5 "$(L 'devices.env 不存在或身份异常；运行 verify' 'devices.env is missing or has an unexpected identity; run verify')"
+    expected="$(kv_get "${CHAIN_STATE_DIR}/devices/devices.env" "${QR_DEVICE}")" || die 2 "$(L "设备表里没有 ${QR_DEVICE}；运行 chain list-devices 查看" "${QR_DEVICE} is not in the device list; run chain list-devices to see the devices")"
     uuid="$(head -n 1 "${file}")"
     uuid="${uuid#vless://}"
     uuid="${uuid%%@*}"
-    [[ "${uuid}" == "${expected}" ]] || die 5 "设备 ${QR_DEVICE} 的节点文件与设备表不一致；运行 verify"
+    [[ "${uuid}" == "${expected}" ]] || die 5 "$(L "设备 ${QR_DEVICE} 的节点文件与设备表不一致；运行 verify" "The node file of device ${QR_DEVICE} does not match the device list; run verify")"
   fi
   if command -v qrencode >/dev/null 2>&1; then
     qrencode -t ANSIUTF8 < "${file}"
   else
     printf 'node=%s\n' "${file}"
     head -n 1 "${file}"
-    printf '安装 qrencode（macOS: brew install qrencode）后可在终端显示二维码\n'
+    printf "$(L '安装 qrencode（macOS: brew install qrencode）后可在终端显示二维码\n' 'Install qrencode (macOS: brew install qrencode) to show the QR code in the terminal\n')"
   fi
 }
 
@@ -8796,7 +8951,7 @@ up_chain() {
     case "${rc}" in
       0) INIT_ID="$(basename "${CONFIG_PATH}" .env)" ;;
       10) INIT_ID=main ;;
-      *) die 2 '本机有多条链，请用 --id <名字> 指定' ;;
+      *) die 2 "$(L '本机有多条链，请用 --id <名字> 指定' 'There are several chains on this computer; choose one with --id <name>')" ;;
     esac
   fi
   dir="$(xdg_or_default "${XDG_CONFIG_HOME:-}" "${HOME}/.config")/ownexit/chains"
@@ -8813,9 +8968,9 @@ up_chain() {
     [[ "${INIT_RELAY_PORT_GIVEN}" == 0 || "${INIT_RELAY_PORT}" == "${RELAY_SSH_PORT}" ]] || mismatch=1
     [[ "${INIT_EXIT_GIVEN}" == 0 || "${INIT_EXIT}" == "${EXIT_HOST}" ]] || mismatch=1
     [[ "${INIT_EXIT_PORT_GIVEN}" == 0 || "${INIT_EXIT_PORT}" == "${EXIT_SSH_PORT}" ]] || mismatch=1
-    [[ "${mismatch}" == 0 ]] || die 2 "链 ${INIT_ID} 已有配置且地址不同（现有 中转=${RELAY_HOST}:${RELAY_SSH_PORT} 出口=${EXIT_HOST}:${EXIT_SSH_PORT}）；换一个 --id，或先 rollback 再删配置"
-    [[ "${INIT_SNI_GIVEN}" == 0 || "${INIT_SNI}" == "${REALITY_SERVER_NAME}" ]] || log_warn "已有配置的 REALITY_SERVER_NAME=${REALITY_SERVER_NAME}，忽略本次给的 ${INIT_SNI}（deploy 后不可改）"
-    [[ "${INIT_FILTER_GIVEN}" == 0 || "${INIT_EXIT_SOURCE_FILTER}" == "${EXIT_SOURCE_FILTER}" ]] || log_warn "已有配置的 EXIT_SOURCE_FILTER=${EXIT_SOURCE_FILTER}，忽略本次给的 ${INIT_EXIT_SOURCE_FILTER}（deploy 后不可改）"
+    [[ "${mismatch}" == 0 ]] || die 2 "$(L "链 ${INIT_ID} 已有配置且地址不同（现有 中转=${RELAY_HOST}:${RELAY_SSH_PORT} 出口=${EXIT_HOST}:${EXIT_SSH_PORT}）；换一个 --id，或先 rollback 再删配置" "Chain ${INIT_ID} already has a configuration with different addresses (current relay=${RELAY_HOST}:${RELAY_SSH_PORT} exit=${EXIT_HOST}:${EXIT_SSH_PORT}); use another --id, or roll back first and delete the configuration")"
+    [[ "${INIT_SNI_GIVEN}" == 0 || "${INIT_SNI}" == "${REALITY_SERVER_NAME}" ]] || log_warn "$(L "已有配置的 REALITY_SERVER_NAME=${REALITY_SERVER_NAME}，忽略本次给的 ${INIT_SNI}（deploy 后不可改）" "The existing configuration has REALITY_SERVER_NAME=${REALITY_SERVER_NAME}; ignoring the ${INIT_SNI} given now (cannot be changed after deploy)")"
+    [[ "${INIT_FILTER_GIVEN}" == 0 || "${INIT_EXIT_SOURCE_FILTER}" == "${EXIT_SOURCE_FILTER}" ]] || log_warn "$(L "已有配置的 EXIT_SOURCE_FILTER=${EXIT_SOURCE_FILTER}，忽略本次给的 ${INIT_EXIT_SOURCE_FILTER}（deploy 后不可改）" "The existing configuration has EXIT_SOURCE_FILTER=${EXIT_SOURCE_FILTER}; ignoring the ${INIT_EXIT_SOURCE_FILTER} given now (cannot be changed after deploy)")"
     tun_precheck "${RELAY_HOST}" "${EXIT_HOST}"
   fi
   CONFIG_PATH="${config_file}"
@@ -8991,7 +9146,7 @@ cleanup_dispatcher() {
     if ! terminate_active_child; then
       child_safe=0
       release_chain_lock=0
-      log_warn '外部 SSH/scp 子进程未能确认停止；保留锁与 transaction，禁止并发恢复'
+      log_warn "$(L '外部 SSH/scp 子进程未能确认停止；保留锁与 transaction，禁止并发恢复' 'External SSH/scp child processes could not be confirmed stopped; keeping the lock and transaction and forbidding concurrent recovery')"
     fi
   fi
   if [[ -n "${ACTIVE_CHILD_GATE}" ]]; then
@@ -9002,27 +9157,27 @@ cleanup_dispatcher() {
     if ! cleanup_stale_active_child "${LOCK_OPERATION_ID}" "${ACTIVE_CHILD_FILE}"; then
       child_safe=0
       release_chain_lock=0
-      log_warn '外部子进程 registry/temp 未能安全闭合；保留 operation lock 与操作目录'
+      log_warn "$(L '外部子进程 registry/temp 未能安全闭合；保留 operation lock 与操作目录' 'The external child process registry/temp could not be closed safely; keeping the operation lock and operation directory')"
     fi
   fi
   if [[ "${WATCHDOG_ARMED}" == 1 ]]; then
     if [[ "${child_safe}" == 1 && -n "${SSH_CONFIG}" && -f "${SSH_CONFIG}" ]] && restore_and_disarm_fail_closed_watchdog; then
-      log_info '异常退出前已恢复 relay socket 并解除 fail-closed watchdog'
+      log_info "$(L '异常退出前已恢复 relay socket 并解除 fail-closed watchdog' 'Restored the relay socket and cleared the fail-closed watchdog before the abnormal exit')"
     else
       child_safe="${ACTIVE_CHILD_REGISTRY_SAFE}"
       release_chain_lock=0
-      log_warn 'relay socket 或 fail-closed watchdog 未能安全闭合；保留锁、transaction 与操作目录'
+      log_warn "$(L 'relay socket 或 fail-closed watchdog 未能安全闭合；保留锁、transaction 与操作目录' 'The relay socket or the fail-closed watchdog could not be closed safely; keeping the lock, transaction and operation directory')"
     fi
   fi
   if [[ "${original_status}" -ne 0 && ( "${COMMAND}" == deploy || "${COMMAND}" == rollback ) && -n "${JOURNAL_FILE}" && -e "${JOURNAL_FILE}" ]]; then
     # EXIT 阶段只做进程/临时文件闭合，不在条件上下文中重入破坏性事务；下一次 mutating 命令会持锁续做。
-    log_warn '操作失败；transaction 已保留，下一次 mutating 命令会继续恢复'
+    log_warn "$(L '操作失败；transaction 已保留，下一次 mutating 命令会继续恢复' 'The operation failed; the transaction is kept and the next modifying command will continue the recovery')"
   fi
   if [[ "${original_status}" -ne 0 && "${COMMAND}" == deploy && -n "${JOURNAL_FILE}" && ! -e "${JOURNAL_FILE}" && -n "${LOCAL_STAGE_PATH}" && "${LOCAL_STAGE_PATH}" != ABSENT ]]; then
     if ! cleanup_local_stage_if_owned || ! cleanup_local_stage_owner_temp "${LOCK_OPERATION_ID}"; then
       # 保留当前锁，让下一条 mutating 命令以 stale-lock 身份继续安全恢复，不能留下不可见 orphan。
       release_chain_lock=0
-      log_warn '首份 transaction 前的本地 staging 未能安全清理；保留 operation lock 供下次恢复'
+      log_warn "$(L '首份 transaction 前的本地 staging 未能安全清理；保留 operation lock 供下次恢复' 'The local staging from before the first transaction could not be cleaned up safely; keeping the operation lock for the next recovery')"
     fi
   fi
   if [[ ( "${COMMAND}" == deploy || "${COMMAND}" == rollback ) && "${LOCK_CHAIN_HELD}" == 1 ]]; then
@@ -9032,7 +9187,7 @@ cleanup_dispatcher() {
     fi
     if [[ "${temp_cleanup_failed}" == 1 ]]; then
       release_chain_lock=0
-      log_warn '锁绑定的状态/cache 临时文件未能安全清理；保留 operation lock 供下次恢复'
+      log_warn "$(L '锁绑定的状态/cache 临时文件未能安全清理；保留 operation lock 供下次恢复' 'Lock-bound state/cache temporary files could not be cleaned up safely; keeping the operation lock for the next recovery')"
     fi
   fi
   if ! cleanup_recorded_local_pids; then
@@ -9043,7 +9198,7 @@ cleanup_dispatcher() {
     if ! cleanup_stale_local_process "${LOCK_OPERATION_ID}" "${LOCAL_PROCESS_FILE}"; then
       local_process_safe=0
       release_chain_lock=0
-      log_warn '本地临时进程 registry/temp 未能安全闭合；保留 operation lock 与操作目录'
+      log_warn "$(L '本地临时进程 registry/temp 未能安全闭合；保留 operation lock 与操作目录' 'The local temporary process registry/temp could not be closed safely; keeping the operation lock and operation directory')"
     fi
   fi
   if [[ "${child_safe}" == 1 && "${local_process_safe}" == 1 && "${release_chain_lock}" == 1 ]]; then
@@ -9055,7 +9210,7 @@ cleanup_dispatcher() {
         LOCK_CHAIN_HELD=0
       else
         release_chain_lock=0
-        log_warn 'operation lock 未能通过最终身份/残留闸门，已保留供 stale recovery'
+        log_warn "$(L 'operation lock 未能通过最终身份/残留闸门，已保留供 stale recovery' 'The operation lock did not pass the final identity/leftover gate; kept for stale recovery')"
       fi
     fi
   fi
@@ -9063,7 +9218,7 @@ cleanup_dispatcher() {
     if [[ "${release_chain_lock}" == 1 ]] && release_lock_file "${GLOBAL_LOCK}"; then
       LOCK_GLOBAL_HELD=0
     else
-      log_warn 'shared global lock 随未闭合 chain 操作保留，禁止其它 chain 并发写共享资源'
+      log_warn "$(L 'shared global lock 随未闭合 chain 操作保留，禁止其它 chain 并发写共享资源' 'The shared global lock is kept along with the unclosed chain operation, forbidding other chains from writing shared resources concurrently')"
     fi
   fi
   CLEANUP_RUNNING=0
@@ -9094,9 +9249,9 @@ init_prompt_ipv4() {
   local label flag value
   label="$1"
   flag="$2"
-  [[ -t 0 ]] || die 2 "缺少 ${flag}（${label}的公网 IPv4；非终端运行时必须显式给出）"
-  read -r -p "${label}的公网 IPv4: " value
-  is_ipv4 "${value}" || die 2 "${label}必须是 IPv4：${value}"
+  [[ -t 0 ]] || die 2 "$(L "缺少 ${flag}（${label}的公网 IPv4；非终端运行时必须显式给出）" "Missing ${flag} (public IPv4 of the ${label}; required when not running in a terminal)")"
+  read -r -p "$(L "${label}的公网 IPv4: " "Public IPv4 of the ${label}: ")" value
+  is_ipv4 "${value}" || die 2 "$(L "${label}必须是 IPv4：${value}" "The ${label} must be an IPv4: ${value}")"
   printf '%s\n' "${value}"
 }
 
@@ -9107,11 +9262,11 @@ init_setup_host() {
   host="$2"
   port="$3"
   key="$(init_key_path "${host}" "${port}")"
-  log_info "${label} ${host}:${port} 配置免密"
+  log_info "$(L "${label} ${host}:${port} 配置免密" "Setting up key login to the ${label} ${host}:${port}")"
   rc=0
   # 用 bash 显式执行：pip 安装的副本不保证保留可执行位。
   bash "${SCRIPT_DIR}/../direct/connect_to.sh" --setup-only --host "${host}" --port "${port}" --user root || rc="$?"
-  [[ "${rc}" -eq 0 ]] || die 3 "${label} ${host}:${port} 配置免密失败（原因见上方 reason=...），未生成配置文件；修正后重跑 init"
+  [[ "${rc}" -eq 0 ]] || die 3 "$(L "${label} ${host}:${port} 配置免密失败（原因见上方 reason=...），未生成配置文件；修正后重跑 init" "Setting up key login to the ${label} ${host}:${port} failed (see reason=... above); no configuration file was written; fix it and rerun init")"
   if init_probe_ed25519 "${key}" "${host}" "${port}"; then
     return 0
   fi
@@ -9119,9 +9274,9 @@ init_setup_host() {
   # 它把“换了密钥类型”当成主机身份变化而拒绝，不会自动补记。这里经刚刚已用已知主机密钥验证过的会话读取对方的
   # ed25519 公钥并补记，信任来源与第一次连接相同，不使用未经认证的 ssh-keyscan。
   init_record_ed25519_hostkey "${key}" "${host}" "${port}" \
-    || die 3 "${label} ${host}:${port} 无法取得 ed25519 host key（chain 只接受 ed25519），请检查 sshd 的 HostKey 配置"
+    || die 3 "$(L "${label} ${host}:${port} 无法取得 ed25519 host key（chain 只接受 ed25519），请检查 sshd 的 HostKey 配置" "Cannot get an ed25519 host key from the ${label} ${host}:${port} (chains only accept ed25519); check the HostKey settings of sshd")"
   init_probe_ed25519 "${key}" "${host}" "${port}" \
-    || die 3 "${label} ${host}:${port} 补记 ed25519 host key 后仍无法用 ed25519 登录"
+    || die 3 "$(L "${label} ${host}:${port} 补记 ed25519 host key 后仍无法用 ed25519 登录" "Still cannot log in to the ${label} ${host}:${port} with ed25519 after recording its ed25519 host key")"
 }
 
 init_probe_ed25519() {
@@ -9140,7 +9295,7 @@ init_record_ed25519_hostkey() {
   [[ -n "${pub}" ]] || return 1
   if [[ "${port}" == 22 ]]; then entry="${host}"; else entry="[${host}]:${port}"; fi
   printf '%s %s\n' "${entry}" "${pub}" >> "${HOME}/.ssh/known_hosts" || return 1
-  log_info "已经由已验证的会话补记 ${entry} 的 ed25519 host key"
+  log_info "$(L "已经由已验证的会话补记 ${entry} 的 ed25519 host key" "Recorded the ed25519 host key for ${entry} through an already verified session")"
 }
 
 # 在中转机上采集 co-host 判定表的 6 个信号并判定取值（yes / ownexit-direct / no），init 与 rebaseline 共用；
@@ -9157,8 +9312,8 @@ relay_cohost_kind_via() {
   elif [[ "${u1}" == not-found && "${u2}" == not-found && "${d1}" == no && "${d2}" == no && "${p}" == no ]]; then
     printf 'no'
   else
-    printf 'sing-box.service=%s ownexit-direct.service=%s /etc/sing-box=%s /etc/ownexit-direct=%s 进程=%s' \
-      "${u1:-未知}" "${u2:-未知}" "${d1:-未知}" "${d2:-未知}" "${p:-未知}"
+    printf "$(L 'sing-box.service=%s ownexit-direct.service=%s /etc/sing-box=%s /etc/ownexit-direct=%s 进程=%s' 'sing-box.service=%s ownexit-direct.service=%s /etc/sing-box=%s /etc/ownexit-direct=%s process=%s')" \
+      "$(L "${u1:-未知}" "${u1:-unknown}")" "$(L "${u2:-未知}" "${u2:-unknown}")" "$(L "${d1:-未知}" "${d1:-unknown}")" "$(L "${d2:-未知}" "${d2:-unknown}")" "$(L "${p:-未知}" "${p:-unknown}")"
     return 1
   fi
 }
@@ -9173,12 +9328,12 @@ init_chain() {
   exit_port="${INIT_EXIT_PORT}"
   sni="${INIT_SNI}"
 
-  [[ "${chain_id}" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die 2 "--id 只允许 [a-z0-9][a-z0-9-]{0,31}：${chain_id}"
-  [[ -n "${relay}" ]] || relay="$(init_prompt_ipv4 中转机 --relay)"
-  is_ipv4 "${relay}" || die 2 "--relay 必须是 IPv4：${relay}"
-  [[ -n "${exit_host}" ]] || exit_host="$(init_prompt_ipv4 出口机 --exit)"
-  is_ipv4 "${exit_host}" || die 2 "--exit 必须是 IPv4：${exit_host}"
-  [[ "${relay}" != "${exit_host}" ]] || die 2 '中转机和出口机必须是两台不同的主机'
+  [[ "${chain_id}" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die 2 "$(L "--id 只允许 [a-z0-9][a-z0-9-]{0,31}：${chain_id}" "--id only accepts [a-z0-9][a-z0-9-]{0,31}: ${chain_id}")"
+  [[ -n "${relay}" ]] || relay="$(init_prompt_ipv4 "$(L 中转机 relay)" --relay)"
+  is_ipv4 "${relay}" || die 2 "$(L "--relay 必须是 IPv4：${relay}" "--relay must be an IPv4: ${relay}")"
+  [[ -n "${exit_host}" ]] || exit_host="$(init_prompt_ipv4 "$(L 出口机 exit)" --exit)"
+  is_ipv4 "${exit_host}" || die 2 "$(L "--exit 必须是 IPv4：${exit_host}" "--exit must be an IPv4: ${exit_host}")"
+  [[ "${relay}" != "${exit_host}" ]] || die 2 "$(L '中转机和出口机必须是两台不同的主机' 'The relay and the exit must be two different hosts')"
   # up 在第一次 SSH（配免密）之前就自检 TUN；单独 init 不检（它只是生成配置）。
   [[ "${UP_MODE}" == 0 ]] || tun_precheck "${relay}" "${exit_host}"
 
@@ -9186,43 +9341,43 @@ init_chain() {
   CHAIN_CONFIG_DIR="${CONFIG_HOME}/ownexit/chains"
   config_file="${CHAIN_CONFIG_DIR}/${chain_id}.env"
   # 已存在就拒绝：覆盖会让已部署链的 state（绑定配置哈希）与配置对不上。
-  [[ ! -e "${config_file}" && ! -L "${config_file}" ]] || die 2 "配置已存在：${config_file}；换一个 --id，或确认不再需要后手工删除它"
+  [[ ! -e "${config_file}" && ! -L "${config_file}" ]] || die 2 "$(L "配置已存在：${config_file}；换一个 --id，或确认不再需要后手工删除它" "The configuration already exists: ${config_file}; use another --id, or delete it by hand once you are sure it is no longer needed")"
   # REPO_ROOT 为空（pip 安装形态）时不判断；否则 "${REPO_ROOT}"/* 会变成 /*，把所有路径都当成仓库内。
   if [[ -n "${REPO_ROOT}" ]]; then
     case "${config_file}" in
-      "${REPO_ROOT}"|"${REPO_ROOT}"/*) die 2 '配置目录位于本仓库内；请把 XDG_CONFIG_HOME 指到仓库外' ;;
+      "${REPO_ROOT}"|"${REPO_ROOT}"/*) die 2 "$(L '配置目录位于本仓库内；请把 XDG_CONFIG_HOME 指到仓库外' 'The configuration directory is inside this repository; point XDG_CONFIG_HOME outside the repository')" ;;
     esac
   fi
 
-  init_setup_host 中转机 "${relay}" "${relay_port}"
-  init_setup_host 出口机 "${exit_host}" "${exit_port}"
+  init_setup_host "$(L 中转机 relay)" "${relay}" "${relay_port}"
+  init_setup_host "$(L 出口机 exit)" "${exit_host}" "${exit_port}"
   relay_key="$(init_key_path "${relay}" "${relay_port}")"
   exit_key="$(init_key_path "${exit_host}" "${exit_port}")"
 
   # 出口 IP：在出口机上直接问 ipinfo.io；它是 verify 的唯一允许值，所以终端里要人确认。
   exit_ip="$(ssh -n -i "${exit_key}" -p "${exit_port}" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=12 \
     root@"${exit_host}" 'curl -fsS -m 15 ipinfo.io/ip' 2>/dev/null | tr -d '[:space:]' || true)"
-  is_ipv4 "${exit_ip}" || die 3 "无法在出口机上取得公网 IPv4（需要 curl 能访问 ipinfo.io）；读到：${exit_ip:-空}"
-  log_info "出口机公网 IP：${exit_ip}"
+  is_ipv4 "${exit_ip}" || die 3 "$(L "无法在出口机上取得公网 IPv4（需要 curl 能访问 ipinfo.io）；读到：${exit_ip:-空}" "Cannot get a public IPv4 on the exit (curl must reach ipinfo.io); read: ${exit_ip:-empty}")"
+  log_info "$(L "出口机公网 IP：${exit_ip}" "Public IP of the exit: ${exit_ip}")"
   if [[ -t 0 ]]; then
-    read -r -p "确认客户端经这条链出去的 IP 应当是 ${exit_ip}？[y/N] " answer
-    [[ "${answer}" == y || "${answer}" == Y ]] || die 2 '未确认出口 IP，未生成配置文件'
+    read -r -p "$(L "确认客户端经这条链出去的 IP 应当是 ${exit_ip}？[y/N] " "Should clients leave through this chain with IP ${exit_ip}? [y/N] ")" answer
+    [[ "${answer}" == y || "${answer}" == Y ]] || die 2 "$(L '未确认出口 IP，未生成配置文件' 'Exit IP not confirmed; no configuration file was written')"
   fi
 
   # 中转现状：判定方式与 preflight 远端脚本一致（co-host 判定表，§5.1.10），满足其中一行才自动填。
-  cohost="$(relay_cohost_kind_via "${relay_key}" "${relay_port}" "${relay}")" || die 3 "中转机上的 sing-box 状态不完整（${cohost}）；请先让 233boy 的 sing-box 或 ownexit-direct 完整运行，或彻底移除，再重跑 init"
-  log_info "中转机既有 sing-box：RELAY_COHOSTS_SINGBOX=${cohost}（yes=233boy、ownexit-direct=ownexit 直连、no=没有；deploy 会保护既有服务不受影响）"
+  cohost="$(relay_cohost_kind_via "${relay_key}" "${relay_port}" "${relay}")" || die 3 "$(L "中转机上的 sing-box 状态不完整（${cohost}）；请先让 233boy 的 sing-box 或 ownexit-direct 完整运行，或彻底移除，再重跑 init" "The sing-box state on the relay is incomplete (${cohost}); get 233boy's sing-box or ownexit-direct fully running, or remove it completely, then rerun init")"
+  log_info "$(L "中转机既有 sing-box：RELAY_COHOSTS_SINGBOX=${cohost}（yes=233boy、ownexit-direct=ownexit 直连、no=没有；deploy 会保护既有服务不受影响）" "Existing sing-box on the relay: RELAY_COHOSTS_SINGBOX=${cohost} (yes=233boy, ownexit-direct=ownexit direct, no=none; deploy keeps the existing service unaffected)")"
   case "${INIT_EXIT_SOURCE_FILTER}" in
-    managed) log_info 'EXIT_SOURCE_FILTER=managed：部署时会在出口机加 nft 白名单，Reality 端口只放行中转机' ;;
-    provider) log_info 'EXIT_SOURCE_FILTER=provider：由服务商安全组只放行中转机，部署时严格检查' ;;
-    none) log_info 'EXIT_SOURCE_FILTER=none：出口机 Reality 端口不限制来源（没有凭据用不了）' ;;
+    managed) log_info "$(L 'EXIT_SOURCE_FILTER=managed：部署时会在出口机加 nft 白名单，Reality 端口只放行中转机' 'EXIT_SOURCE_FILTER=managed: deploy adds an nft allow-list on the exit so the Reality port admits only the relay')" ;;
+    provider) log_info "$(L 'EXIT_SOURCE_FILTER=provider：由服务商安全组只放行中转机，部署时严格检查' 'EXIT_SOURCE_FILTER=provider: the provider'\''s security group admits only the relay; deploy checks this strictly')" ;;
+    none) log_info "$(L 'EXIT_SOURCE_FILTER=none：出口机 Reality 端口不限制来源（没有凭据用不了）' 'EXIT_SOURCE_FILTER=none: the exit'\''s Reality port does not restrict sources (it is unusable without credentials)')" ;;
   esac
 
-  ensure_private_dir "${CHAIN_CONFIG_DIR}" || die 2 "配置目录身份或权限不安全：${CHAIN_CONFIG_DIR}"
+  ensure_private_dir "${CHAIN_CONFIG_DIR}" || die 2 "$(L "配置目录身份或权限不安全：${CHAIN_CONFIG_DIR}" "The configuration directory's ownership or permissions are unsafe: ${CHAIN_CONFIG_DIR}")"
   tmp_file="$(mktemp "${CHAIN_CONFIG_DIR}/.${chain_id}.env.XXXXXX")"
   chmod 600 "${tmp_file}"
   {
-    printf '# 由 setup_chain.sh init 生成；deploy 之后不要再改，改动会让 state 与配置对不上。\n'
+    printf "$(L '# 由 setup_chain.sh init 生成；deploy 之后不要再改，改动会让 state 与配置对不上。\n' '# Generated by setup_chain.sh init; do not change it after deploy, or the state will no longer match the configuration.\n')"
     printf 'CHAIN_ID=%s\n' "${chain_id}"
     printf 'RELAY_HOST=%s\nRELAY_SSH_PORT=%s\nRELAY_SSH_USER=root\nRELAY_SSH_KEY=%s\n' "${relay}" "${relay_port}" "${relay_key}"
     printf 'EXIT_HOST=%s\nEXIT_SSH_PORT=%s\nEXIT_SSH_USER=root\nEXIT_SSH_KEY=%s\n' "${exit_host}" "${exit_port}" "${exit_key}"
@@ -9234,10 +9389,10 @@ init_chain() {
   # 读回校验在子 shell 里跑：parse_config 失败会 die 退出，必须先删掉临时文件，不能留下一份坏配置。
   if ! ( CONFIG_PATH="${tmp_file}"; parse_config ) >/dev/null; then
     rm -f "${tmp_file}"
-    die 2 '生成的配置未通过严格解析器校验，已删除；请把上方错误反馈给维护者'
+    die 2 "$(L '生成的配置未通过严格解析器校验，已删除；请把上方错误反馈给维护者' 'The generated configuration did not pass the strict parser and was deleted; please report the error above to the maintainers')"
   fi
   mv "${tmp_file}" "${config_file}"
-  log_info "已生成 ${config_file}"
+  log_info "$(L "已生成 ${config_file}" "Wrote ${config_file}")"
   # up 紧接着就 deploy，不提示“下一步 deploy”。
   [[ "${UP_MODE}" == 1 ]] || printf '[chain][init] next=%s --id %s deploy\n' "$(basename "${SCRIPT_PATH}")" "${chain_id}"
 }
@@ -9291,7 +9446,7 @@ main() {
           printf 'status=stale_lock next=run-mutating-command\n'
           return 5
           ;;
-        *) die 5 'status 无法安全处理 operation lock' ;;
+        *) die 5 "$(L 'status 无法安全处理 operation lock' 'status cannot safely handle the operation lock')" ;;
       esac
       ;;
     rollback)
@@ -9313,7 +9468,7 @@ main() {
       relay_banlist
       ;;
     rehost-exit)
-      log_warn "[deprecated] rehost-exit 已废弃（仍可用）：改用 migrate-exit --to <新 IP>，同一台机器会自动识别，不必手改配置"
+      log_warn "$(L "[deprecated] rehost-exit 已废弃（仍可用）：改用 migrate-exit --to <新 IP>，同一台机器会自动识别，不必手改配置" "[deprecated] rehost-exit is deprecated (still works): use migrate-exit --to <new IP> instead; the same machine is detected automatically, no need to edit the configuration by hand")"
       rehost_exit_chain
       ;;
     rebaseline)

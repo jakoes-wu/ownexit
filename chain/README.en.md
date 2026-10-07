@@ -17,7 +17,7 @@ Exit
 Target websites see the exit's IP
 ```
 
-> The scripts currently print their progress and messages in Chinese. Where this document quotes such a message, the original text is kept with an English gloss.
+> From 1.7.0 the scripts print in English unless the system language is Chinese; set `OWNEXIT_LANG=en` or `OWNEXIT_LANG=zh` to choose. The messages quoted below are the English ones.
 
 ## Quick start
 
@@ -179,7 +179,7 @@ When `RELAY_COHOSTS_SINGBOX=yes` (or `ownexit-direct`), the zero-regression base
 
 ## Server-side download and local verification
 
-- The servers download the pinned sing-box from GitHub themselves and check its SHA-256 (archive and binary hashes for the 4 platform packages are hard-coded at the top of the script); only if the server download fails does your computer download it and upload it. `binary 来源=remote-download|local-upload` in the log shows which path was taken.
+- The servers download the pinned sing-box from GitHub themselves and check its SHA-256 (archive and binary hashes for the 4 platform packages are hard-coded at the top of the script); only if the server download fails does your computer download it and upload it. `binary source=remote-download|local-upload` in the log shows which path was taken.
 - Your computer only prepares the official package for its own platform, used for the "local exit smoke" layer. If there is no official package for your platform, or the cache is missing and the download fails, that layer is skipped with a WARN and deployment continues; `multi_chain_client.sh verify`, however, requires the local package.
 - The state file keeps the fields of v0.1.0, so chains deployed with v0.1.0 can be managed by newer versions directly.
 

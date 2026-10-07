@@ -4,7 +4,7 @@
 
 Turn a VPS abroad into your own fixed exit: clients connect straight to the VPS, and websites see the VPS's IP. Everything runs on your own computer; you never have to log in to the server and type commands.
 
-> The scripts currently print their progress and messages in Chinese. Where this guide quotes such a message, the original text is kept with an English gloss.
+> From 1.7.0 the scripts print in English unless the system language is Chinese; set `OWNEXIT_LANG=en` or `OWNEXIT_LANG=zh` to choose. The messages quoted below are the English ones.
 
 ## 1. How it works
 
@@ -155,8 +155,8 @@ Run `ownexit doctor` first: it checks local dependencies, proxy environment vari
 | `reason=unreachable` | Wrong IP or SSH port, or the security group blocks it | Check the IP and port; if SSH itself cannot connect, investigate from the provider's web console (VNC) |
 | The public key was pushed but key login still fails | The provider's image turned off public key authentication in sshd | `connect_to.sh` changes `PubkeyAuthentication no` back to `yes` and restarts sshd automatically (needs root); if it still fails, change it by hand in the web console |
 | Clients connect but nothing loads | The proxy port is blocked, or the SNI domain is unreachable | Check the provider's security group; run `setup_direct.sh log` for the log, and if needed change the SNI or port with `up --sni` / `up --proxy-port` |
-| Message "服务器上是用 233boy 脚本装的旧版" (the server runs the old 233boy-based install; exit code 2) | This VPS was set up by an old ownexit version (233boy script) | Run `setup_direct.sh migrate`; see section 9 |
-| Message "上次未完成的操作恢复失败" (recovering the unfinished operation failed) | The VPS lost power during a migration or similar, and the new service would not start during recovery | Check `setup_direct.sh log` as the message says; migration backups are in `/var/backups/ownexit-direct/` |
+| Message "The server runs the old install set up with the 233boy script" (exit code 2) | This VPS was set up by an old ownexit version (233boy script) | Run `setup_direct.sh migrate`; see section 9 |
+| Message "Recovering the unfinished operation failed" | The VPS lost power during a migration or similar, and the new service would not start during recovery | Check `setup_direct.sh log` as the message says; migration backups are in `/var/backups/ownexit-direct/` |
 | Mainland China sites also go through the proxy | The client's GeoIP / GeoSite databases have not finished downloading | Update the databases once by hand in the client settings |
 | Port tests connect instantly or contradict each other | TUN is on locally and every connection is taken over by the local proxy | Turn TUN off before testing, or keep the VPS's IP out of Clash (see [Keeping specific IPs out of Clash Verge's proxy](clash-direct-ips.en.md)) |
 | SSH prints `setlocale: LC_ALL: cannot change locale` | Your computer forwards a Chinese locale to the VPS | Harmless; the scripts in this repository force `C.UTF-8` |

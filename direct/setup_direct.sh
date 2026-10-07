@@ -70,7 +70,66 @@ readonly REMOTE_WORK='/var/lib/ownexit-direct'
 readonly OP_UNIT='ownexit-direct-op'
 
 usage() {
-  cat <<EOF
+  if [[ "${OWNEXIT_UI_LANG}" == en ]]; then
+    cat <<EOF
+Usage: ownexit direct [subcommand] [options]      (git clone: $(basename "$0") [subcommand] [options])
+
+Deploy (no subcommand means up; the first run asks once for the VPS root password):
+  ownexit direct up --host 203.0.113.7
+  ownexit direct up --host 203.0.113.7 --port 2222      # SSH not on port 22
+  ownexit direct up                                     # redeploy / refresh the subscription (uses the remembered VPS)
+  ownexit direct up --sni www.apple.com                 # change the camouflage domain (UUID and keys unchanged; clients re-import)
+  ownexit direct up --proxy-port 34567                  # change the proxy port
+  ownexit direct up --sub-ttl 30m                       # the subscription service turns itself off after 30 minutes
+
+Maintenance:
+  ownexit direct rotate-token               subscription URL may have leaked: get a new subscription URL
+  ownexit direct rotate-keys                node credentials may have leaked: new UUID / Reality key / short id (every device re-imports)
+  ownexit direct rotate-keys rotate-token   replace both
+  ownexit direct add-device phone           give a new device its own credentials and subscription URL (others unaffected)
+  ownexit direct remove-device phone        revoke a device
+  ownexit direct migrate                    switch an old install made with the 233boy script to this project's service (keeps credentials and port; clients need nothing)
+  ownexit direct uninstall                  remove the direct service and the subscription service from the VPS (keeps SSH key login and migration backups)
+
+Day-to-day operations (no redeploy):
+  ownexit direct sub start [--ttl 30m]      turn the subscription service on (briefly, to import on a new device; --ttl turns it off when due)
+  ownexit direct sub stop                   turn the subscription service off (keep it off normally)
+  ownexit direct status                     status of the proxy service and the subscription service
+  ownexit direct log [lines]                recent proxy service log, 100 lines by default
+  ownexit direct qr                         show the node QR code in the terminal (needs qrencode)
+  ownexit direct devices                    list devices and their subscription URLs
+  ownexit direct login                      log in to the VPS with the key
+  With several remembered VPSes add --host, for example: ownexit direct --host 203.0.113.7 status
+
+Options:
+  --host <ip/host>            the exit VPS address; without it the remembered VPS is used, otherwise it asks
+  -u, --user <user>           SSH user, default root
+  -P, --port <port>           SSH port, default 22
+  --sni <domain>              Reality camouflage domain; default for new installs ${DIRECT_SNI_DEFAULT}. Not every HTTPS site works
+                              (www.microsoft.com does not in tests); confirm one device can connect after changing it
+  --proxy-port <port>         proxy port; random in 20000-59999 for new installs
+  --sub-ttl <duration>        how long after starting the subscription service turns itself off (for example 30m, 2h;
+                              minutes when no unit is given, 1 minute to 24 hours); without it, run ownexit direct sub stop after importing
+  --allow-tun                 refused by default when the route from this computer to the VPS goes through a proxy TUN (SSH would be cut
+                              off during deployment); with it, only warn and continue. To route the VPS IP through the physical interface see
+                              docs/manual/clash-direct-ips.en.md
+  -h, --help                  show this help
+
+migrate, uninstall and rotate-token exclude each other; rotate-keys cannot be combined with migrate / uninstall;
+add-device and remove-device exclude each other and cannot be combined with migrate / uninstall; --sni / --proxy-port / --sub-ttl
+cannot be combined with uninstall; up cannot be combined with maintenance subcommands; day-to-day operations cannot be combined with
+deployment / maintenance options (arguments after a day-to-day operation are handled by it).
+
+Deprecated spellings (still work and print the new form; may be removed in 2.0 at the earliest):
+  --rotate-token / --rotate-keys / --add-device <name> / --remove-device <name> / --migrate / --uninstall
+  ownexit subctl <start|stop|status|log|qr|devices|login>   →  ownexit direct sub start / sub stop / status / …
+
+Exit codes: 0 all checks passed; 1 deployment failed or a check did not pass; 2 argument error, missing argument (when not in a
+terminal), or the server runs the old install and needs migrate.
+EOF
+  else
+    # i18n:zh-begin
+    cat <<EOF
 用法: ownexit direct [子命令] [选项]      （git clone 用法：$(basename "$0") [子命令] [选项]）
 
 部署（不带子命令等同 up；第一次会问一次 VPS 的 root 密码）:
@@ -123,6 +182,8 @@ up 不能与维护子命令同用；日常操作不能与部署 / 维护参数�
 
 退出码: 0 全部通过；1 部署失败或有验证项未通过；2 参数错误、缺参数（非终端运行时）或服务器是旧版需要 migrate。
 EOF
+    # i18n:zh-end
+  fi
 }
 
 die() {
@@ -131,6 +192,9 @@ die() {
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 输出语言（中文 / 英文）的判断与 L 函数；target_lib.sh 的提示也依赖它，必须先 source。
+# shellcheck source=i18n_lib.sh
+. "${SCRIPT_DIR}/i18n_lib.sh"
 # shellcheck source=target_lib.sh
 . "${SCRIPT_DIR}/target_lib.sh"
 
@@ -138,7 +202,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # 每次使用在 stderr 提示新写法。提示用字符串累积而不是数组：macOS 自带 bash 3.2 在 set -u 下展开空数组会报
 # unbound variable，脚本会在没有任何废弃参数的正常运行里直接退出。
 DEPRECATED_MSGS=""
-deprecated() { DEPRECATED_MSGS="${DEPRECATED_MSGS}[!] $1 已废弃（仍可用），改用：ownexit direct $2"$'\n'; }
+deprecated() { DEPRECATED_MSGS="$(L "${DEPRECATED_MSGS}[!] $1 已废弃（仍可用），改用：ownexit direct $2" "${DEPRECATED_MSGS}[!] $1 is deprecated (still works); use: ownexit direct $2")"$'\n'; }
 # 出现过 up、维护操作（子命令或旧参数）或部署参数（--sni 等）：之后再出现日常操作词（status 等）就是混用，报错。
 SAW_DEPLOY_ARG=0
 SAW_UP=0
@@ -152,9 +216,9 @@ FWD_TARGET=()
 forward_to_subctl() {
   local word="$1" arg subctl_args
   shift
-  (( SAW_DEPLOY_ARG == 0 )) || die_usage "${word} 是日常操作，不能与部署 / 维护参数同用（用 --help 查看用法）"
+  (( SAW_DEPLOY_ARG == 0 )) || die_usage "$(L "${word} 是日常操作，不能与部署 / 维护参数同用（用 --help 查看用法）" "${word} is a day-to-day operation and cannot be combined with deployment / maintenance options (see --help)")"
   if [[ "${word}" == sub ]]; then
-    [[ "${1:-}" == start || "${1:-}" == stop ]] || die_usage "sub 后面跟 start 或 stop（例：ownexit direct sub stop）"
+    [[ "${1:-}" == start || "${1:-}" == stop ]] || die_usage "$(L "sub 后面跟 start 或 stop（例：ownexit direct sub stop）" "sub must be followed by start or stop (for example: ownexit direct sub stop)")"
     word="$1"
     shift
   fi
@@ -169,26 +233,26 @@ forward_to_subctl() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --host)           HOST="${2:?--host 需要一个参数}"; FWD_TARGET+=(--host "${HOST}"); shift 2 ;;
+    --host)           HOST="${2:?$(L '--host 需要一个参数' '--host needs a value')}"; FWD_TARGET+=(--host "${HOST}"); shift 2 ;;
     --host=*)         HOST="${1#*=}"; FWD_TARGET+=(--host "${HOST}"); shift ;;
-    -u|--user)        SSH_USER="${2:?--user 需要一个参数}"; FWD_TARGET+=(--user "${SSH_USER}"); shift 2 ;;
+    -u|--user)        SSH_USER="${2:?$(L '--user 需要一个参数' '--user needs a value')}"; FWD_TARGET+=(--user "${SSH_USER}"); shift 2 ;;
     --user=*)         SSH_USER="${1#*=}"; FWD_TARGET+=(--user "${SSH_USER}"); shift ;;
-    -P|--port)        SSH_PORT="${2:?--port 需要一个参数}"; FWD_TARGET+=(--port "${SSH_PORT}"); shift 2 ;;
+    -P|--port)        SSH_PORT="${2:?$(L '--port 需要一个参数' '--port needs a value')}"; FWD_TARGET+=(--port "${SSH_PORT}"); shift 2 ;;
     --port=*)         SSH_PORT="${1#*=}"; FWD_TARGET+=(--port "${SSH_PORT}"); shift ;;
-    --sni)            WANT_SNI="${2:?--sni 需要一个参数}"; SAW_DEPLOY_ARG=1; shift 2 ;;
+    --sni)            WANT_SNI="${2:?$(L '--sni 需要一个参数' '--sni needs a value')}"; SAW_DEPLOY_ARG=1; shift 2 ;;
     --sni=*)          WANT_SNI="${1#*=}"; SAW_DEPLOY_ARG=1; shift ;;
-    --proxy-port)     WANT_PROXY_PORT="${2:?--proxy-port 需要一个参数}"; SAW_DEPLOY_ARG=1; shift 2 ;;
+    --proxy-port)     WANT_PROXY_PORT="${2:?$(L '--proxy-port 需要一个参数' '--proxy-port needs a value')}"; SAW_DEPLOY_ARG=1; shift 2 ;;
     --proxy-port=*)   WANT_PROXY_PORT="${1#*=}"; SAW_DEPLOY_ARG=1; shift ;;
-    --sub-ttl)        WANT_SUB_TTL="${2:?--sub-ttl 需要一个时长}"; SAW_DEPLOY_ARG=1; shift 2 ;;
+    --sub-ttl)        WANT_SUB_TTL="${2:?$(L '--sub-ttl 需要一个时长' '--sub-ttl needs a duration')}"; SAW_DEPLOY_ARG=1; shift 2 ;;
     --sub-ttl=*)      WANT_SUB_TTL="${1#*=}"; SAW_DEPLOY_ARG=1; shift ;;
     --migrate)        DO_MIGRATE=1; SAW_DEPLOY_ARG=1; deprecated --migrate migrate; shift ;;
     --uninstall)      DO_UNINSTALL=1; SAW_DEPLOY_ARG=1; deprecated --uninstall uninstall; shift ;;
     --rotate-token)   ROTATE_TOKEN=1; SAW_DEPLOY_ARG=1; deprecated --rotate-token rotate-token; shift ;;
     --rotate-keys)    ROTATE_KEYS=1; SAW_DEPLOY_ARG=1; deprecated --rotate-keys rotate-keys; shift ;;
-    --add-device)     WANT_ADD_DEVICE="${2:?--add-device 需要一个设备名}"; SAW_DEPLOY_ARG=1
+    --add-device)     WANT_ADD_DEVICE="${2:?$(L '--add-device 需要一个设备名' '--add-device needs a device name')}"; SAW_DEPLOY_ARG=1
                       deprecated "--add-device" "add-device ${WANT_ADD_DEVICE}"; shift 2 ;;
     --add-device=*)   WANT_ADD_DEVICE="${1#*=}"; SAW_DEPLOY_ARG=1; deprecated "--add-device" "add-device ${WANT_ADD_DEVICE}"; shift ;;
-    --remove-device)  WANT_REMOVE_DEVICE="${2:?--remove-device 需要一个设备名}"; SAW_DEPLOY_ARG=1
+    --remove-device)  WANT_REMOVE_DEVICE="${2:?$(L '--remove-device 需要一个设备名' '--remove-device needs a device name')}"; SAW_DEPLOY_ARG=1
                       deprecated "--remove-device" "remove-device ${WANT_REMOVE_DEVICE}"; shift 2 ;;
     --remove-device=*) WANT_REMOVE_DEVICE="${1#*=}"; SAW_DEPLOY_ARG=1; deprecated "--remove-device" "remove-device ${WANT_REMOVE_DEVICE}"; shift ;;
     --allow-tun)      ALLOW_TUN=1; SAW_DEPLOY_ARG=1; shift ;;
@@ -198,33 +262,33 @@ while [[ $# -gt 0 ]]; do
     rotate-token)     ROTATE_TOKEN=1; SAW_DEPLOY_ARG=1; shift ;;
     migrate)          DO_MIGRATE=1; SAW_DEPLOY_ARG=1; shift ;;
     uninstall)        DO_UNINSTALL=1; SAW_DEPLOY_ARG=1; shift ;;
-    add-device)       [[ $# -ge 2 && -n "$2" ]] || die_usage "add-device 需要一个设备名（例：ownexit direct add-device phone）"
+    add-device)       [[ $# -ge 2 && -n "$2" ]] || die_usage "$(L "add-device 需要一个设备名（例：ownexit direct add-device phone）" "add-device needs a device name (for example: ownexit direct add-device phone)")"
                       WANT_ADD_DEVICE="$2"; SAW_DEPLOY_ARG=1; shift 2 ;;
-    remove-device)    [[ $# -ge 2 && -n "$2" ]] || die_usage "remove-device 需要一个设备名（例：ownexit direct remove-device phone）"
+    remove-device)    [[ $# -ge 2 && -n "$2" ]] || die_usage "$(L "remove-device 需要一个设备名（例：ownexit direct remove-device phone）" "remove-device needs a device name (for example: ownexit direct remove-device phone)")"
                       WANT_REMOVE_DEVICE="$2"; SAW_DEPLOY_ARG=1; shift 2 ;;
     sub|status|log|qr|devices|login)
                       FWD_WORD="$1"; shift; forward_to_subctl "${FWD_WORD}" "$@" ;;
     -h|--help)        usage; exit 0 ;;
-    *)                die_usage "未知参数: $1（用 --help 查看用法）" ;;
+    *)                die_usage "$(L "未知参数: $1（用 --help 查看用法）" "Unknown option: $1 (see --help)")" ;;
   esac
 done
 
 [[ -z "${DEPRECATED_MSGS}" ]] || printf '%s' "${DEPRECATED_MSGS}" >&2
 if [[ "${SAW_UP}" == 1 ]] && { (( DO_MIGRATE + DO_UNINSTALL + ROTATE_TOKEN + ROTATE_KEYS > 0 )) || [[ -n "${WANT_ADD_DEVICE}${WANT_REMOVE_DEVICE}" ]]; }; then
-  die_usage "up 只用于部署，不能与 migrate / uninstall / rotate-token / rotate-keys / add-device / remove-device 同用"
+  die_usage "$(L "up 只用于部署，不能与 migrate / uninstall / rotate-token / rotate-keys / add-device / remove-device 同用" "up is only for deploying and cannot be combined with migrate / uninstall / rotate-token / rotate-keys / add-device / remove-device")"
 fi
-(( DO_MIGRATE + DO_UNINSTALL + ROTATE_TOKEN <= 1 )) || die_usage "migrate、uninstall、rotate-token 只能选一个"
+(( DO_MIGRATE + DO_UNINSTALL + ROTATE_TOKEN <= 1 )) || die_usage "$(L "migrate、uninstall、rotate-token 只能选一个" "Choose only one of migrate, uninstall and rotate-token")"
 # 迁移承诺“沿用旧凭据”，与轮换矛盾；卸载后无凭据可换。要换旧版的凭据：先 migrate，再 rotate-keys。
-(( DO_MIGRATE + DO_UNINSTALL + ROTATE_KEYS <= 1 )) || die_usage "rotate-keys 不能与 migrate / uninstall 同用（旧版先 migrate 再 rotate-keys）"
+(( DO_MIGRATE + DO_UNINSTALL + ROTATE_KEYS <= 1 )) || die_usage "$(L "rotate-keys 不能与 migrate / uninstall 同用（旧版先 migrate 再 rotate-keys）" "rotate-keys cannot be combined with migrate / uninstall (for an old install, migrate first, then rotate-keys)")"
 if [[ -n "${WANT_ADD_DEVICE}" || -n "${WANT_REMOVE_DEVICE}" ]]; then
-  [[ -z "${WANT_ADD_DEVICE}" || -z "${WANT_REMOVE_DEVICE}" ]] || die_usage "add-device 与 remove-device 一次只能用一个"
-  (( DO_MIGRATE + DO_UNINSTALL == 0 )) || die_usage "add-device / remove-device 不能与 migrate / uninstall 同用"
+  [[ -z "${WANT_ADD_DEVICE}" || -z "${WANT_REMOVE_DEVICE}" ]] || die_usage "$(L "add-device 与 remove-device 一次只能用一个" "Use only one of add-device and remove-device at a time")"
+  (( DO_MIGRATE + DO_UNINSTALL == 0 )) || die_usage "$(L "add-device / remove-device 不能与 migrate / uninstall 同用" "add-device / remove-device cannot be combined with migrate / uninstall")"
   DEVICE_ARG="${WANT_ADD_DEVICE}${WANT_REMOVE_DEVICE}"
-  [[ "${DEVICE_ARG}" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die_usage "设备名只允许小写字母、数字和 -，最多 32 个字符：${DEVICE_ARG}"
-  [[ "${DEVICE_ARG}" != default ]] || die_usage "default 指现有的那套凭据，不能新增或吊销；要整体换凭据用 ownexit direct rotate-keys"
+  [[ "${DEVICE_ARG}" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die_usage "$(L "设备名只允许小写字母、数字和 -，最多 32 个字符：${DEVICE_ARG}" "Device names may contain only lowercase letters, digits and -, up to 32 characters: ${DEVICE_ARG}")"
+  [[ "${DEVICE_ARG}" != default ]] || die_usage "$(L "default 指现有的那套凭据，不能新增或吊销；要整体换凭据用 ownexit direct rotate-keys" "default refers to the existing credentials and cannot be added or revoked; to replace all credentials use ownexit direct rotate-keys")"
 fi
 if [[ "${DO_UNINSTALL}" == 1 && ( -n "${WANT_SNI}" || -n "${WANT_PROXY_PORT}" || -n "${WANT_SUB_TTL}" ) ]]; then
-  die_usage "uninstall 不能与 --sni / --proxy-port / --sub-ttl 同用"
+  die_usage "$(L "uninstall 不能与 --sni / --proxy-port / --sub-ttl 同用" "uninstall cannot be combined with --sni / --proxy-port / --sub-ttl")"
 fi
 if [[ -n "${WANT_SUB_TTL}" ]]; then
   SUB_TTL_SECONDS="$(parse_ttl "${WANT_SUB_TTL}")" || exit 2
@@ -232,15 +296,15 @@ if [[ -n "${WANT_SUB_TTL}" ]]; then
   [[ "${WANT_SUB_TTL}" =~ [smh]$ ]] || WANT_SUB_TTL="${WANT_SUB_TTL}m"
 fi
 if [[ -n "${WANT_SNI}" && ! "${WANT_SNI}" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]; then
-  die_usage "--sni 必须是域名：${WANT_SNI}"
+  die_usage "$(L "--sni 必须是域名：${WANT_SNI}" "--sni must be a domain name: ${WANT_SNI}")"
 fi
 if [[ -n "${WANT_PROXY_PORT}" ]] && { [[ ! "${WANT_PROXY_PORT}" =~ ^[1-9][0-9]{0,4}$ ]] || (( WANT_PROXY_PORT > 65535 )); }; then
-  die_usage "--proxy-port 必须是 1-65535 的数字：${WANT_PROXY_PORT}"
+  die_usage "$(L "--proxy-port 必须是 1-65535 的数字：${WANT_PROXY_PORT}" "--proxy-port must be a number from 1 to 65535: ${WANT_PROXY_PORT}")"
 fi
 
 resolve_target
 if [[ "${SSH_USER}" != "root" ]]; then
-  echo "[!] 注意：本脚本的远程命令（sysctl/systemctl/apt 等）按 root 设计，非 root 用户大概率失败"
+  echo "$(L "[!] 注意：本脚本的远程命令（sysctl/systemctl/apt 等）按 root 设计，非 root 用户大概率失败" "[!] Note: the remote commands of this script (sysctl/systemctl/apt and so on) are designed for root; a non-root user will most likely fail")"
 fi
 
 # 密钥路径推导必须与 connect_to.sh 完全一致
@@ -291,41 +355,40 @@ tun_precheck() {
   local ip iface
   ip="$1"
   if [[ ! "${ip}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo "[*] 目标 ${ip} 不是 IPv4，跳过 TUN 自检"
+    echo "$(L "[*] 目标 ${ip} 不是 IPv4，跳过 TUN 自检" "[*] Target ${ip} is not IPv4; skipping the TUN self-check")"
     return 0
   fi
   iface="$(route_interface "${ip}" || true)"  # 缺 route / ip 命令时管道失败，set -e 下会静默退出；这里只要“取不到就跳过”
   if [[ -z "${iface}" ]]; then
-    echo "[*] 无法判定到 ${ip} 的出接口，跳过 TUN 自检"
+    echo "$(L "[*] 无法判定到 ${ip} 的出接口，跳过 TUN 自检" "[*] Cannot determine the outgoing interface for ${ip}; skipping the TUN self-check")"
     return 0
   fi
   interface_is_tunnel "${iface}" || return 0
   if [[ "${ALLOW_TUN}" == 1 ]]; then
-    echo "[!] 到 ${ip} 的路由经过 TUN（${iface}），已加 --allow-tun 继续；部署期间 SSH 可能被代理切断"
+    echo "$(L "[!] 到 ${ip} 的路由经过 TUN（${iface}），已加 --allow-tun 继续；部署期间 SSH 可能被代理切断" "[!] The route to ${ip} goes through TUN (${iface}); continuing because of --allow-tun; SSH may be cut off by the proxy during deployment")"
     return 0
   fi
-  die "到 ${ip} 的路由经过 TUN（${iface}），部署期间 SSH 会被代理切断。
-处理办法：关闭代理的 TUN 模式；或让这个 IP 走物理网卡（Clash Verge 见 docs/manual/clash-direct-ips.md）。
-已按手册加了直连规则且 SSH 正常，或确认要继续：加 --allow-tun。"
+  # 三行说明写成单行 L + 换行符（$'\n' 拼接），保证 check_ui_lang 能认出整条提示都在 L 里。
+  die "$(L "到 ${ip} 的路由经过 TUN（${iface}），部署期间 SSH 会被代理切断。" "The route to ${ip} goes through TUN (${iface}); SSH would be cut off by the proxy during deployment.")"$'\n'"$(L '处理办法：关闭代理的 TUN 模式；或让这个 IP 走物理网卡（Clash Verge 见 docs/manual/clash-direct-ips.md）。' 'Fix: turn off the proxy'"'"'s TUN mode, or route this IP through the physical interface (Clash Verge: docs/manual/clash-direct-ips.en.md).')"$'\n'"$(L '已按手册加了直连规则且 SSH 正常，或确认要继续：加 --allow-tun。' 'If you have added the direct rule as described and SSH works, or you really want to continue: add --allow-tun.')"
 }
 tun_precheck "${HOST}"
 
 # ---------- 1. 免密 SSH 与系统信息 ----------
 
-echo "[*] 检查免密 SSH：${SSH_USER}@${HOST}:${SSH_PORT}"
+echo "$(L "[*] 检查免密 SSH：${SSH_USER}@${HOST}:${SSH_PORT}" "[*] Checking key-based SSH: ${SSH_USER}@${HOST}:${SSH_PORT}")"
 if [[ ! -f "${KEY}" ]] || ! vssh "exit" >/dev/null 2>&1; then
   # 第一次部署或 VPS 重装后免密失效：直接调用 connect_to.sh 配好，省掉用户单独跑一条命令。
   # connect_to.sh 自己负责问密码、区分"密码错 / 关了密码登录 / 连不上"并打印 reason=...，
   # 这里只透传它的退出码，不重复解释失败原因。
-  echo "[*] 免密不可用，调用 connect_to.sh 配置免密（会问一次 VPS 密码）"
+  echo "$(L "[*] 免密不可用，调用 connect_to.sh 配置免密（会问一次 VPS 密码）" "[*] Key login does not work yet; running connect_to.sh to set it up (asks once for the VPS password)")"
   connect_rc=0
   # 用 bash 显式执行兄弟脚本：pip 安装的副本不保证保留可执行位。
   bash "${SCRIPT_DIR}/connect_to.sh" --setup-only --host "${HOST}" --port "${SSH_PORT}" --user "${SSH_USER}" \
     || connect_rc=$?
   [[ "${connect_rc}" -eq 0 ]] || exit "${connect_rc}"
-  vssh "exit" >/dev/null 2>&1 || die "connect_to.sh 报告成功，但免密登录仍不可用，请人工检查 ${KEY}"
+  vssh "exit" >/dev/null 2>&1 || die "$(L "connect_to.sh 报告成功，但免密登录仍不可用，请人工检查 ${KEY}" "connect_to.sh reported success but key login still does not work; check ${KEY} by hand")"
 fi
-pass "免密 SSH 可用"
+pass "$(L "免密 SSH 可用" "Key-based SSH works")"
 
 # 一次 SSH 同时取 ID 和 PRETTY_NAME。SSH 偶发失败（实测出现过刚配完免密后的单次失败）时重试一次，
 # 仍失败就如实报“读取失败”，不能把空结果当成“不支持的系统”误导用户。
@@ -337,28 +400,28 @@ for attempt in 1 2; do
   OS_INFO=""
   [[ "${attempt}" -eq 2 ]] || sleep 2
 done
-[[ -n "${OS_INFO}" ]] || die "读取 VPS 系统信息失败（SSH 命令连续 2 次失败），请稍后重跑；免密已配好，不会再问密码"
+[[ -n "${OS_INFO}" ]] || die "$(L "读取 VPS 系统信息失败（SSH 命令连续 2 次失败），请稍后重跑；免密已配好，不会再问密码" "Could not read the VPS system information (the SSH command failed twice); rerun later — key login is set up, so the password will not be asked again")"
 OS_ID="$(printf '%s\n' "${OS_INFO}" | sed -n 1p)"
 OS_PRETTY="$(printf '%s\n' "${OS_INFO}" | sed -n 2p)"
 case "${OS_ID}" in
   debian|ubuntu)
-    pass "VPS 系统：${OS_PRETTY}"
+    pass "$(L "VPS 系统：${OS_PRETTY}" "VPS system: ${OS_PRETTY}")"
     ;;
   *)
-    die "VPS 系统为 '${OS_ID:-未知}'，本脚本只按 Debian/Ubuntu 设计，不猜其它发行版的包管理器，停止"
+    die "$(L "VPS 系统为 '${OS_ID:-未知}'，本脚本只按 Debian/Ubuntu 设计，不猜其它发行版的包管理器，停止" "The VPS system is '${OS_ID:-unknown}'; this script is designed only for Debian/Ubuntu and will not guess other distributions' package managers; stopping")"
     ;;
 esac
 
 # 基础工具：curl（验 IP、下载官方包）、python3（订阅服务、读迁移配置）、tar（解压官方包）
 if [[ "${DO_UNINSTALL}" == 0 ]]; then
-  echo "[*] 检查 VPS 基础工具（curl / python3 / tar）"
+  echo "$(L "[*] 检查 VPS 基础工具（curl / python3 / tar）" "[*] Checking basic tools on the VPS (curl / python3 / tar)")"
   MISSING_PKGS="$(vssh 'missing=""; for c in curl python3 tar; do command -v "$c" >/dev/null 2>&1 || missing="$missing $c"; done; echo "$missing"' | xargs || true)"
   if [[ -n "${MISSING_PKGS}" ]]; then
-    echo "[*] 安装缺失工具：${MISSING_PKGS}"
+    echo "$(L "[*] 安装缺失工具：${MISSING_PKGS}" "[*] Installing missing tools: ${MISSING_PKGS}")"
     vssh "apt-get update -qq && apt-get install -y -qq ${MISSING_PKGS}" \
-      || die "apt 安装 ${MISSING_PKGS} 失败"
+      || die "$(L "apt 安装 ${MISSING_PKGS} 失败" "apt failed to install ${MISSING_PKGS}")"
   fi
-  pass "基础工具就绪"
+  pass "$(L "基础工具就绪" "Basic tools ready")"
 fi
 
 # 免密和系统都确认可用后才记住这台 VPS，避免把一个连不上或不支持的目标记成"上次的 VPS"。
@@ -367,20 +430,20 @@ save_target
 if [[ "${DO_UNINSTALL}" == 0 ]]; then
   # ---------- 2. VPS 公网 IP ----------
 
-  echo "[*] 读取 VPS 公网 IP（curl ipinfo.io）"
+  echo "$(L "[*] 读取 VPS 公网 IP（curl ipinfo.io）" "[*] Reading the VPS public IP (curl ipinfo.io)")"
   VPS_PUBLIC_IP="$(vssh "curl -fsS -m 15 ipinfo.io/ip" 2>/dev/null | tr -d '[:space:]' || true)"
   if [[ -z "${VPS_PUBLIC_IP}" ]]; then
-    fail "VPS 上 curl ipinfo.io 失败，无法确认公网 IP；节点地址将退回使用 SSH 地址 ${HOST}"
+    fail "$(L "VPS 上 curl ipinfo.io 失败，无法确认公网 IP；节点地址将退回使用 SSH 地址 ${HOST}" "curl ipinfo.io failed on the VPS, so the public IP cannot be confirmed; the node address falls back to the SSH address ${HOST}")"
   else
-    pass "VPS 公网 IP：${VPS_PUBLIC_IP}"
+    pass "$(L "VPS 公网 IP：${VPS_PUBLIC_IP}" "VPS public IP: ${VPS_PUBLIC_IP}")"
     if [[ "${VPS_PUBLIC_IP}" != "${HOST}" ]]; then
-      echo "[!] 注意：VPS 出口 IP（${VPS_PUBLIC_IP}）与 SSH 地址（${HOST}）不一致，请人工确认是否符合预期"
+      echo "$(L "[!] 注意：VPS 出口 IP（${VPS_PUBLIC_IP}）与 SSH 地址（${HOST}）不一致，请人工确认是否符合预期" "[!] Note: the VPS exit IP (${VPS_PUBLIC_IP}) differs from the SSH address (${HOST}); check whether that is what you expect")"
     fi
   fi
 
   # ---------- 3. 幂等开启 BBR ----------
 
-  echo "[*] 开启 BBR（幂等，重复执行无害）"
+  echo "$(L "[*] 开启 BBR（幂等，重复执行无害）" "[*] Enabling BBR (idempotent; harmless to repeat)")"
   # 远端 heredoc 的内容与结束标记必须顶格：缩进的 EOF 不会结束 heredoc，sysctl 一条都不会执行。
   BBR_NOW="$(vssh "cat >/etc/sysctl.d/99-bbr.conf <<'EOF'
 net.core.default_qdisc=fq
@@ -389,9 +452,9 @@ EOF
 sysctl --system >/dev/null 2>&1
 sysctl -n net.ipv4.tcp_congestion_control" || true)"
   if [[ "${BBR_NOW}" == "bbr" ]]; then
-    pass "BBR 已启用"
+    pass "$(L "BBR 已启用" "BBR enabled")"
   else
-    fail "BBR 未生效（当前拥塞算法：${BBR_NOW:-未知}），可能内核过旧，请人工检查"
+    fail "$(L "BBR 未生效（当前拥塞算法：${BBR_NOW:-未知}），可能内核过旧，请人工检查" "BBR is not active (current congestion control: ${BBR_NOW:-unknown}); the kernel may be too old, check by hand")"
   fi
 fi
 
@@ -423,8 +486,8 @@ print_chain_hints() {
     id="$(basename "${file}" .env)"
     if [[ "${found}" == 0 ]]; then
       echo
-      echo "[!] 这台 VPS 也是链式部署的中转机。直连的变动会让下列链的 verify / status / rollback 在预检或基线核验处失败"
-      echo "    （中转转发本身不受影响），请运行："
+      echo "$(L "[!] 这台 VPS 也是链式部署的中转机。直连的变动会让下列链的 verify / status / rollback 在预检或基线核验处失败" "[!] This VPS is also the relay of a relay chain. Changes to direct make verify / status / rollback of the chains below fail at the precheck or baseline check")"
+      echo "$(L "    （中转转发本身不受影响），请运行：" "    (relay forwarding itself is unaffected); run:")"
       found=1
     fi
     echo "      ownexit chain --id ${id} rebaseline"
@@ -436,20 +499,21 @@ print_chain_hints() {
 case "$(vssh 'uname -m' 2>/dev/null || true)" in
   x86_64)  REMOTE_ARCH=amd64; ARCHIVE_SHA256="${ARCHIVE_SHA256_LINUX_AMD64}"; BINARY_SHA256="${BINARY_SHA256_LINUX_AMD64}" ;;
   aarch64) REMOTE_ARCH=arm64; ARCHIVE_SHA256="${ARCHIVE_SHA256_LINUX_ARM64}"; BINARY_SHA256="${BINARY_SHA256_LINUX_ARM64}" ;;
-  *)       die "VPS CPU 架构不受支持（只支持 x86_64 / aarch64）" ;;
+  *)       die "$(L "VPS CPU 架构不受支持（只支持 x86_64 / aarch64）" "Unsupported VPS CPU architecture (only x86_64 / aarch64)")" ;;
 esac
 ARCHIVE_NAME="sing-box-${SING_BOX_VERSION}-linux-${REMOTE_ARCH}.tar.gz"
 
 # 把服务器端脚本投递到 VPS（root 700 目录），每次都覆盖为本版本，避免恢复执行时跑到旧版脚本。
 upload_remote_script() {
   vssh "install -d -m 700 '${REMOTE_WORK}' && cat > '${REMOTE_WORK}/op.sh' && chmod 600 '${REMOTE_WORK}/op.sh'" \
-    < "${SCRIPT_DIR}/direct_remote.sh" || die "无法把 direct_remote.sh 上传到 VPS"
+    < "${SCRIPT_DIR}/direct_remote.sh" || die "$(L "无法把 direct_remote.sh 上传到 VPS" "Could not upload direct_remote.sh to the VPS")"
 }
 
 probe_server() {
-  PROBE="$(vssh "bash '${REMOTE_WORK}/op.sh' probe" 2>/dev/null)" || die "服务器状态探测失败（SSH 中断或脚本异常），请重跑"
+  # 探测输出里的提示跟随本机语言；OWNEXIT_UI_LANG 只会是 zh / en（i18n_lib.sh 归一化过），可以直接拼进远端命令。
+  PROBE="$(vssh "OWNEXIT_UI_LANG=${OWNEXIT_UI_LANG} bash '${REMOTE_WORK}/op.sh' probe" 2>/dev/null)" || die "$(L "服务器状态探测失败（SSH 中断或脚本异常），请重跑" "Probing the server state failed (SSH dropped or the script failed); please rerun")"
   STATE="$(kv_get "${PROBE}" STATE)"
-  [[ -n "${STATE}" ]] || die "服务器状态探测没有返回 STATE：${PROBE}"
+  [[ -n "${STATE}" ]] || die "$(L "服务器状态探测没有返回 STATE：${PROBE}" "Probing the server state returned no STATE: ${PROBE}")"
 }
 
 local_sha256() {
@@ -462,17 +526,17 @@ local_sha256() {
 # VPS 下载官方包失败时：本机固定从官方地址下载、校验归档摘要，再上传到 VPS 保留的暂存目录。
 upload_archive_from_local() {
   local stage="$1" tmp
-  [[ "${stage}" == /opt/ownexit-direct/.stage-* ]] || die "VPS 返回的暂存目录不合法：${stage}"
+  [[ "${stage}" == /opt/ownexit-direct/.stage-* ]] || die "$(L "VPS 返回的暂存目录不合法：${stage}" "The staging directory returned by the VPS is invalid: ${stage}")"
   tmp="$(mktemp -d)"
-  echo "[*] VPS 下载官方包失败，改由本机下载 ${ARCHIVE_NAME} 后上传"
+  echo "$(L "[*] VPS 下载官方包失败，改由本机下载 ${ARCHIVE_NAME} 后上传" "[*] The VPS failed to download the official package; downloading ${ARCHIVE_NAME} on this computer and uploading it instead")"
   if ! curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 --max-time 600 \
       -o "${tmp}/archive.tar.gz" "${OFFICIAL_RELEASE_BASE_URL}/${ARCHIVE_NAME}"; then
     rm -rf "${tmp}"
-    die "本机也无法下载 ${ARCHIVE_NAME}（需要能访问 github.com）；VPS 上的操作保持在可恢复状态，网络恢复后重跑即可"
+    die "$(L "本机也无法下载 ${ARCHIVE_NAME}（需要能访问 github.com）；VPS 上的操作保持在可恢复状态，网络恢复后重跑即可" "This computer cannot download ${ARCHIVE_NAME} either (github.com must be reachable); the operation on the VPS stays recoverable, so rerun once the network is back")"
   fi
-  [[ "$(local_sha256 "${tmp}/archive.tar.gz")" == "${ARCHIVE_SHA256}" ]] || { rm -rf "${tmp}"; die "本机下载的官方包摘要不符，停止"; }
+  [[ "$(local_sha256 "${tmp}/archive.tar.gz")" == "${ARCHIVE_SHA256}" ]] || { rm -rf "${tmp}"; die "$(L "本机下载的官方包摘要不符，停止" "The digest of the official package downloaded on this computer does not match; stopping")"; }
   scp -q -i "${KEY}" -P "${SSH_PORT}" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-    "${tmp}/archive.tar.gz" "${SSH_USER}@${HOST}:${stage}/archive.tar.gz" || { rm -rf "${tmp}"; die "上传官方包到 VPS 失败"; }
+    "${tmp}/archive.tar.gz" "${SSH_USER}@${HOST}:${stage}/archive.tar.gz" || { rm -rf "${tmp}"; die "$(L "上传官方包到 VPS 失败" "Uploading the official package to the VPS failed")"; }
   rm -rf "${tmp}"
 }
 
@@ -486,7 +550,7 @@ write_op_args() {
     printf 'SUB_PORT=%s\n' "${SUB_PORT}"
     local kv
     for kv in "$@"; do printf '%s\n' "${kv}"; done
-  } | vssh "cat > '${REMOTE_WORK}/op.args' && chmod 600 '${REMOTE_WORK}/op.args'" || die "无法写入 VPS 上的 op.args"
+  } | vssh "cat > '${REMOTE_WORK}/op.args' && chmod 600 '${REMOTE_WORK}/op.args'" || die "$(L "无法写入 VPS 上的 op.args" "Could not write op.args on the VPS")"
 }
 
 # 启动（或等待已在运行的）临时单元并取回结果。临时单元由 systemd 托管，与本次 SSH 会话无关：
@@ -498,14 +562,16 @@ execute_remote_op() {
   [[ "${offset}" =~ ^[0-9]+$ ]] || offset=0
   active="$(vssh "systemctl show '${OP_UNIT}' -p ActiveState --value 2>/dev/null" | tr -d '[:space:]' || true)"
   if [[ "${active}" != active && "${active}" != activating && "${active}" != deactivating && "${active}" != reloading ]]; then
+    # 临时单元不继承 SSH 会话的环境，服务端日志（op.log 里的 [vps] 行）的语言必须显式传进去。
+    setenv=" --setenv=OWNEXIT_UI_LANG=${OWNEXIT_UI_LANG}"
     [[ -z "${OWNEXIT_TEST_DIRECT_FAIL_AT:-}" ]] || setenv="${setenv} --setenv=OWNEXIT_TEST_DIRECT_FAIL_AT=${OWNEXIT_TEST_DIRECT_FAIL_AT}"
     [[ -z "${OWNEXIT_TEST_DIRECT_PAUSE_AT:-}" ]] || setenv="${setenv} --setenv=OWNEXIT_TEST_DIRECT_PAUSE_AT=${OWNEXIT_TEST_DIRECT_PAUSE_AT}"
     vssh "rm -f '${REMOTE_WORK}/result.env'; systemctl reset-failed '${OP_UNIT}' >/dev/null 2>&1; \
       systemd-run --unit='${OP_UNIT}' --collect --quiet \
         -p StandardOutput=append:${REMOTE_WORK}/op.log -p StandardError=append:${REMOTE_WORK}/op.log${setenv} \
-        bash '${REMOTE_WORK}/op.sh' run" || die "无法在 VPS 上启动 ${OP_UNIT}（需要 systemd ≥ 240）"
+        bash '${REMOTE_WORK}/op.sh' run" || die "$(L "无法在 VPS 上启动 ${OP_UNIT}（需要 systemd ≥ 240）" "Cannot start ${OP_UNIT} on the VPS (systemd 240 or later is required)")"
   else
-    echo "[*] VPS 上已有一个操作在运行，等待它结束"
+    echo "$(L "[*] VPS 上已有一个操作在运行，等待它结束" "[*] An operation is already running on the VPS; waiting for it to finish")"
   fi
   tries=0
   while :; do
@@ -518,7 +584,7 @@ execute_remote_op() {
     fi
     # SSH 断开：操作仍在 VPS 上继续，这里重连等待即可。
     tries=$((tries + 1))
-    (( tries <= 60 )) || die "与 VPS 的连接持续中断；VPS 上的操作会自行完成，网络恢复后重跑本命令即可看到结果"
+    (( tries <= 60 )) || die "$(L "与 VPS 的连接持续中断；VPS 上的操作会自行完成，网络恢复后重跑本命令即可看到结果" "The connection to the VPS keeps dropping; the operation on the VPS will finish by itself, so rerun this command once the network is back to see the result")"
   done
   vssh "tail -c +$((offset + 1)) '${REMOTE_WORK}/op.log' 2>/dev/null" | sed 's/^/    [vps] /' || true
   OP_RESULT="$(vssh "cat '${REMOTE_WORK}/result.env' 2>/dev/null" || true)"
@@ -533,11 +599,11 @@ run_op_to_end() {
     upload_archive_from_local "$(kv_get "${OP_RESULT}" STAGE)"
     execute_remote_op
   fi
-  [[ -n "$(kv_get "${OP_RESULT}" RESULT)" ]] || die "VPS 上的操作没有留下结果（可能被中断），重跑本命令会自动恢复"
+  [[ -n "$(kv_get "${OP_RESULT}" RESULT)" ]] || die "$(L "VPS 上的操作没有留下结果（可能被中断），重跑本命令会自动恢复" "The operation on the VPS left no result (it may have been interrupted); rerunning this command recovers it automatically")"
   local backup
   backup="$(kv_get "${OP_RESULT}" BACKUP)"
-  [[ -z "${backup}" ]] || echo "[*] 迁移备份：${backup}（含旧私钥，确认无需回退后可自行删除）"
-  echo "[*] 服务器操作 OP=$(kv_get "${OP_RESULT}" OP) 结果=$(kv_get "${OP_RESULT}" RESULT) reason=$(kv_get "${OP_RESULT}" REASON)"
+  [[ -z "${backup}" ]] || echo "$(L "[*] 迁移备份：${backup}（含旧私钥，确认无需回退后可自行删除）" "[*] Migration backup: ${backup} (contains the old private key; delete it yourself once you are sure you will not roll back)")"
+  echo "$(L "[*] 服务器操作 OP=$(kv_get "${OP_RESULT}" OP) 结果=$(kv_get "${OP_RESULT}" RESULT) reason=$(kv_get "${OP_RESULT}" REASON)" "[*] Server operation OP=$(kv_get "${OP_RESULT}" OP) result=$(kv_get "${OP_RESULT}" RESULT) reason=$(kv_get "${OP_RESULT}" REASON)")"
 }
 
 start_op() {
@@ -561,12 +627,12 @@ ensure_sub_params() {
       fi
       SUB_PORT=""
     done
-    [[ -n "${SUB_PORT}" ]] || die "连续 10 次未找到空闲订阅端口，请人工检查 VPS 端口占用"
+    [[ -n "${SUB_PORT}" ]] || die "$(L "连续 10 次未找到空闲订阅端口，请人工检查 VPS 端口占用" "No free subscription port found after 10 tries; check port usage on the VPS by hand")"
     TOKEN_CHANGED=1
-    pass "生成订阅参数：SUB_PORT=${SUB_PORT} TOKEN=${TOKEN}"
+    pass "$(L "生成订阅参数：SUB_PORT=${SUB_PORT} TOKEN=${TOKEN}" "Generated subscription parameters: SUB_PORT=${SUB_PORT} TOKEN=${TOKEN}")"
   else
     TOKEN_CHANGED=0
-    pass "复用已有订阅参数：SUB_PORT=${SUB_PORT}（TOKEN 不变；如需轮换用 ownexit direct rotate-token）"
+    pass "$(L "复用已有订阅参数：SUB_PORT=${SUB_PORT}（TOKEN 不变；如需轮换用 ownexit direct rotate-token）" "Reusing the existing subscription parameters: SUB_PORT=${SUB_PORT} (TOKEN unchanged; to rotate it use ownexit direct rotate-token)")"
   fi
 }
 
@@ -574,19 +640,19 @@ upload_remote_script
 probe_server
 SYSTEMD_VERSION="$(kv_get "${PROBE}" SYSTEMD_VERSION)"
 [[ "${SYSTEMD_VERSION}" =~ ^[0-9]+$ ]] && (( SYSTEMD_VERSION >= 240 )) \
-  || die "VPS 的 systemd 版本为 ${SYSTEMD_VERSION:-未知}，需要 ≥ 240（Debian 10 / Ubuntu 20.04 及以上）"
-echo "[*] 服务器状态：STATE=${STATE} ARCH=${REMOTE_ARCH}"
+  || die "$(L "VPS 的 systemd 版本为 ${SYSTEMD_VERSION:-未知}，需要 ≥ 240（Debian 10 / Ubuntu 20.04 及以上）" "The VPS systemd version is ${SYSTEMD_VERSION:-unknown}; 240 or later is required (Debian 10 / Ubuntu 20.04 or later)")"
+echo "$(L "[*] 服务器状态：STATE=${STATE} ARCH=${REMOTE_ARCH}" "[*] Server state: STATE=${STATE} ARCH=${REMOTE_ARCH}")"
 
 # 未完成的操作先恢复（§5.1.2 第 5 条）：只有成功或已回到可用旧状态（rolled-back）才继续本次请求。
 if [[ "${STATE}" == in_progress ]]; then
-  echo "[*] 恢复上次未完成的操作：OP=$(kv_get "${PROBE}" TXN_OP) STEP=$(kv_get "${PROBE}" TXN_STEP)"
+  echo "$(L "[*] 恢复上次未完成的操作：OP=$(kv_get "${PROBE}" TXN_OP) STEP=$(kv_get "${PROBE}" TXN_STEP)" "[*] Resuming the unfinished operation: OP=$(kv_get "${PROBE}" TXN_OP) STEP=$(kv_get "${PROBE}" TXN_STEP)")"
   RECOVERED_ROTATE="$(kv_get "${PROBE}" TXN_ROTATE)"
   RECOVERED_DEVICE_ADD="$(kv_get "${PROBE}" TXN_DEVICE_ADD)"
   RECOVERED_DEVICE_REMOVE="$(kv_get "${PROBE}" TXN_DEVICE_REMOVE)"
   RECOVERED_PARAMS="$(kv_get "${PROBE}" TXN_PARAMS)"
   run_op_to_end
   if ! op_ok && [[ "$(kv_get "${OP_RESULT}" REASON)" != rolled-back ]]; then
-    die "上次未完成的操作恢复失败（REASON=$(kv_get "${OP_RESULT}" REASON)），本次请求未执行；详见上方 [vps] 日志与 ownexit direct log"
+    die "$(L "上次未完成的操作恢复失败（REASON=$(kv_get "${OP_RESULT}" REASON)），本次请求未执行；详见上方 [vps] 日志与 ownexit direct log" "Recovering the unfinished operation failed (REASON=$(kv_get "${OP_RESULT}" REASON)); this request was not carried out; see the [vps] log above and ownexit direct log")"
   fi
   # 恢复完成的是一次改参数：节点参数已变，后面要提示重新导入与同机链的 rebaseline。
   # 只有结果 ok 才算凭据已换；rolled-back 表示回到了旧凭据，本次 --rotate-keys 仍要照常执行。
@@ -599,35 +665,35 @@ if [[ "${STATE}" == in_progress ]]; then
       CHANGED_DEVICES=1
       # 恢复完成的正是本次要做的设备操作：不再重复提交（否则会报 device-exists / device-missing）。
       if [[ -n "${WANT_ADD_DEVICE}" && "${WANT_ADD_DEVICE}" == "${RECOVERED_DEVICE_ADD}" ]]; then
-        echo "[*] 刚恢复完成的操作已经新增了设备 ${WANT_ADD_DEVICE}，本次不再重复"
+        echo "$(L "[*] 刚恢复完成的操作已经新增了设备 ${WANT_ADD_DEVICE}，本次不再重复" "[*] The operation just recovered already added device ${WANT_ADD_DEVICE}; not repeating it")"
         WANT_ADD_DEVICE=""
       fi
       if [[ -n "${WANT_REMOVE_DEVICE}" && "${WANT_REMOVE_DEVICE}" == "${RECOVERED_DEVICE_REMOVE}" ]]; then
-        echo "[*] 刚恢复完成的操作已经吊销了设备 ${WANT_REMOVE_DEVICE}，本次不再重复"
+        echo "$(L "[*] 刚恢复完成的操作已经吊销了设备 ${WANT_REMOVE_DEVICE}，本次不再重复" "[*] The operation just recovered already revoked device ${WANT_REMOVE_DEVICE}; not repeating it")"
         WANT_REMOVE_DEVICE=""
       fi
     fi
   fi
   probe_server
-  echo "[*] 恢复后的服务器状态：STATE=${STATE}"
+  echo "$(L "[*] 恢复后的服务器状态：STATE=${STATE}" "[*] Server state after recovery: STATE=${STATE}")"
 fi
 
 # ---------- 卸载分支（§5.1.7） ----------
 
 if [[ "${DO_UNINSTALL}" == 1 ]]; then
   case "${STATE}" in
-    legacy) die "服务器是 233boy 旧版，ownexit 不会卸载它：先运行 ownexit direct migrate，或在 VPS 上用 233boy 自带的卸载" ;;
+    legacy) die "$(L "服务器是 233boy 旧版，ownexit 不会卸载它：先运行 ownexit direct migrate，或在 VPS 上用 233boy 自带的卸载" "The server runs the old 233boy install, which ownexit will not uninstall: run ownexit direct migrate first, or uninstall it on the VPS with 233boy's own uninstaller")" ;;
   esac
   LEFTOVER_STATE="${STATE}"
   # 先取消订阅自动关闭计时器：卸载后它到点去停一个已不存在的服务，会留下失败的瞬时单元。
   vssh "$(ttl_remote_cmd)" || true
   start_op uninstall
-  op_ok || die "卸载未完成（REASON=$(kv_get "${OP_RESULT}" REASON)）；重跑 ownexit direct uninstall 会从中断处继续"
+  op_ok || die "$(L "卸载未完成（REASON=$(kv_get "${OP_RESULT}" REASON)）；重跑 ownexit direct uninstall 会从中断处继续" "Uninstall did not finish (REASON=$(kv_get "${OP_RESULT}" REASON)); rerunning ownexit direct uninstall continues from where it stopped")"
   # 结果已读到、临时单元已结束：最后才删工作目录（结果通道在其中）。
   vssh "systemctl is-active --quiet '${OP_UNIT}' || rm -rf '${REMOTE_WORK}'" || true
   RESIDUE="$(vssh 'for u in ownexit-direct.service ownexit-subscription.service; do s=$(systemctl show "$u" -p LoadState --value 2>/dev/null); [ "$s" = not-found ] || echo "$u($s)"; done; for d in /etc/ownexit-direct /opt/ownexit-direct /opt/ownexit-subscription /var/lib/ownexit-direct; do [ -e "$d" ] && echo "$d"; done; true')"
-  [[ -z "${RESIDUE}" ]] || die "卸载后仍有残留：$(printf '%s' "${RESIDUE}" | tr '\n' ' ')"
-  pass "卸载残留核验通过"
+  [[ -z "${RESIDUE}" ]] || die "$(L "卸载后仍有残留：$(printf '%s' "${RESIDUE}" | tr '\n' ' ')" "Leftovers remain after uninstall: $(printf '%s' "${RESIDUE}" | tr '\n' ' ')")"
+  pass "$(L "卸载残留核验通过" "Uninstall leftover check passed")"
   rm -rf "${STATE_DIR}"
   if [[ "${LEFTOVER_STATE}" == conflict || "${LEFTOVER_STATE}" == migrated_leftover ]]; then
     # 卸载后实时核对 VPS 上剩下的 233boy / 其它 sing-box 文件（卸载前的 SEEN 还包含已删掉的 ownexit 路径）。
@@ -635,22 +701,24 @@ if [[ "${DO_UNINSTALL}" == 1 ]]; then
     if [[ -n "${OTHERS}" && "${LEFTOVER_STATE}" == conflict ]]; then
       # §5.1.3 conflict 行：只删 ownexit 的路径后仍不是 none，按失败退出。
       rm -rf "${STATE_DIR}"
-      die "已删除 ownexit 的文件，但 VPS 上仍有其它 sing-box 相关文件，未处理：$(printf '%s' "${OTHERS}" | tr '\n' ' ')"
+      die "$(L "已删除 ownexit 的文件，但 VPS 上仍有其它 sing-box 相关文件，未处理：$(printf '%s' "${OTHERS}" | tr '\n' ' ')" "ownexit's files were deleted, but other sing-box related files remain on the VPS and were not touched: $(printf '%s' "${OTHERS}" | tr '\n' ' ')")"
     elif [[ -n "${OTHERS}" ]]; then
-      echo "[!] 卸载只删除了 ownexit 的文件；VPS 上的 233boy 残留未处理：$(printf '%s' "${OTHERS}" | tr '\n' ' ')"
+      echo "$(L "[!] 卸载只删除了 ownexit 的文件；VPS 上的 233boy 残留未处理：$(printf '%s' "${OTHERS}" | tr '\n' ' ')" "[!] Uninstall only removed ownexit's files; the 233boy leftovers on the VPS were not touched: $(printf '%s' "${OTHERS}" | tr '\n' ' ')")"
     fi
   fi
-  vssh 'ls /var/backups/ownexit-direct/*.tar.gz 2>/dev/null' | sed 's/^/[*] 迁移备份仍保留（含旧私钥）：/' || true
-  echo "[*] 保留：SSH 免密密钥 ${KEY}、记住的目标、BBR 设置"
+  vssh 'ls /var/backups/ownexit-direct/*.tar.gz 2>/dev/null' | while IFS= read -r backup_file; do
+    echo "$(L "[*] 迁移备份仍保留（含旧私钥）：${backup_file}" "[*] Migration backup kept (contains the old private key): ${backup_file}")"
+  done || true
+  echo "$(L "[*] 保留：SSH 免密密钥 ${KEY}、记住的目标、BBR 设置" "[*] Kept: the SSH key ${KEY}, the remembered target, the BBR setting")"
   print_chain_hints
-  echo "[+] 卸载完成"
+  echo "$(L "[+] 卸载完成" "[+] Uninstall complete")"
   exit 0
 fi
 
 # ---------- 新装 / 复用 / 改参数 / 迁移 ----------
 
 read_client_env() {
-  CLIENT_ENV="$(vssh "cat /etc/ownexit-direct/client.env" 2>/dev/null)" || die "无法读取 VPS 上的 /etc/ownexit-direct/client.env"
+  CLIENT_ENV="$(vssh "cat /etc/ownexit-direct/client.env" 2>/dev/null)" || die "$(L "无法读取 VPS 上的 /etc/ownexit-direct/client.env" "Could not read /etc/ownexit-direct/client.env on the VPS")"
 }
 
 server_port_in_use() {
@@ -661,27 +729,27 @@ CHANGED_PARAMS="${CHANGED_PARAMS_RECOVERED:-0}"
 DO_ROTATE=0
 case "${STATE}" in
   none)
-    [[ "${DO_MIGRATE}" == 0 ]] || { echo "[!] 服务器上没有可迁移的 233boy 旧版" >&2; exit 2; }
-    [[ "${ROTATE_KEYS}" == 0 ]] || echo "[*] 新装本来就会生成全新凭据，忽略 rotate-keys"
-    [[ -z "${WANT_ADD_DEVICE}${WANT_REMOVE_DEVICE}" ]] || die_usage "服务器上还没有部署：先运行 ownexit direct up 完成部署，再新增 / 吊销设备"
+    [[ "${DO_MIGRATE}" == 0 ]] || { echo "$(L "[!] 服务器上没有可迁移的 233boy 旧版" "[!] There is no old 233boy install on the server to migrate")" >&2; exit 2; }
+    [[ "${ROTATE_KEYS}" == 0 ]] || echo "$(L "[*] 新装本来就会生成全新凭据，忽略 rotate-keys" "[*] A new install generates fresh credentials anyway; ignoring rotate-keys")"
+    [[ -z "${WANT_ADD_DEVICE}${WANT_REMOVE_DEVICE}" ]] || die_usage "$(L "服务器上还没有部署：先运行 ownexit direct up 完成部署，再新增 / 吊销设备" "Nothing is deployed on the server yet: run ownexit direct up to deploy first, then add / revoke devices")"
     ensure_sub_params
     if [[ -n "${WANT_PROXY_PORT}" ]]; then
-      [[ "${WANT_PROXY_PORT}" != "${SUB_PORT}" ]] || die_usage "--proxy-port 与订阅端口 ${SUB_PORT} 相同，请换一个"
-      ! server_port_in_use "${WANT_PROXY_PORT}" || die_usage "VPS 上端口 ${WANT_PROXY_PORT} 已被占用"
+      [[ "${WANT_PROXY_PORT}" != "${SUB_PORT}" ]] || die_usage "$(L "--proxy-port 与订阅端口 ${SUB_PORT} 相同，请换一个" "--proxy-port is the same as the subscription port ${SUB_PORT}; choose another")"
+      ! server_port_in_use "${WANT_PROXY_PORT}" || die_usage "$(L "VPS 上端口 ${WANT_PROXY_PORT} 已被占用" "Port ${WANT_PROXY_PORT} is already in use on the VPS")"
     fi
-    echo "[*] 新装：服务器自己下载 sing-box ${SING_BOX_VERSION} 官方包并生成密钥"
+    echo "$(L "[*] 新装：服务器自己下载 sing-box ${SING_BOX_VERSION} 官方包并生成密钥" "[*] New install: the server downloads the official sing-box ${SING_BOX_VERSION} package itself and generates the keys")"
     start_op fresh "SNI=${WANT_SNI:-${DIRECT_SNI_DEFAULT}}" "PROXY_PORT=${WANT_PROXY_PORT}"
-    op_ok || die "新装失败（REASON=$(kv_get "${OP_RESULT}" REASON)），VPS 已撤销本次写入；处理后重跑即可"
+    op_ok || die "$(L "新装失败（REASON=$(kv_get "${OP_RESULT}" REASON)），VPS 已撤销本次写入；处理后重跑即可" "New install failed (REASON=$(kv_get "${OP_RESULT}" REASON)); the VPS has undone this run's changes; fix the problem and rerun")"
     ;;
   ownexit|migrated_leftover)
     if [[ "${STATE}" == migrated_leftover && "${DO_MIGRATE}" == 1 ]]; then
-      echo "[*] 继续清理迁移残留的 233boy 文件"
+      echo "$(L "[*] 继续清理迁移残留的 233boy 文件" "[*] Continuing to clean up the 233boy files left by the migration")"
       start_op migrate "MIGRATE_START=CLEAN"
-      op_ok || die "迁移清理未完成（REASON=$(kv_get "${OP_RESULT}" REASON)）"
+      op_ok || die "$(L "迁移清理未完成（REASON=$(kv_get "${OP_RESULT}" REASON)）" "Migration cleanup did not finish (REASON=$(kv_get "${OP_RESULT}" REASON))")"
     elif [[ "${STATE}" == migrated_leftover ]]; then
-      echo "[!] 迁移未清理完，运行 ownexit direct migrate 继续清理 233boy 残留；本次按已迁移的新版处理"
+      echo "$(L "[!] 迁移未清理完，运行 ownexit direct migrate 继续清理 233boy 残留；本次按已迁移的新版处理" "[!] Migration cleanup is incomplete; run ownexit direct migrate to finish cleaning up the 233boy leftovers; treating it as the migrated new version this time")"
     elif [[ "${DO_MIGRATE}" == 1 ]]; then
-      echo "[*] 服务器已是新版，无需迁移，按复用处理"
+      echo "$(L "[*] 服务器已是新版，无需迁移，按复用处理" "[*] The server already runs the new version; no migration needed, reusing it")"
     fi
     ensure_sub_params
     read_client_env
@@ -691,33 +759,33 @@ case "${STATE}" in
     [[ -z "${WANT_SNI}" || "${WANT_SNI}" == "${CUR_SNI}" ]] || NEW_SNI="${WANT_SNI}"
     [[ -z "${WANT_PROXY_PORT}" || "${WANT_PROXY_PORT}" == "${CUR_PORT}" ]] || NEW_PORT="${WANT_PROXY_PORT}"
     if [[ "${ROTATE_KEYS}" == 1 && "${ROTATED}" == 1 ]]; then
-      echo "[*] 刚恢复完成的操作已经换过凭据，本次不再轮换"
+      echo "$(L "[*] 刚恢复完成的操作已经换过凭据，本次不再轮换" "[*] The operation just recovered already replaced the credentials; not rotating again")"
     elif [[ "${ROTATE_KEYS}" == 1 ]]; then
       DO_ROTATE=1
     fi
     if [[ -n "${NEW_SNI}" || -n "${NEW_PORT}" || "${DO_ROTATE}" == 1 || -n "${WANT_ADD_DEVICE}${WANT_REMOVE_DEVICE}" ]]; then
       if [[ -n "${NEW_PORT}" ]]; then
-        [[ "${NEW_PORT}" != "${SUB_PORT}" ]] || die_usage "--proxy-port 与订阅端口 ${SUB_PORT} 相同，请换一个"
-        ! server_port_in_use "${NEW_PORT}" || die_usage "VPS 上端口 ${NEW_PORT} 已被占用"
+        [[ "${NEW_PORT}" != "${SUB_PORT}" ]] || die_usage "$(L "--proxy-port 与订阅端口 ${SUB_PORT} 相同，请换一个" "--proxy-port is the same as the subscription port ${SUB_PORT}; choose another")"
+        ! server_port_in_use "${NEW_PORT}" || die_usage "$(L "VPS 上端口 ${NEW_PORT} 已被占用" "Port ${NEW_PORT} is already in use on the VPS")"
       fi
       if [[ "${DO_ROTATE}" == 1 ]]; then
-        CRED_NOTE="凭据=重新生成 UUID / Reality 密钥 / short id"
+        CRED_NOTE="$(L "凭据=重新生成 UUID / Reality 密钥 / short id" "credentials=new UUID / Reality key / short id")"
       else
-        CRED_NOTE="UUID 与密钥不变"
+        CRED_NOTE="$(L "UUID 与密钥不变" "UUID and keys unchanged")"
       fi
       DEVICE_NOTE=""
-      [[ -z "${WANT_ADD_DEVICE}" ]] || DEVICE_NOTE="，设备=新增 ${WANT_ADD_DEVICE}"
-      [[ -z "${WANT_REMOVE_DEVICE}" ]] || DEVICE_NOTE="，设备=吊销 ${WANT_REMOVE_DEVICE}"
-      echo "[*] 改参数：sni ${CUR_SNI} -> ${NEW_SNI:-不变}，port ${CUR_PORT} -> ${NEW_PORT:-不变}（${CRED_NOTE}${DEVICE_NOTE}）"
+      [[ -z "${WANT_ADD_DEVICE}" ]] || DEVICE_NOTE="$(L "，设备=新增 ${WANT_ADD_DEVICE}" ", devices=add ${WANT_ADD_DEVICE}")"
+      [[ -z "${WANT_REMOVE_DEVICE}" ]] || DEVICE_NOTE="$(L "，设备=吊销 ${WANT_REMOVE_DEVICE}" ", devices=revoke ${WANT_REMOVE_DEVICE}")"
+      echo "$(L "[*] 改参数：sni ${CUR_SNI} -> ${NEW_SNI:-不变}，port ${CUR_PORT} -> ${NEW_PORT:-不变}（${CRED_NOTE}${DEVICE_NOTE}）" "[*] Changing parameters: sni ${CUR_SNI} -> ${NEW_SNI:-unchanged}, port ${CUR_PORT} -> ${NEW_PORT:-unchanged} (${CRED_NOTE}${DEVICE_NOTE})")"
       start_op reparam "NEW_SNI=${NEW_SNI}" "NEW_PORT=${NEW_PORT}" "ROTATE=${DO_ROTATE}" \
         "DEVICE_ADD=${WANT_ADD_DEVICE}" "DEVICE_REMOVE=${WANT_REMOVE_DEVICE}"
       if ! op_ok; then
         case "$(kv_get "${OP_RESULT}" REASON)" in
-          *device-exists) die_usage "设备 ${WANT_ADD_DEVICE} 已存在（ownexit direct devices 查看现有设备），VPS 未改动" ;;
-          *device-missing) die_usage "没有名为 ${WANT_REMOVE_DEVICE} 的设备（ownexit direct devices 查看现有设备），VPS 未改动" ;;
-          *device-limit) die_usage "设备数已达上限 32（含 default），VPS 未改动" ;;
+          *device-exists) die_usage "$(L "设备 ${WANT_ADD_DEVICE} 已存在（ownexit direct devices 查看现有设备），VPS 未改动" "Device ${WANT_ADD_DEVICE} already exists (list devices with ownexit direct devices); the VPS was not changed")" ;;
+          *device-missing) die_usage "$(L "没有名为 ${WANT_REMOVE_DEVICE} 的设备（ownexit direct devices 查看现有设备），VPS 未改动" "There is no device named ${WANT_REMOVE_DEVICE} (list devices with ownexit direct devices); the VPS was not changed")" ;;
+          *device-limit) die_usage "$(L "设备数已达上限 32（含 default），VPS 未改动" "The device limit of 32 (including default) is reached; the VPS was not changed")" ;;
         esac
-        die "改参数失败（REASON=$(kv_get "${OP_RESULT}" REASON)），VPS 已恢复原配置"
+        die "$(L "改参数失败（REASON=$(kv_get "${OP_RESULT}" REASON)），VPS 已恢复原配置" "Changing parameters failed (REASON=$(kv_get "${OP_RESULT}" REASON)); the VPS restored the original configuration")"
       fi
       # 只有 SNI / 端口 / 凭据变化才要求已导入的设备重新拉订阅；纯设备增删不影响其它设备。
       [[ -z "${NEW_SNI}${NEW_PORT}" && "${DO_ROTATE}" == 0 ]] || CHANGED_PARAMS=1
@@ -726,33 +794,33 @@ case "${STATE}" in
     else
       BIN_OK="$(vssh "test -f /opt/ownexit-direct/bin/sing-box-${SING_BOX_VERSION} && sha256sum /opt/ownexit-direct/bin/sing-box-${SING_BOX_VERSION} | awk '{print \$1}'" 2>/dev/null || true)"
       if [[ "${BIN_OK}" != "${BINARY_SHA256}" ]] || ! vssh "systemctl is-active --quiet ownexit-direct" >/dev/null 2>&1; then
-        echo "[*] 二进制缺失或服务未运行，修复中"
+        echo "$(L "[*] 二进制缺失或服务未运行，修复中" "[*] The binary is missing or the service is not running; repairing")"
         start_op repair
-        op_ok || die "服务无法启动（REASON=$(kv_get "${OP_RESULT}" REASON)），配置文件未改动；运行 ownexit direct log 查看原因"
+        op_ok || die "$(L "服务无法启动（REASON=$(kv_get "${OP_RESULT}" REASON)），配置文件未改动；运行 ownexit direct log 查看原因" "The service cannot start (REASON=$(kv_get "${OP_RESULT}" REASON)); the configuration file was not changed; run ownexit direct log to see why")"
       else
-        pass "ownexit-direct 已在运行，参数不变"
+        pass "$(L "ownexit-direct 已在运行，参数不变" "ownexit-direct is already running; parameters unchanged")"
       fi
     fi
     ;;
   legacy)
     if [[ "${DO_MIGRATE}" == 0 ]]; then
-      echo "[!] 服务器上是用 233boy 脚本装的旧版。运行 ownexit direct migrate 换成本项目的服务：" >&2
-      echo "    沿用原有 UUID / 密钥 / 端口 / SNI，客户端与订阅链接不用动；服务器本次未做任何改动" >&2
+      echo "$(L "[!] 服务器上是用 233boy 脚本装的旧版。运行 ownexit direct migrate 换成本项目的服务：" "[!] The server runs the old install set up with the 233boy script. Run ownexit direct migrate to switch to this project's service:")" >&2
+      echo "$(L "    沿用原有 UUID / 密钥 / 端口 / SNI，客户端与订阅链接不用动；服务器本次未做任何改动" "    it keeps the existing UUID / keys / port / SNI, so clients and subscription URLs need no changes; nothing was changed on the server this time")" >&2
       exit 2
     fi
     [[ "$(kv_get "${PROBE}" LEGACY_ACTIVE)" == yes ]] \
-      || die "233boy 的 sing-box 服务当前没有运行；先在 VPS 上用 sb 把它恢复运行再迁移（保证失败时能回退到可用状态）"
+      || die "$(L "233boy 的 sing-box 服务当前没有运行；先在 VPS 上用 sb 把它恢复运行再迁移（保证失败时能回退到可用状态）" "233boy's sing-box service is not running; restore it with sb on the VPS before migrating (so a failure can fall back to a working state)")"
     ensure_sub_params
-    echo "[*] 迁移：沿用 233boy 的节点参数，换成 ownexit-direct 服务（切换时代理中断约 1-3 秒）"
+    echo "$(L "[*] 迁移：沿用 233boy 的节点参数，换成 ownexit-direct 服务（切换时代理中断约 1-3 秒）" "[*] Migrating: keeping 233boy's node parameters and switching to the ownexit-direct service (about 1-3 seconds of proxy downtime during the switch)")"
     start_op migrate
-    op_ok || die "迁移失败（REASON=$(kv_get "${OP_RESULT}" REASON)）；详见上方 [vps] 日志"
+    op_ok || die "$(L "迁移失败（REASON=$(kv_get "${OP_RESULT}" REASON)）；详见上方 [vps] 日志" "Migration failed (REASON=$(kv_get "${OP_RESULT}" REASON)); see the [vps] log above")"
     CHANGED_PARAMS=1
     ;;
   conflict)
-    die "VPS 上的文件组合无法自动处理：$(kv_get "${PROBE}" SEEN)（sing-box.service=$(kv_get "${PROBE}" SINGBOX_UNIT)）。可运行 ownexit direct uninstall 只删除 ownexit 的文件"
+    die "$(L "VPS 上的文件组合无法自动处理：$(kv_get "${PROBE}" SEEN)（sing-box.service=$(kv_get "${PROBE}" SINGBOX_UNIT)）。可运行 ownexit direct uninstall 只删除 ownexit 的文件" "The combination of files on the VPS cannot be handled automatically: $(kv_get "${PROBE}" SEEN) (sing-box.service=$(kv_get "${PROBE}" SINGBOX_UNIT)). Run ownexit direct uninstall to delete only ownexit's files")"
     ;;
   *)
-    die "未知服务器状态：${STATE}"
+    die "$(L "未知服务器状态：${STATE}" "Unknown server state: ${STATE}")"
     ;;
 esac
 
@@ -760,7 +828,7 @@ esac
 
 read_client_env
 # 设备表（名字=UUID，不含 default）：服务器是唯一权威源，本机只记每台设备的订阅 TOKEN。
-DEVICES_ENV="$(vssh "cat /etc/ownexit-direct/devices.env 2>/dev/null || true")" || die "无法读取 VPS 上的设备表"
+DEVICES_ENV="$(vssh "cat /etc/ownexit-direct/devices.env 2>/dev/null || true")" || die "$(L "无法读取 VPS 上的设备表" "Could not read the device list on the VPS")"
 PROXY_PORT="$(kv_get "${CLIENT_ENV}" PORT)"
 PROXY_UUID="$(kv_get "${CLIENT_ENV}" UUID)"
 PROXY_PBK="$(kv_get "${CLIENT_ENV}" PUBLIC_KEY)"
@@ -768,11 +836,11 @@ PROXY_SID="$(kv_get "${CLIENT_ENV}" SHORT_ID)"
 PROXY_SNI="$(kv_get "${CLIENT_ENV}" SNI)"
 PROXY_FLOW="$(kv_get "${CLIENT_ENV}" FLOW)"
 [[ "${PROXY_PORT}" =~ ^[0-9]+$ && -n "${PROXY_UUID}" && -n "${PROXY_PBK}" && -n "${PROXY_SNI}" ]] \
-  || die "VPS 上的 client.env 不完整：${CLIENT_ENV}"
+  || die "$(L "VPS 上的 client.env 不完整：${CLIENT_ENV}" "client.env on the VPS is incomplete: ${CLIENT_ENV}")"
 
 # 节点地址取 VPS 公网 IP（与 233boy 原节点地址同源时订阅逐字不变），取不到时退回 SSH 地址。
 PROXY_SERVER="${VPS_PUBLIC_IP:-${HOST}}"
-pass "节点参数：server=${PROXY_SERVER} port=${PROXY_PORT} sni=${PROXY_SNI} flow=${PROXY_FLOW:-无} sid=${PROXY_SID:-空} source=$(kv_get "${CLIENT_ENV}" SOURCE)"
+pass "$(L "节点参数：server=${PROXY_SERVER} port=${PROXY_PORT} sni=${PROXY_SNI} flow=${PROXY_FLOW:-无} sid=${PROXY_SID:-空} source=$(kv_get "${CLIENT_ENV}" SOURCE)" "Node parameters: server=${PROXY_SERVER} port=${PROXY_PORT} sni=${PROXY_SNI} flow=${PROXY_FLOW:-none} sid=${PROXY_SID:-empty} source=$(kv_get "${CLIENT_ENV}" SOURCE)")"
 
 # 节点链接字段顺序与链式一致（chain/setup_chain.sh:4116）；FLOW 为空时省略 flow=。
 FLOW_PARAM=""
@@ -800,16 +868,16 @@ if [[ "${SUB_PORT}" == "${PROXY_PORT}" ]]; then
     vssh "ss -ltn | awk '{print \$4}' | grep -q ':${SUB_PORT}\$'" >/dev/null 2>&1 || break
     SUB_PORT=""
   done
-  [[ -n "${SUB_PORT}" ]] || die "连续 10 次未找到空闲订阅端口，请人工检查 VPS 端口占用"
+  [[ -n "${SUB_PORT}" ]] || die "$(L "连续 10 次未找到空闲订阅端口，请人工检查 VPS 端口占用" "No free subscription port found after 10 tries; check port usage on the VPS by hand")"
   TOKEN_CHANGED=1
-  echo "[!] 订阅端口 ${OLD_SUB_PORT} 与代理端口相同，改为 ${SUB_PORT}（TOKEN 不变），客户端需要重新导入订阅"
+  echo "$(L "[!] 订阅端口 ${OLD_SUB_PORT} 与代理端口相同，改为 ${SUB_PORT}（TOKEN 不变），客户端需要重新导入订阅" "[!] The subscription port ${OLD_SUB_PORT} equals the proxy port; changing it to ${SUB_PORT} (TOKEN unchanged); clients must import the subscription again")"
 fi
 if [[ "${TOKEN_CHANGED:-0}" == "1" ]]; then
   printf 'SUB_PORT=%s\nTOKEN=%s\n' "${SUB_PORT}" "${TOKEN}" > "${STATE_FILE}"
   chmod 600 "${STATE_FILE}"
 fi
 
-echo "[*] 本地渲染订阅产物：${STAGING}"
+echo "$(L "[*] 本地渲染订阅产物：${STAGING}" "[*] Rendering the subscription locally: ${STAGING}")"
 rm -rf "${STAGING}"
 mkdir -p "${STAGING}/${TOKEN}"
 
@@ -973,12 +1041,12 @@ SR_LINK="$(make_sr_link "${PROXY_UUID}" "${NODE_NAME}")"
 # 根目录、本文件、index.html 一律 404，防目录列表不再依赖它。
 : > "${STAGING}/index.html"
 # 订阅服务脚本随订阅目录一起同步到 VPS：按客户端 User-Agent 返回对应格式的 /<TOKEN>/sub，老的固定文件路径照旧。
-cp "${SCRIPT_DIR}/subserver.py" "${STAGING}/subserver.py" || die "复制 subserver.py 失败"
+cp "${SCRIPT_DIR}/subserver.py" "${STAGING}/subserver.py" || die "$(L "复制 subserver.py 失败" "Copying subserver.py failed")"
 chmod 644 "${STAGING}/subserver.py"
 # 本机有 python3 时先编译一遍（compile 不写 __pycache__），别把语法错的脚本送上服务器。
 if command -v python3 >/dev/null 2>&1; then
   python3 -c 'import sys; compile(open(sys.argv[1]).read(), sys.argv[1], "exec")' "${STAGING}/subserver.py" \
-    || die "subserver.py 编译失败"
+    || die "$(L "subserver.py 编译失败" "Compiling subserver.py failed")"
 fi
 
 # 订阅服务 systemd 单元：SUB_PORT 在本地渲染时替换（systemd 不展开占位符）。
@@ -1002,30 +1070,30 @@ EOF
 # 本地校验渲染结果：关键字段必须齐全且无占位符残留
 for field in "server: ${PROXY_SERVER}" "uuid: ${PROXY_UUID}" "public-key: ${PROXY_PBK}"; do
   grep -qF "${field}" "${STAGING}/${TOKEN}/clash.yaml" \
-    || die "本地渲染的 clash.yaml 缺少字段：${field}"
+    || die "$(L "本地渲染的 clash.yaml 缺少字段：${field}" "The locally rendered clash.yaml lacks a field: ${field}")"
 done
 for field in "\"server\": \"${PROXY_SERVER}\"" "\"uuid\": \"${PROXY_UUID}\"" "\"public_key\": \"${PROXY_PBK}\""; do
   grep -qF "${field}" "${STAGING}/${TOKEN}/sing-box.json" \
-    || die "本地渲染的 sing-box.json 缺少字段：${field}"
+    || die "$(L "本地渲染的 sing-box.json 缺少字段：${field}" "The locally rendered sing-box.json lacks a field: ${field}")"
 done
 # 有 python3 时再做一次 JSON 解析（不新增本机依赖：没有就跳过）。
 if command -v python3 >/dev/null 2>&1; then
   python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "${STAGING}/${TOKEN}/sing-box.json" \
-    || die "本地渲染的 sing-box.json 不是合法 JSON"
+    || die "$(L "本地渲染的 sing-box.json 不是合法 JSON" "The locally rendered sing-box.json is not valid JSON")"
 fi
 grep -qF "subserver.py --port ${SUB_PORT} " "${STAGING}/${SUB_SERVICE}.service" \
-  || die "systemd 单元 SUB_PORT 替换失败"
-pass "本地订阅产物渲染并校验完成"
+  || die "$(L "systemd 单元 SUB_PORT 替换失败" "Substituting SUB_PORT in the systemd unit failed")"
+pass "$(L "本地订阅产物渲染并校验完成" "Local subscription rendered and validated")"
 
 # ---------- 7. 同步到 VPS 并启用订阅服务 ----------
 
-echo "[*] 调用 sync_to_vps.sh 一次性同步到 VPS"
+echo "$(L "[*] 调用 sync_to_vps.sh 一次性同步到 VPS" "[*] Syncing to the VPS in one go with sync_to_vps.sh")"
 bash "${SCRIPT_DIR}/sync_to_vps.sh" --host "${HOST}" --user "${SSH_USER}" --port "${SSH_PORT}" \
   "${STAGING}" "$(dirname "${SUB_BASE_DIR}")"
 
 # 轮换 TOKEN 后清理 VPS 上的旧 TOKEN 目录（格式校验防误删）
 if [[ -n "${OLD_TOKEN}" && "${OLD_TOKEN}" != "${TOKEN}" && "${OLD_TOKEN}" =~ ^[0-9a-f]{32}$ ]]; then
-  echo "[*] 清理旧 TOKEN 目录：${SUB_BASE_DIR}/${OLD_TOKEN}"
+  echo "$(L "[*] 清理旧 TOKEN 目录：${SUB_BASE_DIR}/${OLD_TOKEN}" "[*] Removing the old TOKEN directory: ${SUB_BASE_DIR}/${OLD_TOKEN}")"
   vssh "rm -rf '${SUB_BASE_DIR}/${OLD_TOKEN}'" || true
 fi
 # 吊销设备与换下的设备 TOKEN：只删本机记录过的目录，不删本机不认识的（可能是另一台电脑生成的订阅）。
@@ -1033,7 +1101,7 @@ if [[ -n "${PENDING_DELETE}" ]]; then
   DELETE_FAILED=0
   while IFS='=' read -r dev_name dev_token; do
     [[ -n "${dev_token}" && "${dev_token}" =~ ^[0-9a-f]{32}$ ]] || continue
-    echo "[*] 清理设备 ${dev_name#!} 的旧订阅目录"
+    echo "$(L "[*] 清理设备 ${dev_name#!} 的旧订阅目录" "[*] Removing the old subscription directory of device ${dev_name#!}")"
     vssh "rm -rf '${SUB_BASE_DIR}/${dev_token}'" || DELETE_FAILED=1
   done <<< "${PENDING_DELETE}"
   if [[ "${DELETE_FAILED}" == 0 && -f "${DEVICE_TOKENS_FILE}" ]]; then
@@ -1042,11 +1110,11 @@ if [[ -n "${PENDING_DELETE}" ]]; then
     mv -f "${DEVICE_TOKENS_FILE}.tmp" "${DEVICE_TOKENS_FILE}"
     [[ -s "${DEVICE_TOKENS_FILE}" ]] || rm -f "${DEVICE_TOKENS_FILE}"
   elif [[ "${DELETE_FAILED}" == 1 ]]; then
-    echo "[!] 有设备的旧订阅目录没删掉，下次运行会再试"
+    echo "$(L "[!] 有设备的旧订阅目录没删掉，下次运行会再试" "[!] Some devices' old subscription directories were not deleted; the next run will try again")"
   fi
 fi
 
-echo "[*] 启用订阅服务 ${SUB_SERVICE}"
+echo "$(L "[*] 启用订阅服务 ${SUB_SERVICE}" "[*] Enabling the subscription service ${SUB_SERVICE}")"
 vssh "bash -s" <<REMOTE
 set -euo pipefail
 install -m 644 '${SUB_BASE_DIR}/${SUB_SERVICE}.service' '/etc/systemd/system/${SUB_SERVICE}.service'
@@ -1057,17 +1125,17 @@ systemctl restart '${SUB_SERVICE}'
 # 先清掉上一次留下的自动关闭计时器（不存在时无副作用）；给了 --sub-ttl 才再起一个。
 $(ttl_remote_cmd "${SUB_TTL_SECONDS}")
 REMOTE
-pass "订阅服务已启动"
-[[ -z "${WANT_SUB_TTL}" ]] || pass "订阅服务将在 ${WANT_SUB_TTL} 后自动关闭"
+pass "$(L "订阅服务已启动" "Subscription service started")"
+[[ -z "${WANT_SUB_TTL}" ]] || pass "$(L "订阅服务将在 ${WANT_SUB_TTL} 后自动关闭" "The subscription service will turn itself off in ${WANT_SUB_TTL}")"
 
 # 防火墙：只在 ufw 已启用时放行代理端口和订阅端口，不主动开启防火墙
 UFW_STATUS="$(vssh "command -v ufw >/dev/null 2>&1 && ufw status | head -n 1 || echo none" || true)"
 if [[ "${UFW_STATUS}" == *active* && "${UFW_STATUS}" != *inactive* ]]; then
-  echo "[*] ufw 已启用，放行代理端口 ${PROXY_PORT} 与订阅端口 ${SUB_PORT}"
+  echo "$(L "[*] ufw 已启用，放行代理端口 ${PROXY_PORT} 与订阅端口 ${SUB_PORT}" "[*] ufw is enabled; allowing the proxy port ${PROXY_PORT} and the subscription port ${SUB_PORT}")"
   vssh "ufw allow ${PROXY_PORT}/tcp >/dev/null && ufw allow ${SUB_PORT}/tcp >/dev/null" \
-    || fail "ufw 放行端口失败，请人工处理"
+    || fail "$(L "ufw 放行端口失败，请人工处理" "ufw failed to allow the ports; handle it by hand")"
 elif [[ "${UFW_STATUS}" != "none" && "${UFW_STATUS}" != *inactive* ]]; then
-  echo "[!] 无法确认防火墙状态（${UFW_STATUS}），若客户端连不上请检查 VPS 防火墙/服务商安全组放行 ${PROXY_PORT} 和 ${SUB_PORT}"
+  echo "$(L "[!] 无法确认防火墙状态（${UFW_STATUS}），若客户端连不上请检查 VPS 防火墙/服务商安全组放行 ${PROXY_PORT} 和 ${SUB_PORT}" "[!] Cannot determine the firewall state (${UFW_STATUS}); if clients cannot connect, make sure the VPS firewall / provider security group allows ${PROXY_PORT} and ${SUB_PORT}")"
 fi
 
 # ---------- 8. 分层验证 ----------
@@ -1079,41 +1147,41 @@ NODE_URL="http://${HOST}:${SUB_PORT}/${TOKEN}/node.txt"
 # 自适应地址：服务器按客户端 User-Agent 返回上面三种格式之一，用户只需要这一条。
 SUB_URL="http://${HOST}:${SUB_PORT}/${TOKEN}/sub"
 
-echo "[*] 验证：VPS 主机层"
+echo "$(L "[*] 验证：VPS 主机层" "[*] Verifying: VPS host")"
 if [[ "$(vssh 'systemctl is-active ownexit-direct' 2>/dev/null || true)" == "active" ]]; then
-  pass "ownexit-direct 服务 active"
+  pass "$(L "ownexit-direct 服务 active" "ownexit-direct service active")"
 else
-  fail "ownexit-direct 服务非 active，运行 ownexit direct log 查看日志"
+  fail "$(L "ownexit-direct 服务非 active，运行 ownexit direct log 查看日志" "ownexit-direct service is not active; run ownexit direct log to see the log")"
 fi
 if vssh "ss -ltn | awk '{print \$4}' | grep -q ':${PROXY_PORT}\$'" >/dev/null 2>&1; then
-  pass "代理端口 ${PROXY_PORT} 监听中"
+  pass "$(L "代理端口 ${PROXY_PORT} 监听中" "Proxy port ${PROXY_PORT} is listening")"
 else
-  fail "代理端口 ${PROXY_PORT} 未监听"
+  fail "$(L "代理端口 ${PROXY_PORT} 未监听" "Proxy port ${PROXY_PORT} is not listening")"
 fi
 
-echo "[*] 验证：订阅服务层"
+echo "$(L "[*] 验证：订阅服务层" "[*] Verifying: subscription service")"
 if [[ "$(vssh "systemctl is-active ${SUB_SERVICE}" 2>/dev/null || true)" == "active" ]]; then
-  pass "${SUB_SERVICE} 服务 active"
+  pass "$(L "${SUB_SERVICE} 服务 active" "${SUB_SERVICE} service active")"
 else
-  fail "${SUB_SERVICE} 服务非 active"
+  fail "$(L "${SUB_SERVICE} 服务非 active" "${SUB_SERVICE} service is not active")"
 fi
 if vssh "ss -ltn | awk '{print \$4}' | grep -q ':${SUB_PORT}\$'" >/dev/null 2>&1; then
-  pass "订阅端口 ${SUB_PORT} 监听中"
+  pass "$(L "订阅端口 ${SUB_PORT} 监听中" "Subscription port ${SUB_PORT} is listening")"
 else
-  fail "订阅端口 ${SUB_PORT} 未监听"
+  fail "$(L "订阅端口 ${SUB_PORT} 未监听" "Subscription port ${SUB_PORT} is not listening")"
 fi
 
-echo "[*] 验证：本机拉取订阅"
+echo "$(L "[*] 验证：本机拉取订阅" "[*] Verifying: fetching the subscription from this computer")"
 if curl -fsS -m 15 "${CLASH_URL}" | cmp -s - "${STAGING}/${TOKEN}/clash.yaml"; then
-  pass "Clash 订阅链接可拉取且与本地渲染一致"
+  pass "$(L "Clash 订阅链接可拉取且与本地渲染一致" "The Clash subscription URL can be fetched and matches the local rendering")"
 else
-  fail "Clash 订阅链接拉取失败或内容不一致：${CLASH_URL}"
+  fail "$(L "Clash 订阅链接拉取失败或内容不一致：${CLASH_URL}" "Fetching the Clash subscription URL failed or the content differs: ${CLASH_URL}")"
 fi
 # 自适应订阅：四种 User-Agent 必须各自拿到对应文件（最后一种模拟认不出的客户端 → base64 列表）。
 SUB_OK=1
 while IFS='|' read -r ua expected; do
   if ! curl -fsS -m 15 -A "${ua}" "${SUB_URL}" 2>/dev/null | cmp -s - "${STAGING}/${TOKEN}/${expected}"; then
-    fail "自适应订阅 UA=${ua} 返回与 ${expected} 不一致：${SUB_URL}"
+    fail "$(L "自适应订阅 UA=${ua} 返回与 ${expected} 不一致：${SUB_URL}" "The adaptive subscription returned something other than ${expected} for UA=${ua}: ${SUB_URL}")"
     SUB_OK=0
   fi
 done <<'UA_CASES'
@@ -1122,27 +1190,65 @@ SFA/1.12 sing-box|sing-box.json
 Shadowrocket/2.2|shadowrocket.txt
 curl/8|shadowrocket.txt
 UA_CASES
-[[ "${SUB_OK}" == 0 ]] || pass "自适应订阅：clash / sing-box / shadowrocket / 未知 UA 四种返回正确"
+[[ "${SUB_OK}" == 0 ]] || pass "$(L "自适应订阅：clash / sing-box / shadowrocket / 未知 UA 四种返回正确" "Adaptive subscription: correct responses for the clash / sing-box / shadowrocket / unknown UAs")"
 # 非白名单路径一律 404：根目录、服务脚本本身、TOKEN 目录都不能列出或下载，TOKEN 不泄露。
 NOT_FOUND_OK=1
 for probe in "/" "/subserver.py" "/${TOKEN}/"; do
   code="$(curl -s -m 15 -o /dev/null -w '%{http_code}' "http://${HOST}:${SUB_PORT}${probe}" 2>/dev/null || echo 000)"
   if [[ "${code}" != 404 ]]; then
-    fail "订阅服务对 ${probe} 返回 ${code}（应为 404）"
+    fail "$(L "订阅服务对 ${probe} 返回 ${code}（应为 404）" "The subscription service returned ${code} for ${probe} (should be 404)")"
     NOT_FOUND_OK=0
   fi
 done
-[[ "${NOT_FOUND_OK}" == 0 ]] || pass "订阅服务非白名单路径返回 404，TOKEN 不泄露"
+[[ "${NOT_FOUND_OK}" == 0 ]] || pass "$(L "订阅服务非白名单路径返回 404，TOKEN 不泄露" "The subscription service returns 404 for paths outside the allow-list; the TOKEN is not exposed")"
 
 # ---------- 9. 交付汇总 ----------
 
 if [[ -n "${WANT_SUB_TTL}" ]]; then
-  SUB_CLOSE_HINT="订阅服务将在 ${WANT_SUB_TTL} 后自动关闭，到时请先导入完"
+  SUB_CLOSE_HINT="$(L "订阅服务将在 ${WANT_SUB_TTL} 后自动关闭，到时请先导入完" "The subscription service turns itself off in ${WANT_SUB_TTL}; finish importing before then")"
 else
-  SUB_CLOSE_HINT="所有设备都导入后，关掉订阅服务缩小暴露面：ownexit direct sub stop"
+  SUB_CLOSE_HINT="$(L "所有设备都导入后，关掉订阅服务缩小暴露面：ownexit direct sub stop" "Once every device has imported, turn the subscription service off to reduce exposure: ownexit direct sub stop")"
 fi
 
-cat <<EOF
+if [[ "${OWNEXIT_UI_LANG}" == en ]]; then
+  cat <<EOF
+
+==================== Result ====================
+Next steps (the usual path):
+  1. Import: paste this one subscription URL into every client (Clash Verge / mihomo / Shadowrocket / v2rayN / sing-box each get their own format):
+           ${SUB_URL}
+           iPhone / Android can also scan the QR code below
+  2. Open https://ipinfo.io on the device; it should show ${VPS_PUBLIC_IP:-VPS IP}
+  3. ${SUB_CLOSE_HINT}
+  4. If something is wrong, run: ownexit doctor
+
+Subscription URLs with a fixed client format (usually not needed; use them when the adaptive URL does not recognise your client):
+  Clash Verge / mihomo : ${CLASH_URL}
+  Shadowrocket / v2rayN: ${SR_URL}
+  sing-box             : ${SINGBOX_URL}
+  Node link backup (plaintext): ${NODE_URL}
+
+vless node link (troubleshooting / backup only):
+  ${SR_LINK}
+
+Manual steps afterwards:
+  1. Clash Verge / mihomo: on the Subscriptions page paste the Clash subscription URL -> import and select it -> on the Proxies
+     page pick ${NODE_NAME} in the PROXY group -> turn on the system proxy (or Tun mode) -> choose Rule mode
+  2. iPhone Shadowrocket: + -> Subscribe -> paste the Shadowrocket subscription URL -> connect
+     v2rayN / v2rayNG: subscription group -> add -> paste the same URL -> update the subscription
+     official sing-box client (1.12+): Profiles -> New -> Remote -> paste the sing-box subscription URL
+  3. Once connected, visit ipinfo.io and confirm the exit IP = ${VPS_PUBLIC_IP:-VPS IP}
+  4. ${SUB_CLOSE_HINT}
+
+Security reminders:
+  - The subscription is plain HTTP: fetch it by hand only when adding / updating a client; do not set frequent automatic updates
+  - To import on a new device later: ownexit direct sub start --ttl 30m (turns itself off when due), or sub start, import, then sub stop
+  - If the subscription may have leaked: ownexit direct rotate-token
+  - If the node credentials may have leaked: ownexit direct rotate-keys (every device must re-import)
+EOF
+else
+  # i18n:zh-begin
+  cat <<EOF
 
 ==================== 交付结果 ====================
 下一步（最常用）:
@@ -1177,32 +1283,34 @@ vless 节点链接（仅故障排查/备份用）:
   - 怀疑订阅泄露时运行：ownexit direct rotate-token
   - 怀疑节点凭据泄露时运行：ownexit direct rotate-keys（所有设备都要重新导入）
 EOF
+  # i18n:zh-end
+fi
 if command -v qrencode >/dev/null 2>&1; then
   echo
-  echo "节点二维码（iPhone Shadowrocket / 安卓客户端扫码导入）:"
+  echo "$(L "节点二维码（iPhone Shadowrocket / 安卓客户端扫码导入）:" "Node QR code (scan with iPhone Shadowrocket / Android clients):")"
   qrencode -t ANSIUTF8 < "${STAGING}/${TOKEN}/node.txt"
 else
-  echo "[*] 想在终端显示节点二维码：安装 qrencode（macOS: brew install qrencode）后运行 ownexit direct qr"
+  echo "$(L "[*] 想在终端显示节点二维码：安装 qrencode（macOS: brew install qrencode）后运行 ownexit direct qr" "[*] To show the node QR code in the terminal: install qrencode (macOS: brew install qrencode), then run ownexit direct qr")"
 fi
 if [[ -n "${NEW_DEVICE_TOKENS}" ]]; then
   echo
-  echo "设备订阅（每台设备只导入自己那一组；default 就是上面的链接）:"
+  echo "$(L "设备订阅（每台设备只导入自己那一组；default 就是上面的链接）:" "Device subscriptions (each device imports only its own set; default is the URL above):")"
   while IFS='=' read -r dev_name dev_token; do
     [[ -n "${dev_name}" ]] || continue
     mark=""
-    [[ "${dev_name}" != "${WANT_ADD_DEVICE:-}" || -z "${WANT_ADD_DEVICE:-}" ]] || mark="  ← 新增：只把这一组发给新设备"
-    echo "  设备 ${dev_name}${mark}"
-    echo "    自适应（推荐）       : http://${HOST}:${SUB_PORT}/${dev_token}/sub"
+    [[ "${dev_name}" != "${WANT_ADD_DEVICE:-}" || -z "${WANT_ADD_DEVICE:-}" ]] || mark="$(L "  ← 新增：只把这一组发给新设备" "  ← new: give only this set to the new device")"
+    echo "$(L "  设备 ${dev_name}${mark}" "  Device ${dev_name}${mark}")"
+    echo "$(L "    自适应（推荐）       : http://${HOST}:${SUB_PORT}/${dev_token}/sub" "    Adaptive (recommended): http://${HOST}:${SUB_PORT}/${dev_token}/sub")"
     echo "    Clash Verge / mihomo : http://${HOST}:${SUB_PORT}/${dev_token}/clash.yaml"
     echo "    Shadowrocket / v2rayN: http://${HOST}:${SUB_PORT}/${dev_token}/shadowrocket.txt"
     echo "    sing-box             : http://${HOST}:${SUB_PORT}/${dev_token}/sing-box.json"
   done <<< "${NEW_DEVICE_TOKENS}"
 fi
-[[ -z "${WANT_REMOVE_DEVICE}" ]] || echo "  - 设备 ${WANT_REMOVE_DEVICE} 已吊销：它的凭据与订阅地址都已失效"
+[[ -z "${WANT_REMOVE_DEVICE}" ]] || echo "$(L "  - 设备 ${WANT_REMOVE_DEVICE} 已吊销：它的凭据与订阅地址都已失效" "  - Device ${WANT_REMOVE_DEVICE} has been revoked: its credentials and subscription URLs no longer work")"
 if [[ "${ROTATED}" == 1 ]]; then
-  echo "  - 已更换节点凭据：所有设备都要重新拉取订阅，旧节点已失效"
+  echo "$(L "  - 已更换节点凭据：所有设备都要重新拉取订阅，旧节点已失效" "  - Node credentials were replaced: every device must fetch the subscription again; the old nodes no longer work")"
 elif [[ "${CHANGED_PARAMS}" == 1 && "${STATE}" != legacy ]]; then
-  echo "  - 本次改了节点参数：已导入的客户端需要重新拉取一次订阅"
+  echo "$(L "  - 本次改了节点参数：已导入的客户端需要重新拉取一次订阅" "  - Node parameters changed this time: clients that already imported must fetch the subscription once more")"
 fi
 echo "=================================================="
 
@@ -1212,7 +1320,7 @@ if [[ "${STATE}" != ownexit || "${CHANGED_PARAMS}" == 1 || "${CHANGED_DEVICES}" 
 fi
 
 if [[ "${FAIL_COUNT}" -gt 0 ]]; then
-  echo "[!] 有 ${FAIL_COUNT} 项验证未通过，详见上方 [!] 条目"
+  echo "$(L "[!] 有 ${FAIL_COUNT} 项验证未通过，详见上方 [!] 条目" "[!] ${FAIL_COUNT} check(s) did not pass; see the [!] items above")"
   exit 1
 fi
-echo "[+] 全部验证通过"
+echo "$(L "[+] 全部验证通过" "[+] All checks passed")"

@@ -25,9 +25,9 @@ target_safe_name() {
 
 validate_target() {
   local host="$1" port="$2" user="$3"
-  [[ "${host}" =~ ^[A-Za-z0-9.:-]+$ ]] || die_usage "VPS 地址格式不对：${host}"
-  [[ "${port}" =~ ^[1-9][0-9]{0,4}$ ]] && (( port <= 65535 )) || die_usage "SSH 端口必须是 1-65535 的数字：${port}"
-  [[ "${user}" =~ ^[a-z_][a-z0-9_-]*$ ]] || die_usage "SSH 用户名格式不对：${user}"
+  [[ "${host}" =~ ^[A-Za-z0-9.:-]+$ ]] || die_usage "$(L "VPS 地址格式不对：${host}" "Invalid VPS address: ${host}")"
+  [[ "${port}" =~ ^[1-9][0-9]{0,4}$ ]] && (( port <= 65535 )) || die_usage "$(L "SSH 端口必须是 1-65535 的数字：${port}" "The SSH port must be a number from 1 to 65535: ${port}")"
+  [[ "${user}" =~ ^[a-z_][a-z0-9_-]*$ ]] || die_usage "$(L "SSH 用户名格式不对：${user}" "Invalid SSH user name: ${user}")"
 }
 
 # 读取一个目标配置到 TARGET_HOST / TARGET_PORT / TARGET_USER；遇到未知键、重复键或缺键返回 1。
@@ -68,16 +68,16 @@ resolve_target() {
   fi
 
   if [[ "${#files[@]}" -eq 1 ]]; then
-    read_target_file "${files[0]}" || die "目标配置格式不对（只允许 HOST / SSH_PORT / SSH_USER）：${files[0]}"
+    read_target_file "${files[0]}" || die "$(L "目标配置格式不对（只允许 HOST / SSH_PORT / SSH_USER）：${files[0]}" "Invalid target configuration (only HOST / SSH_PORT / SSH_USER are allowed): ${files[0]}")"
     validate_target "${TARGET_HOST}" "${TARGET_PORT}" "${TARGET_USER}"
     HOST="${TARGET_HOST}" SSH_PORT="${TARGET_PORT}" SSH_USER="${TARGET_USER}"
-    echo "[*] 使用上次记住的 VPS：${SSH_USER}@${HOST}:${SSH_PORT}（换目标请加 --host）"
+    echo "$(L "[*] 使用上次记住的 VPS：${SSH_USER}@${HOST}:${SSH_PORT}（换目标请加 --host）" "[*] Using the remembered VPS: ${SSH_USER}@${HOST}:${SSH_PORT} (add --host to use another)")"
     return 0
   fi
 
   if [[ "${#files[@]}" -gt 1 ]]; then
     {
-      echo "[!] 记住了多台 VPS，请用 --host 指定本次要操作哪一台："
+      echo "$(L "[!] 记住了多台 VPS，请用 --host 指定本次要操作哪一台：" "[!] Several VPSes are remembered; choose which one to act on with --host:")"
       for file in "${files[@]}"; do
         read_target_file "${file}" && echo "      --host ${TARGET_HOST} --port ${TARGET_PORT} --user ${TARGET_USER}"
       done
@@ -88,8 +88,8 @@ resolve_target() {
   # 调用方不允许提问时（subctl 不负责首次部署），给出它自己的提示。
   [[ -z "${TARGET_NO_PROMPT_HINT:-}" ]] || die_usage "${TARGET_NO_PROMPT_HINT}"
   # 没有记住的目标：只在终端里才提问；CI / 管道里直接报缺参数，避免卡在等输入。
-  [[ -t 0 ]] || die_usage "缺少 --host（VPS 公网 IP）"
-  read -r -p "VPS 公网 IP: " HOST
+  [[ -t 0 ]] || die_usage "$(L "缺少 --host（VPS 公网 IP）" "Missing --host (the VPS public IP)")"
+  read -r -p "$(L "VPS 公网 IP: " "VPS public IP: ")" HOST
   validate_target "${HOST}" "${SSH_PORT}" "${SSH_USER}"
 }
 
@@ -110,7 +110,7 @@ save_target() {
 # 输出秒数；格式或范围不对时以退出码 2 结束（参数错误）。setup_direct.sh 的 --sub-ttl 与 subctl start --ttl 共用。
 parse_ttl() {
   local value="$1" number unit seconds
-  [[ "${value}" =~ ^([1-9][0-9]{0,5})([smh]?)$ ]] || die_usage "时长格式不对：${value}（例：30m、2h、90s；不带单位按分钟）"
+  [[ "${value}" =~ ^([1-9][0-9]{0,5})([smh]?)$ ]] || die_usage "$(L "时长格式不对：${value}（例：30m、2h、90s；不带单位按分钟）" "Invalid duration: ${value} (for example 30m, 2h, 90s; minutes when no unit is given)")"
   number="${BASH_REMATCH[1]}"
   unit="${BASH_REMATCH[2]:-m}"
   case "${unit}" in
@@ -118,7 +118,7 @@ parse_ttl() {
     m) seconds=$((number * 60)) ;;
     h) seconds=$((number * 3600)) ;;
   esac
-  (( seconds >= 60 && seconds <= 86400 )) || die_usage "时长要在 1 分钟到 24 小时之间：${value}"
+  (( seconds >= 60 && seconds <= 86400 )) || die_usage "$(L "时长要在 1 分钟到 24 小时之间：${value}" "The duration must be between 1 minute and 24 hours: ${value}")"
   printf '%s\n' "${seconds}"
 }
 

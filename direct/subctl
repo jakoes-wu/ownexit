@@ -15,7 +15,42 @@ SSH_PORT="22"
 SUB_SERVICE="ownexit-subscription"
 
 usage() {
-  cat <<'EOF'
+  if [[ "${OWNEXIT_UI_LANG}" == en ]]; then
+    cat <<'EOF'
+subctl -- key login, subscription service on/off, logs and QR code for the direct exit VPS
+
+Deprecated (still works, removed in 2.0 at the earliest): use the ownexit direct subcommands instead -- start / stop map to
+sub start / sub stop, status / log / qr / devices / login keep their names, e.g. ownexit direct sub stop, ownexit direct status.
+
+Usage:
+  subctl [--host <ip>] [--port <port>] [--user <user>] [subcommand]
+
+Subcommands:
+  login        log in to the VPS with the key (interactive SSH, the default)
+  start [--ttl <duration>]
+               start the subscription service (briefly, to import on a new device); --ttl turns it off when due (e.g. 30m, 2h,
+               minutes when no unit is given, 1 minute to 24 hours); without it it stays on, remember to stop it afterwards
+  stop         stop the subscription service (keep it off normally to reduce public exposure)
+  status       status of the proxy service and the subscription service
+  log [lines]  recent proxy service log, 100 lines by default
+  qr           show the node QR code in the terminal (needs qrencode; reads the local subscription, no VPS connection)
+  devices      list the devices on the VPS and the subscription URLs recorded locally (read-only)
+  help         show this help (same as -h / --help)
+
+Examples:
+  subctl status                         # use the VPS remembered by the last ownexit direct
+  subctl start
+  subctl start --ttl 30m                # turn off after 30 minutes
+  subctl log 300
+  subctl qr
+  subctl devices
+  subctl --host 203.0.113.7 stop        # pick one when several VPSes are remembered
+
+Exit codes: 0 success; 1 remote operation failed or key missing; 2 argument error or target cannot be determined.
+EOF
+  else
+    # i18n:zh-begin
+    cat <<'EOF'
 subctl —— 直连出口 VPS 的免密登录、订阅服务开关、日志与二维码
 
 已废弃（仍可用，最早 2.0 移除）：改用 ownexit direct 的子命令——start / stop 对应 sub start / sub stop，
@@ -47,11 +82,16 @@ status / log / qr / devices / login 同名，例：ownexit direct sub stop、own
 
 退出码: 0 成功；1 远端操作失败或缺少密钥；2 参数错误或无法确定目标。
 EOF
+    # i18n:zh-end
+  fi
 }
 
 die() { echo "[!] $*" >&2; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 输出语言（中文 / 英文）的判断与 L 函数；target_lib.sh 的提示也依赖它，必须先 source。
+# shellcheck source=i18n_lib.sh
+. "${SCRIPT_DIR}/i18n_lib.sh"
 # shellcheck source=target_lib.sh
 . "${SCRIPT_DIR}/target_lib.sh"
 
@@ -62,28 +102,28 @@ WANT_TTL=""
 TTL_SECONDS=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --host)    HOST="${2:?--host 需要一个参数}"; shift 2 ;;
+    --host)    HOST="${2:?$(L '--host 需要一个参数' '--host needs a value')}"; shift 2 ;;
     --host=*)  HOST="${1#*=}"; shift ;;
-    --port)    SSH_PORT="${2:?--port 需要一个参数}"; shift 2 ;;
+    --port)    SSH_PORT="${2:?$(L '--port 需要一个参数' '--port needs a value')}"; shift 2 ;;
     --port=*)  SSH_PORT="${1#*=}"; shift ;;
-    --user)    SSH_USER="${2:?--user 需要一个参数}"; shift 2 ;;
+    --user)    SSH_USER="${2:?$(L '--user 需要一个参数' '--user needs a value')}"; shift 2 ;;
     --user=*)  SSH_USER="${1#*=}"; shift ;;
-    --ttl)     WANT_TTL="${2:?--ttl 需要一个时长}"; shift 2 ;;
+    --ttl)     WANT_TTL="${2:?$(L '--ttl 需要一个时长' '--ttl needs a duration')}"; shift 2 ;;
     --ttl=*)   WANT_TTL="${1#*=}"; shift ;;
     help|-h|--help) usage; exit 0 ;;
     login|start|stop|status|qr|devices)
-      [[ -z "${CMD}" ]] || die_usage "只能给一个子命令（已有 ${CMD}）"
+      [[ -z "${CMD}" ]] || die_usage "$(L "只能给一个子命令（已有 ${CMD}）" "Only one subcommand is allowed (already have ${CMD})")"
       CMD="$1"; shift ;;
     log)
-      [[ -z "${CMD}" ]] || die_usage "只能给一个子命令（已有 ${CMD}）"
+      [[ -z "${CMD}" ]] || die_usage "$(L "只能给一个子命令（已有 ${CMD}）" "Only one subcommand is allowed (already have ${CMD})")"
       CMD=log; shift
       if [[ $# -gt 0 && "$1" =~ ^[0-9]+$ ]]; then LOG_LINES="$1"; shift; fi ;;
-    *) die_usage "未知参数或子命令: $1（可用: login / start / stop / status / log / qr / devices / help）" ;;
+    *) die_usage "$(L "未知参数或子命令: $1（可用: login / start / stop / status / log / qr / devices / help）" "Unknown option or subcommand: $1 (available: login / start / stop / status / log / qr / devices / help)")" ;;
   esac
 done
 CMD="${CMD:-login}"
 if [[ -n "${WANT_TTL}" ]]; then
-  [[ "${CMD}" == start ]] || die_usage "--ttl 只能跟 start 一起用"
+  [[ "${CMD}" == start ]] || die_usage "$(L "--ttl 只能跟 start 一起用" "--ttl can only be used with start")"
   TTL_SECONDS="$(parse_ttl "${WANT_TTL}")" || exit 2
   # 不带单位按分钟：提示里补上 m，避免显示成“30 后自动关闭”。
   [[ "${WANT_TTL}" =~ [smh]$ ]] || WANT_TTL="${WANT_TTL}m"
@@ -96,12 +136,12 @@ if [[ "${OWNEXIT_VIA_DIRECT:-}" != 1 ]]; then
     start|stop) NEW_FORM="sub ${CMD}" ;;
     *)          NEW_FORM="${CMD}" ;;
   esac
-  echo "[!] ownexit subctl 已废弃（仍可用），改用：ownexit direct ${NEW_FORM}" >&2
+  echo "$(L "[!] ownexit subctl 已废弃（仍可用），改用：ownexit direct ${NEW_FORM}" "[!] ownexit subctl is deprecated (still works); use: ownexit direct ${NEW_FORM}")" >&2
 fi
 
 # subctl 不负责首次部署：没有记住的目标时不交互提问，直接提示先跑 setup_direct.sh。
 # shellcheck disable=SC2034  # 由 target_lib.sh 的 resolve_target 读取
-TARGET_NO_PROMPT_HINT="还没有记住任何 VPS，请先运行 ownexit direct up --host <ip> 完成部署，或加 --host 指定"
+TARGET_NO_PROMPT_HINT="$(L "还没有记住任何 VPS，请先运行 ownexit direct up --host <ip> 完成部署，或加 --host 指定" "No VPS is remembered yet; run ownexit direct up --host <ip> to deploy first, or pass --host")"
 resolve_target
 
 # 密钥路径推导必须与 connect_to.sh / setup_direct.sh 完全一致
@@ -110,15 +150,15 @@ KEY="${HOME}/.ssh/ownexit/id_ed25519_${SAFE_NAME}"
 
 # qr 只读本机订阅文件，不需要连 VPS：放在密钥检查之前处理。
 if [[ "${CMD}" == qr ]]; then
-  command -v qrencode >/dev/null 2>&1 || die "没有 qrencode：macOS 运行 brew install qrencode，Debian/Ubuntu 运行 sudo apt install qrencode"
+  command -v qrencode >/dev/null 2>&1 || die "$(L "没有 qrencode：macOS 运行 brew install qrencode，Debian/Ubuntu 运行 sudo apt install qrencode" "qrencode not found: on macOS run brew install qrencode, on Debian/Ubuntu run sudo apt install qrencode")"
   STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/ownexit/direct/${SAFE_NAME}"
   TOKEN="$(awk -F= '$1 == "TOKEN" {print $2; exit}' "${STATE_DIR}/state.env" 2>/dev/null || true)"
   NODE_FILE="${STATE_DIR}/ownexit-subscription/${TOKEN}/node.txt"
-  [[ -n "${TOKEN}" && -f "${NODE_FILE}" ]] || die "本机没有这台 VPS 的订阅，先运行 ownexit direct up --host ${HOST}"
+  [[ -n "${TOKEN}" && -f "${NODE_FILE}" ]] || die "$(L "本机没有这台 VPS 的订阅，先运行 ownexit direct up --host ${HOST}" "This computer has no subscription for this VPS; run ownexit direct up --host ${HOST} first")"
   qrencode -t ANSIUTF8 < "${NODE_FILE}"
   exit 0
 fi
-[[ -f "${KEY}" ]] || die "未找到密钥 ${KEY}，请先运行 ownexit direct up --host ${HOST} 完成部署"
+[[ -f "${KEY}" ]] || die "$(L "未找到密钥 ${KEY}，请先运行 ownexit direct up --host ${HOST} 完成部署" "Key ${KEY} not found; run ownexit direct up --host ${HOST} to deploy first")"
 
 # SetEnv 强制给远端发 VPS 上存在的 locale，覆盖本机转发来的 zh_CN.UTF-8，
 # 避免远端 bash setlocale 失败刷 "cannot change locale" 警告（VPS 未生成 zh_CN）
@@ -136,30 +176,30 @@ case "${CMD}" in
     # 先清掉上一次的自动关闭计时器，避免旧计时器在新的一次开放中途把服务关掉；带 --ttl 再起新的。
     rcmd "systemctl start '${SUB_SERVICE}'; $(ttl_remote_cmd "${TTL_SECONDS}")"
     if [[ -n "${WANT_TTL}" ]]; then
-      echo "[+] 已启动 ${SUB_SERVICE}，${WANT_TTL} 后自动关闭"
+      echo "$(L "[+] 已启动 ${SUB_SERVICE}，${WANT_TTL} 后自动关闭" "[+] Started ${SUB_SERVICE}; it turns off by itself in ${WANT_TTL}")"
     else
-      echo "[+] 已启动 ${SUB_SERVICE}（临时开；客户端更新完订阅后执行 ownexit direct sub stop 关回）"
+      echo "$(L "[+] 已启动 ${SUB_SERVICE}（临时开；客户端更新完订阅后执行 ownexit direct sub stop 关回）" "[+] Started ${SUB_SERVICE} (temporarily; once clients have updated the subscription, run ownexit direct sub stop)")"
     fi
     ;;
   stop)
     rcmd "$(ttl_remote_cmd); systemctl stop '${SUB_SERVICE}'"
-    echo "[+] 已停止 ${SUB_SERVICE}"
+    echo "$(L "[+] 已停止 ${SUB_SERVICE}" "[+] Stopped ${SUB_SERVICE}")"
     ;;
   status)
     rcmd "bash -s" <<REMOTE
 if [ -e /etc/systemd/system/ownexit-direct.service ]; then
-  echo -n '代理服务 ownexit-direct : '; systemctl is-active ownexit-direct 2>/dev/null || true
+  echo -n "$(L '代理服务 ownexit-direct : ' 'Proxy service ownexit-direct  : ')"; systemctl is-active ownexit-direct 2>/dev/null || true
 elif [ -L /usr/local/bin/sb ]; then
-  echo -n '代理服务（旧版 233boy）  : '; systemctl is-active sing-box 2>/dev/null || true
-  echo '  建议运行 ownexit direct migrate 换成本项目的服务（参数不变，客户端不用动）'
+  echo -n "$(L '代理服务（旧版 233boy）  : ' 'Proxy service (old 233boy)    : ')"; systemctl is-active sing-box 2>/dev/null || true
+  echo "$(L '  建议运行 ownexit direct migrate 换成本项目的服务（参数不变，客户端不用动）' '  Run ownexit direct migrate to switch to this project service (same settings, clients need nothing)')"
 else
-  echo '代理服务               : 未安装'
+  echo "$(L '代理服务               : 未安装' 'Proxy service                 : not installed')"
 fi
-echo -n '订阅服务（运行）        : '; systemctl is-active ${SUB_SERVICE} 2>/dev/null || true
-echo -n '订阅服务（开机自启）    : '; systemctl is-enabled ${SUB_SERVICE} 2>/dev/null || true
+echo -n "$(L '订阅服务（运行）        : ' 'Subscription service (active) : ')"; systemctl is-active ${SUB_SERVICE} 2>/dev/null || true
+echo -n "$(L '订阅服务（开机自启）    : ' 'Subscription service (enabled): ')"; systemctl is-enabled ${SUB_SERVICE} 2>/dev/null || true
 # list-timers 一行是「NEXT（星期 日期 时间 时区 4 段）LEFT（如 1h 29min left）…」，只取 LEFT 列。
 ttl_line="\$(systemctl list-timers ownexit-subscription-ttl.timer --no-legend 2>/dev/null | sed -n 's/^[^ ]* [^ ]* [^ ]* [^ ]*  *\(.* left\) .*/\1/p' | head -n 1)"
-[ -z "\${ttl_line}" ] || echo "订阅服务自动关闭        : \${ttl_line}"
+[ -z "\${ttl_line}" ] || echo "$(L '订阅服务自动关闭        : ' 'Subscription auto-off in      : ')\${ttl_line}"
 REMOTE
     ;;
   log)
@@ -168,18 +208,18 @@ REMOTE
     ;;
   devices)
     # 只读：服务器的设备表是权威源（只取名字，不取 UUID）；订阅地址来自本机记录的 TOKEN。
-    names="$(rcmd "awk -F= 'NF {print \$1}' /etc/ownexit-direct/devices.env 2>/dev/null || true")" || die "无法读取 VPS 上的设备表"
+    names="$(rcmd "awk -F= 'NF {print \$1}' /etc/ownexit-direct/devices.env 2>/dev/null || true")" || die "$(L "无法读取 VPS 上的设备表" "Could not read the device list on the VPS")"
     STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/ownexit/direct/${SAFE_NAME}"
     SUB_PORT="$(awk -F= '$1 == "SUB_PORT" {print $2; exit}' "${STATE_DIR}/state.env" 2>/dev/null || true)"
     TOKEN="$(awk -F= '$1 == "TOKEN" {print $2; exit}' "${STATE_DIR}/state.env" 2>/dev/null || true)"
-    echo "default : http://${HOST}:${SUB_PORT:-?}/${TOKEN:-?}/sub（自适应；同目录另有 clash.yaml / shadowrocket.txt / sing-box.json / node.txt）"
+    echo "$(L "default : http://${HOST}:${SUB_PORT:-?}/${TOKEN:-?}/sub（自适应；同目录另有 clash.yaml / shadowrocket.txt / sing-box.json / node.txt）" "default : http://${HOST}:${SUB_PORT:-?}/${TOKEN:-?}/sub (adaptive; the same directory also has clash.yaml / shadowrocket.txt / sing-box.json / node.txt)")"
     while IFS= read -r name; do
       [[ -n "${name}" ]] || continue
       tok="$(awk -F= -v n="${name}" '$1 == n {print $2; exit}' "${STATE_DIR}/devices.env" 2>/dev/null || true)"
       if [[ -n "${tok}" ]]; then
-        echo "${name} : http://${HOST}:${SUB_PORT:-?}/${tok}/sub（自适应；同目录另有固定格式）"
+        echo "$(L "${name} : http://${HOST}:${SUB_PORT:-?}/${tok}/sub（自适应；同目录另有固定格式）" "${name} : http://${HOST}:${SUB_PORT:-?}/${tok}/sub (adaptive; the same directory also has the fixed formats)")"
       else
-        echo "${name} : 本机没有它的订阅（换过电脑？），重跑 ownexit direct --host ${HOST} 生成"
+        echo "$(L "${name} : 本机没有它的订阅（换过电脑？），重跑 ownexit direct --host ${HOST} 生成" "${name} : no subscription for it on this computer (switched computers?); rerun ownexit direct --host ${HOST} to generate it")"
       fi
     done <<< "${names}"
     ;;

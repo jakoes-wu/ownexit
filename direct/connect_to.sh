@@ -22,6 +22,11 @@
 
 set -euo pipefail
 
+# 输出语言（中文 / 英文）的判断与 L 函数（direct/i18n_lib.sh）。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=i18n_lib.sh
+. "${SCRIPT_DIR}/i18n_lib.sh"
+
 HOST=""
 SSH_USER="root"
 SSH_PORT="22"
@@ -35,7 +40,30 @@ PASS_FROM_ENV=0
 readonly MAX_PASSWORD_ATTEMPTS=3
 
 usage() {
-  cat <<EOF
+  if [[ "${OWNEXIT_UI_LANG}" == en ]]; then
+    cat <<EOF
+Usage: $(basename "$0") --host <ip/host> [options]
+
+Examples:
+  $(basename "$0") --host 203.0.113.7                       # set up key login, then open an interactive SSH session
+  $(basename "$0") --host 203.0.113.7 --setup-only          # only set up key login, do not log in
+  $(basename "$0") --host 203.0.113.7 --port 2222 --setup-only
+  OWNEXIT_SSH_PASSWORD=... $(basename "$0") --host 203.0.113.7 --setup-only < /dev/null   # non-interactive
+
+Options:
+  --host <ip/host>           target VPS address (required)
+  -u, --user <user>          SSH user, default root
+  -P, --port <port>          SSH port, default 22
+  --setup-only               only install and verify the public key, no interactive SSH
+  -h, --help                 show this help
+
+Exit codes: 0 success; 1 other failure; 2 argument error or missing password; 3 login failed, the last stderr line is
+  reason=bad-password (wrong password) | reason=password-disabled (the server disabled password login) |
+  reason=unreachable (cannot connect: IP / port / security group)
+EOF
+  else
+    # i18n:zh-begin
+    cat <<EOF
 用法: $(basename "$0") --host <ip/host> [选项]
 
 示例:
@@ -55,6 +83,8 @@ usage() {
   reason=bad-password（密码错误）| reason=password-disabled（服务器关闭了密码登录）|
   reason=unreachable（连不上：IP / 端口 / 安全组）
 EOF
+    # i18n:zh-end
+  fi
 }
 
 die() {
@@ -77,22 +107,22 @@ die_login() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --host)      HOST="${2:?--host 需要一个参数}"; shift 2 ;;
+    --host)      HOST="${2:?$(L '--host 需要一个参数' '--host needs a value')}"; shift 2 ;;
     --host=*)    HOST="${1#*=}"; shift ;;
-    -u|--user)   SSH_USER="${2:?--user 需要一个参数}"; shift 2 ;;
+    -u|--user)   SSH_USER="${2:?$(L '--user 需要一个参数' '--user needs a value')}"; shift 2 ;;
     --user=*)    SSH_USER="${1#*=}"; shift ;;
-    -P|--port)   SSH_PORT="${2:?--port 需要一个参数}"; shift 2 ;;
+    -P|--port)   SSH_PORT="${2:?$(L '--port 需要一个参数' '--port needs a value')}"; shift 2 ;;
     --port=*)    SSH_PORT="${1#*=}"; shift ;;
     --setup-only) SETUP_ONLY=1; shift ;;
     -h|--help)   usage; exit 0 ;;
-    *)           die_usage "未知参数: $1（用 --help 查看用法）" ;;
+    *)           die_usage "$(L "未知参数: $1（用 --help 查看用法）" "Unknown option: $1 (see --help)")" ;;
   esac
 done
 
-[[ -n "${HOST}" ]] || die_usage "缺少 --host（VPS 公网 IP）"
-[[ "${HOST}" =~ ^[A-Za-z0-9.:-]+$ ]] || die_usage "VPS 地址格式不对：${HOST}"
-[[ "${SSH_USER}" =~ ^[a-z_][a-z0-9_-]*$ ]] || die_usage "SSH 用户名格式不对：${SSH_USER}"
-[[ "${SSH_PORT}" =~ ^[1-9][0-9]{0,4}$ ]] && (( SSH_PORT <= 65535 )) || die_usage "SSH 端口必须是 1-65535 的数字：${SSH_PORT}"
+[[ -n "${HOST}" ]] || die_usage "$(L "缺少 --host（VPS 公网 IP）" "Missing --host (the VPS public IP)")"
+[[ "${HOST}" =~ ^[A-Za-z0-9.:-]+$ ]] || die_usage "$(L "VPS 地址格式不对：${HOST}" "Invalid VPS address: ${HOST}")"
+[[ "${SSH_USER}" =~ ^[a-z_][a-z0-9_-]*$ ]] || die_usage "$(L "SSH 用户名格式不对：${SSH_USER}" "Invalid SSH user name: ${SSH_USER}")"
+[[ "${SSH_PORT}" =~ ^[1-9][0-9]{0,4}$ ]] && (( SSH_PORT <= 65535 )) || die_usage "$(L "SSH 端口必须是 1-65535 的数字：${SSH_PORT}" "The SSH port must be a number from 1 to 65535: ${SSH_PORT}")"
 
 # 密钥路径推导必须与 target_lib.sh 的 target_safe_name、setup_chain.sh init 完全一致
 SAFE_NAME="$(printf '%s' "${SSH_USER}_${HOST}_${SSH_PORT}" | tr -c '[:alnum:]_.@-' '_')"
@@ -120,12 +150,12 @@ ensure_local_key() {
   chmod 700 "${KEY_DIR}"
 
   if [[ ! -f "${KEY}" ]]; then
-    echo "[*] 生成本地 SSH 密钥：${KEY}"
+    echo "$(L "[*] 生成本地 SSH 密钥：${KEY}" "[*] Generating a local SSH key: ${KEY}")"
     ssh-keygen -t ed25519 -N "" -f "${KEY}" -C "ownexit-${SSH_USER}@${HOST}" >/dev/null
   fi
 
   if [[ ! -f "${KEY}.pub" ]]; then
-    echo "[*] 补全公钥文件：${KEY}.pub"
+    echo "$(L "[*] 补全公钥文件：${KEY}.pub" "[*] Restoring the public key file: ${KEY}.pub")"
     ssh-keygen -y -f "${KEY}" > "${KEY}.pub"
   fi
 
@@ -138,7 +168,7 @@ can_login_with_key() {
 }
 
 forget_old_host_key() {
-  echo "[*] 清理 known_hosts 中 ${HOST} 的旧记录"
+  echo "$(L "[*] 清理 known_hosts 中 ${HOST} 的旧记录" "[*] Removing old known_hosts entries for ${HOST}")"
   ssh-keygen -R "${HOST}" >/dev/null 2>&1 || true
   if [[ "${SSH_PORT}" != "22" ]]; then
     ssh-keygen -R "[${HOST}]:${SSH_PORT}" >/dev/null 2>&1 || true
@@ -156,26 +186,26 @@ select_password_backend() {
     if "${candidate}" -c 'import pexpect' >/dev/null 2>&1; then
       PASSWORD_BACKEND=pexpect
       PYTHON_BIN="${candidate}"
-      echo "[*] 密码输入方式：pexpect（${PYTHON_BIN}）"
+      echo "$(L "[*] 密码输入方式：pexpect（${PYTHON_BIN}）" "[*] Password input: pexpect (${PYTHON_BIN})")"
       return
     fi
   done
   if command -v expect >/dev/null 2>&1; then
     PASSWORD_BACKEND=expect
-    echo "[*] 密码输入方式：expect"
+    echo "$(L "[*] 密码输入方式：expect" "[*] Password input: expect")"
     return
   fi
-  die "缺少自动输入密码的工具。pipx 安装的 ownexit 自带（重新运行 pipx install --force ownexit）；git clone 用法运行 pip3 install pexpect，或安装 expect（macOS: brew install expect；Debian/Ubuntu: sudo apt install expect）"
+  die "$(L "缺少自动输入密码的工具。pipx 安装的 ownexit 自带（重新运行 pipx install --force ownexit）；git clone 用法运行 pip3 install pexpect，或安装 expect（macOS: brew install expect；Debian/Ubuntu: sudo apt install expect）" "No tool to type the password automatically. ownexit installed with pipx ships one (run pipx install --force ownexit again); for a git clone run pip3 install pexpect, or install expect (macOS: brew install expect; Debian/Ubuntu: sudo apt install expect)")"
 }
 
 # 交互读取密码到 PASS（不回显）。非终端且没有 OWNEXIT_SSH_PASSWORD 时以退出码 2 结束，避免卡住等输入。
 prompt_password() {
   local note="${1:-}"
-  [[ -t 0 ]] || die_usage "需要 ${SSH_USER}@${HOST} 的 SSH 密码：请在终端里运行，或设置环境变量 OWNEXIT_SSH_PASSWORD"
+  [[ -t 0 ]] || die_usage "$(L "需要 ${SSH_USER}@${HOST} 的 SSH 密码：请在终端里运行，或设置环境变量 OWNEXIT_SSH_PASSWORD" "The SSH password for ${SSH_USER}@${HOST} is needed: run this in a terminal, or set the environment variable OWNEXIT_SSH_PASSWORD")"
   [[ -z "${note}" ]] || echo "[!] ${note}" >&2
-  read -r -s -p "VPS 密码（${SSH_USER}@${HOST}:${SSH_PORT}）: " PASS
+  read -r -s -p "$(L "VPS 密码（${SSH_USER}@${HOST}:${SSH_PORT}）: " "VPS password (${SSH_USER}@${HOST}:${SSH_PORT}): ")" PASS
   echo >&2
-  [[ -n "${PASS}" ]] || die_usage "密码为空"
+  [[ -n "${PASS}" ]] || die_usage "$(L "密码为空" "The password is empty")"
 }
 
 # 用密码跑一条会触发 SSH 密码提示的命令（ssh-copy-id / scp / ssh）。
@@ -328,9 +358,9 @@ install_public_key_with_password() {
   [[ -n "${PASS}" ]] || prompt_password
   while true; do
     if command -v ssh-copy-id >/dev/null 2>&1; then
-      echo "[*] 使用 ssh-copy-id 推送公钥"
+      echo "$(L "[*] 使用 ssh-copy-id 推送公钥" "[*] Pushing the public key with ssh-copy-id")"
     else
-      echo "[*] 当前系统没有 ssh-copy-id，改用 scp + ssh 推送公钥"
+      echo "$(L "[*] 当前系统没有 ssh-copy-id，改用 scp + ssh 推送公钥" "[*] ssh-copy-id is not available on this system; pushing the public key with scp + ssh instead")"
     fi
     rc=0
     push_public_key_once || rc=$?
@@ -338,23 +368,23 @@ install_public_key_with_password() {
       0) return 0 ;;
       5)
         if [[ "${PASS_FROM_ENV}" == "1" ]]; then
-          die_login bad-password "OWNEXIT_SSH_PASSWORD 中的密码不对（${SSH_USER}@${HOST}），请核对后重试"
+          die_login bad-password "$(L "OWNEXIT_SSH_PASSWORD 中的密码不对（${SSH_USER}@${HOST}），请核对后重试" "The password in OWNEXIT_SSH_PASSWORD is wrong (${SSH_USER}@${HOST}); check it and try again")"
         fi
         if (( attempt >= MAX_PASSWORD_ATTEMPTS )); then
-          die_login bad-password "密码连续错误 ${MAX_PASSWORD_ATTEMPTS} 次（${SSH_USER}@${HOST}）。请到服务商控制台核对或重置 ${SSH_USER} 密码后再运行"
+          die_login bad-password "$(L "密码连续错误 ${MAX_PASSWORD_ATTEMPTS} 次（${SSH_USER}@${HOST}）。请到服务商控制台核对或重置 ${SSH_USER} 密码后再运行" "Wrong password ${MAX_PASSWORD_ATTEMPTS} times in a row (${SSH_USER}@${HOST}). Check or reset the ${SSH_USER} password in your provider's console, then run again")"
         fi
         attempt=$((attempt + 1))
         PASS=""
-        prompt_password "密码错误，还可再试 $((MAX_PASSWORD_ATTEMPTS - attempt + 1)) 次"
+        prompt_password "$(L "密码错误，还可再试 $((MAX_PASSWORD_ATTEMPTS - attempt + 1)) 次" "Wrong password; $((MAX_PASSWORD_ATTEMPTS - attempt + 1)) tries left")"
         ;;
       6)
-        die_login password-disabled "服务器没有给出密码提示就拒绝了登录，多半关闭了密码登录。请到服务商控制台开启密码登录，或手工把 ${KEY}.pub 的内容加入 VPS 的 ~/.ssh/authorized_keys"
+        die_login password-disabled "$(L "服务器没有给出密码提示就拒绝了登录，多半关闭了密码登录。请到服务商控制台开启密码登录，或手工把 ${KEY}.pub 的内容加入 VPS 的 ~/.ssh/authorized_keys" "The server refused the login without asking for a password, so password login is most likely turned off. Turn it on in your provider's console, or add the contents of ${KEY}.pub to ~/.ssh/authorized_keys on the VPS yourself")"
         ;;
       7|124)
-        die_login unreachable "连不上 ${HOST}:${SSH_PORT}。请核对 IP、SSH 端口，以及服务商安全组 / 防火墙是否放行该端口"
+        die_login unreachable "$(L "连不上 ${HOST}:${SSH_PORT}。请核对 IP、SSH 端口，以及服务商安全组 / 防火墙是否放行该端口" "Cannot connect to ${HOST}:${SSH_PORT}. Check the IP, the SSH port, and whether your provider's security group / firewall allows that port")"
         ;;
       *)
-        die "推送公钥失败（退出码 ${rc}），请手动检查 ${SSH_USER}@${HOST}:${SSH_PORT} 的 SSH 配置"
+        die "$(L "推送公钥失败（退出码 ${rc}），请手动检查 ${SSH_USER}@${HOST}:${SSH_PORT} 的 SSH 配置" "Pushing the public key failed (exit code ${rc}); check the SSH configuration of ${SSH_USER}@${HOST}:${SSH_PORT} by hand")"
         ;;
     esac
   done
@@ -389,7 +419,7 @@ RCMD
 # 需 root；非 root 时跳过，回退到手动提示。此时密码刚验证通过，PASS 一定非空。
 fix_remote_pubkey_auth() {
   if [[ "${SSH_USER}" != "root" ]]; then
-    echo "[!] 当前 SSH 用户非 root，自动修复 sshd 需 root，跳过（请手动以 root 改 PubkeyAuthentication）"
+    echo "$(L "[!] 当前 SSH 用户非 root，自动修复 sshd 需 root，跳过（请手动以 root 改 PubkeyAuthentication）" "[!] The SSH user is not root and fixing sshd automatically needs root; skipped (change PubkeyAuthentication as root by hand)")"
     return 0
   fi
   # 修复尽力而为，最终成败由随后的免密重试判定，故吞掉非零退出码不让 set -e 中断
@@ -399,32 +429,32 @@ fix_remote_pubkey_auth() {
 ensure_local_key
 
 if can_login_with_key; then
-  echo "[+] 免密登录已可用：${SSH_USER}@${HOST}:${SSH_PORT}"
+  echo "$(L "[+] 免密登录已可用：${SSH_USER}@${HOST}:${SSH_PORT}" "[+] Key login works: ${SSH_USER}@${HOST}:${SSH_PORT}")"
 else
-  echo "[*] 免密登录不可用，开始使用密码配置公钥"
+  echo "$(L "[*] 免密登录不可用，开始使用密码配置公钥" "[*] Key login does not work yet; setting up the public key with the password")"
   forget_old_host_key
   install_public_key_with_password
 
-  echo "[*] 验证免密登录"
+  echo "$(L "[*] 验证免密登录" "[*] Verifying key login")"
   if ! can_login_with_key; then
-    echo "[*] 免密仍不可用，尝试自动修复服务商模板可能关闭的 sshd 公钥认证（PubkeyAuthentication no → yes）"
+    echo "$(L "[*] 免密仍不可用，尝试自动修复服务商模板可能关闭的 sshd 公钥认证（PubkeyAuthentication no → yes）" "[*] Key login still fails; trying to fix sshd public key authentication that the provider's image may have turned off (PubkeyAuthentication no → yes)")"
     fix_remote_pubkey_auth
-    echo "[*] 重新验证免密登录"
+    echo "$(L "[*] 重新验证免密登录" "[*] Verifying key login again")"
     if ! can_login_with_key; then
       PASS=""
-      die "公钥推送并尝试修复 sshd 后仍无法免密登录，请手动检查 VPS 的 SSH 配置（如 /etc/ssh/sshd_config 的 PubkeyAuthentication、AllowUsers、Match 块）"
+      die "$(L "公钥推送并尝试修复 sshd 后仍无法免密登录，请手动检查 VPS 的 SSH 配置（如 /etc/ssh/sshd_config 的 PubkeyAuthentication、AllowUsers、Match 块）" "Key login still fails after pushing the public key and trying to fix sshd; check the VPS's SSH configuration by hand (for example PubkeyAuthentication, AllowUsers and Match blocks in /etc/ssh/sshd_config)")"
     fi
-    echo "[+] 已自动修复 sshd 公钥认证"
+    echo "$(L "[+] 已自动修复 sshd 公钥认证" "[+] Fixed sshd public key authentication automatically")"
   fi
   PASS=""
 
-  echo "[+] 免密配置完成：${SSH_USER}@${HOST}:${SSH_PORT}"
+  echo "$(L "[+] 免密配置完成：${SSH_USER}@${HOST}:${SSH_PORT}" "[+] Key login set up: ${SSH_USER}@${HOST}:${SSH_PORT}")"
 fi
 
 if [[ "${SETUP_ONLY}" == "1" ]]; then
-  echo "[+] --setup-only 已完成，不进入交互式 SSH"
+  echo "$(L "[+] --setup-only 已完成，不进入交互式 SSH" "[+] --setup-only finished; not opening an interactive SSH session")"
   exit 0
 fi
 
-echo "[*] 进入交互式 SSH"
+echo "$(L "[*] 进入交互式 SSH" "[*] Opening an interactive SSH session")"
 exec ssh "${SSH_BASE_OPTS[@]}" "${SSH_USER}@${HOST}"

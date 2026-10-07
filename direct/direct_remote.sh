@@ -27,6 +27,16 @@ set -eEuo pipefail
 umask 077
 export LC_ALL=C
 
+# 日志语言：本脚本单独上传到 VPS 执行，不能 source 本机的 i18n_lib.sh。语言由本机经 systemd-run --setenv
+# 或命令前缀传入 OWNEXIT_UI_LANG（docs/feature/feature-script-i18n.md §5.1.2）；没传时按中文，兼容旧版本的调用。
+L() {
+  if [[ "${OWNEXIT_UI_LANG:-zh}" == en ]]; then
+    printf '%s' "$2"
+  else
+    printf '%s' "$1"
+  fi
+}
+
 readonly WORK=/var/lib/ownexit-direct
 readonly ETC=/etc/ownexit-direct
 readonly OPT=/opt/ownexit-direct
@@ -150,7 +160,7 @@ enter_step() {
   txn_set STEP "${STEP}"
   log "STEP=${STEP}"
   if [[ -n "${PAUSE_AT}" && "${PAUSE_AT}" == "${STEP}" ]]; then
-    log "测试钩子：在 ${STEP} 暂停 120 秒"
+    log "$(L "测试钩子：在 ${STEP} 暂停 120 秒" "Test hook: pausing 120 seconds at ${STEP}")"
     sleep 120
   fi
   if [[ -n "${FAIL_AT}" && "${FAIL_AT}" == "${STEP}" ]]; then
@@ -162,7 +172,7 @@ enter_step() {
 finish_ok() {
   rm -f "${TXN}"
   result_set RESULT ok
-  log "操作 ${OP} 完成"
+  log "$(L "操作 ${OP} 完成" "Operation ${OP} completed")"
   exit 0
 }
 
@@ -173,7 +183,7 @@ finish_fail() {
   [[ "${keep_txn}" == yes ]] || rm -f "${TXN}"
   result_set RESULT fail
   result_set REASON "${reason}"
-  log "操作 ${OP} 失败：REASON=${reason}"
+  log "$(L "操作 ${OP} 失败：REASON=${reason}" "Operation ${OP} failed: REASON=${reason}")"
   exit 1
 }
 
@@ -196,7 +206,7 @@ ensure_binary() {
   arch="$(arg ARCH)"; url="$(arg RELEASE_URL)"
   bin="${OPT}/bin/sing-box-${version}"
   if [[ -f "${bin}" && ! -L "${bin}" && "$(sha256sum "${bin}" | awk '{print $1}')" == "${binary_sha}" ]]; then
-    log "binary 来源=reused arch=${arch}"
+    log "$(L "binary 来源=reused arch=${arch}" "binary source=reused arch=${arch}")"
     result_set BINARY_SOURCE reused
     return 0
   fi
@@ -237,7 +247,7 @@ ensure_binary() {
   mv -f "${candidate}" "${bin}"
   rm -rf "${stage}"
   kv_file_set "${TXN}" STAGE ''
-  log "binary 来源=${source} arch=${arch}"
+  log "$(L "binary 来源=${source} arch=${arch}" "binary source=${source} arch=${arch}")"
   result_set BINARY_SOURCE "${source}"
 }
 
@@ -459,14 +469,14 @@ build_devices_new() {
     (( count < 31 )) || { CAUSE=device-limit; false; }
     bin="$(binary_path)"
     printf '%s=%s\n' "${add}" "$("${bin}" generate uuid)" >> "${out}"
-    log "设备：新增 ${add}"
+    log "$(L "设备：新增 ${add}" "Devices: added ${add}")"
   fi
   if [[ -n "${del}" ]]; then
     [[ "$(awk -F= -v n="${del}" '$1 == n {c++} END {print c + 0}' "${out}")" != 0 ]] || { CAUSE=device-missing; false; }
     tmp="${out}.tmp"
     awk -F= -v n="${del}" '$1 != n' "${out}" > "${tmp}"
     mv -f "${tmp}" "${out}"
-    log "设备：吊销 ${del}"
+    log "$(L "设备：吊销 ${del}" "Devices: revoked ${del}")"
   fi
   if [[ "$(arg ROTATE)" == 1 ]]; then
     # 轮换时每台设备都换新 UUID（名字不变），被泄露的旧 UUID 一并失效。
@@ -534,7 +544,7 @@ op_reparam() {
       short_id="$("${bin}" generate rand --hex 8)"
       [[ "${private_key}" =~ ^[A-Za-z0-9_-]+$ && "${public_key}" =~ ^[A-Za-z0-9_-]+$ ]] || { CAUSE=keypair; false; }
       [[ "${uuid}" =~ ^[0-9a-f-]{36}$ && "${short_id}" =~ ^[0-9a-f]{16}$ ]] || { CAUSE=uuid; false; }
-      log "轮换凭据：已生成新的 UUID / Reality 密钥 / short id"
+      log "$(L "轮换凭据：已生成新的 UUID / Reality 密钥 / short id" "Rotating credentials: generated a new UUID / Reality key / short id")"
     else
       uuid="$(kv_file_get "${ETC}/client.env" UUID)"
       public_key="$(kv_file_get "${ETC}/client.env" PUBLIC_KEY)"
@@ -659,7 +669,7 @@ migrate_rollback() {
   if ! legacy_intact; then
     # CLEAN 已删掉一部分 233boy：旧服务起不来，绝不能再删新服务的配置（唯一可用的私钥副本）。
     systemctl enable --now "${UNIT_NAME}" >/dev/null 2>&1 || true
-    log "233boy 已不完整，保留 ownexit-direct；迁移备份：$(txn_get BACKUP_TAR)"
+    log "$(L "233boy 已不完整，保留 ownexit-direct；迁移备份：$(txn_get BACKUP_TAR)" "233boy is already incomplete; keeping ownexit-direct; migration backup: $(txn_get BACKUP_TAR)")"
     result_set BACKUP "$(txn_get BACKUP_TAR)"
     finish_fail clean-unhealthy
   fi
@@ -721,12 +731,12 @@ op_migrate() {
   if [[ "${STEP}" == INSPECT ]]; then
     enter_step INSPECT
     unit_active sing-box.service || { CAUSE='legacy-not-active'; false; }
-    params="$(legacy_params)" || { log "不可迁移：${params}"; CAUSE="$(printf '%s\n' "${params}" | awk -F= '$1=="ERROR"{print $2}')"; false; }
+    params="$(legacy_params)" || { log "$(L "不可迁移：${params}" "Cannot migrate: ${params}")"; CAUSE="$(printf '%s\n' "${params}" | awk -F= '$1=="ERROR"{print $2}')"; false; }
     pub="$(printf '%s\n' "${params}" | awk -F= '$1=="PUBLIC_KEY"{print $2}')"
     if derived="$(derive_public_key "$(printf '%s\n' "${params}" | awk -F= '$1=="PRIVATE_KEY"{print $2}')")"; then
       [[ "${derived}" == "${pub}" ]] || { CAUSE='keypair-mismatch'; false; }
     else
-      log "服务器没有可用的 openssl，跳过公私钥配对校验"
+      log "$(L "服务器没有可用的 openssl，跳过公私钥配对校验" "The server has no usable openssl; skipping the key pair check")"
     fi
     txn_set LEGACY_PORT "$(printf '%s\n' "${params}" | awk -F= '$1=="PORT"{print $2}')"
     STEP=BINARY
@@ -758,7 +768,7 @@ op_migrate() {
       chmod 600 "${tar_path}"
       txn_set BACKUP_TAR "${tar_path}"
     fi
-    log "迁移备份：$(txn_get BACKUP_TAR)"
+    log "$(L "迁移备份：$(txn_get BACKUP_TAR)" "Migration backup: $(txn_get BACKUP_TAR)")"
     result_set BACKUP "$(txn_get BACKUP_TAR)"
     STEP=SWITCH
   fi
@@ -809,7 +819,7 @@ op_uninstall() {
 rollback_failed() {
   trap - ERR
   set +e
-  log "回滚本身失败；ownexit-direct=$(systemctl is-active "${UNIT_NAME}" 2>/dev/null) sing-box=$(systemctl is-active sing-box.service 2>/dev/null) 备份=$(txn_get BACKUP_TAR)"
+  log "$(L "回滚本身失败；ownexit-direct=$(systemctl is-active "${UNIT_NAME}" 2>/dev/null) sing-box=$(systemctl is-active sing-box.service 2>/dev/null) 备份=$(txn_get BACKUP_TAR)" "The rollback itself failed; ownexit-direct=$(systemctl is-active "${UNIT_NAME}" 2>/dev/null) sing-box=$(systemctl is-active sing-box.service 2>/dev/null) backup=$(txn_get BACKUP_TAR)")"
   rm -f "${TXN}"
   result_set RESULT fail
   result_set REASON rollback-failed
@@ -820,7 +830,7 @@ on_err() {
   set +e
   trap - ERR
   local cause="${CAUSE:-error}"
-  log "步骤 ${STEP:-?} 出错（${cause}）"
+  log "$(L "步骤 ${STEP:-?} 出错（${cause}）" "Step ${STEP:-?} failed (${cause})")"
   case "${OP}" in
     fresh)
       remove_ownexit_service_files
@@ -865,7 +875,7 @@ on_err() {
 }
 
 run_op() {
-  [[ -f "${ARGS}" ]] || { echo "缺少 ${ARGS}" >&2; exit 2; }
+  [[ -f "${ARGS}" ]] || { echo "$(L "缺少 ${ARGS}" "Missing ${ARGS}")" >&2; exit 2; }
   : > "${RESULT}"
   chmod 600 "${RESULT}"
   OP="$(txn_get OP)"
@@ -874,7 +884,7 @@ run_op() {
     txn_set OP "${OP}"
     txn_set STARTED "$(date '+%Y-%m-%dT%H:%M:%S%z')"
   else
-    log "恢复上次未完成的操作：OP=${OP} STEP=$(txn_get STEP)"
+    log "$(L "恢复上次未完成的操作：OP=${OP} STEP=$(txn_get STEP)" "Resuming the unfinished operation: OP=${OP} STEP=$(txn_get STEP)")"
     result_set RESUMED "${OP}"
   fi
   result_set OP "${OP}"
@@ -888,7 +898,7 @@ run_op() {
     reparam) op_reparam ;;
     migrate) op_migrate ;;
     uninstall) op_uninstall ;;
-    *) trap - ERR; rm -f "${TXN}"; echo "未知操作：${OP}" >&2; exit 2 ;;
+    *) trap - ERR; rm -f "${TXN}"; echo "$(L "未知操作：${OP}" "Unknown operation: ${OP}")" >&2; exit 2 ;;
   esac
 }
 
@@ -896,5 +906,5 @@ case "${1:-}" in
   probe) probe ;;
   run) run_op ;;
   -h|--help) sed -n '2,20p' "$0" ;;
-  *) echo "用法：direct_remote.sh probe | run（由 setup_direct.sh 投递到 VPS 执行）" >&2; exit 2 ;;
+  *) echo "$(L "用法：direct_remote.sh probe | run（由 setup_direct.sh 投递到 VPS 执行）" "Usage: direct_remote.sh probe | run (sent to the VPS and run by setup_direct.sh)")" >&2; exit 2 ;;
 esac
