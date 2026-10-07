@@ -75,9 +75,12 @@ Windows itself is not supported; use WSL. If your computer runs a proxy in TUN m
 ## Install
 
 ```sh
-pipx install ownexit        # or: pip install --user ownexit
-ownexit --help
+brew install jakoes-wu/tap/ownexit   # macOS (Homebrew); also installs qrencode for QR codes
+pipx install ownexit                 # elsewhere, or without Homebrew; pip install --user ownexit also works
+ownexit                              # run it with no arguments in a terminal for a guided setup
 ```
+
+Pick one of the two (it is the same package).
 
 `ownexit` is a thin wrapper around the bundled bash scripts, so you can also run them straight from a clone — the commands map one to one:
 

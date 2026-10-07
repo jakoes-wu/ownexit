@@ -11,10 +11,11 @@
 | 写法 | 作用 |
 | ---- | ---- |
 | `ownexit -h` / `ownexit --help` / `ownexit help` | 打印子命令列表，退出 0 |
+| `ownexit`（不带参数） | 标准输入与输出都是终端时进入向导（问直连还是链式、IP 与 SSH 端口），然后转给 `direct` 或 `chain up` 执行；取消时退出 130（Ctrl+C）或 1（输入结束）。非终端时打印子命令列表，退出 0 |
 | `ownexit -V` / `ownexit --version` | 打印 `ownexit <版本>`，退出 0 |
 | `ownexit <子命令> …` | 转发给对应脚本，退出码即脚本的退出码 |
 
-入口自身的退出码：未知子命令 2；包内脚本缺失或找不到 bash 1。
+入口自身的退出码：未知子命令 2；包内脚本缺失或找不到 bash 1；向导被 Ctrl+C 取消 130、输入结束（Ctrl+D）1。向导的提示文字不冻结。
 
 ## ownexit direct
 
@@ -29,6 +30,7 @@
 | `--port` | `-P` | SSH 端口，默认 22 |
 | `--sni` | | Reality 伪装域名（新装默认 www.amazon.com） |
 | `--proxy-port` | | 代理端口（新装默认 20000-59999 随机） |
+| `--sub-ttl` | | 订阅服务启动后多久自动关闭（`<正整数>[s/m/h]`，不带单位按分钟，1 分钟到 24 小时）；不给则不自动关闭 |
 | `--migrate` | | 把 233boy 旧版迁移为 ownexit-direct（沿用原参数） |
 | `--uninstall` | | 卸载直连服务与订阅服务 |
 | `--rotate-token` | | 重新生成订阅 TOKEN 与端口（设备的 TOKEN 一并更换） |
@@ -37,7 +39,7 @@
 | `--remove-device` | | 吊销一台设备 |
 | `--allow-tun` | | 本机到 VPS 的路由经代理 TUN 时默认拒绝部署（退出 1），加它只警告继续 |
 
-互斥规则：`--migrate`、`--uninstall`、`--rotate-token` 三者互斥；`--rotate-keys` 不能与 `--migrate` / `--uninstall` 同用；`--add-device` 与 `--remove-device` 互斥，且不能与 `--migrate` / `--uninstall` 同用；`--sni` / `--proxy-port` 不能与 `--uninstall` 同用。
+互斥规则：`--migrate`、`--uninstall`、`--rotate-token` 三者互斥；`--rotate-keys` 不能与 `--migrate` / `--uninstall` 同用；`--add-device` 与 `--remove-device` 互斥，且不能与 `--migrate` / `--uninstall` 同用；`--sni` / `--proxy-port` / `--sub-ttl` 不能与 `--uninstall` 同用。
 
 ### 退出码
 
@@ -62,13 +64,14 @@
 | `--host` | | 目标 VPS；不给时用唯一记住的目标 |
 | `--port` | | SSH 端口，默认 22 |
 | `--user` | | SSH 用户，默认 root |
+| `--ttl` | | 只配合 `start`：订阅服务多久后自动关闭（格式同 direct 的 `--sub-ttl`） |
 
 ### 子命令
 
 | 子命令 | 作用 |
 | ---- | ---- |
 | `login` | 免密登录 VPS（默认） |
-| `start` | 启动订阅服务 |
+| `start` | 启动订阅服务（可加 `--ttl`；会先取消上一次的自动关闭计时） |
 | `stop` | 停止订阅服务 |
 | `status` | 查看代理服务与订阅服务状态 |
 | `log` | 查看代理服务日志，可跟行数（默认 100） |

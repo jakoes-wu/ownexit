@@ -225,6 +225,7 @@ usage() {
   rotate-keys  在出口机上重新生成全部设备的 UUID 与 Reality 密钥 / short id，重启出口机 sing-box，更新节点文件
                与 state，最后自动完整 verify；中转、端口、部署 ID 不变。所有客户端都要重新导入
                （多链聚合需重新 render）。中途失败直接重跑同一条命令收敛。
+  （出口机变了，先用 migrate-exit；同一台机器只换了 IP 时它会提示改用 rehost-exit。）
   rehost-exit  出口机同机换 IP：先在 config 改 EXIT_HOST / EXPECTED_EXIT_IPV4，再原地迁移
              中转转发目标与两端 owner、本地 state，最后自动完整 verify。要求新 IP 的主机指纹与 state
              一致（同一台机）；UUID、密钥、端口、客户端订阅都不变；中途失败可重跑，已迁移时输出 noop。
@@ -7883,7 +7884,9 @@ migrate_prepare() {
     11) die 5 '中转 SSH key 指纹漂移' ;;
     12) die 5 '出口机 SSH key 指纹漂移' ;;
     21) die 3 '中转实际协商 host-key 探针不可达' ;;
-    22) die 3 '经中转访问旧出口机失败；旧出口机已经登录不了时不能迁移（私钥只在旧机器上），改用 rollback + deploy' ;;
+    # 最常见的原因是服务商给同一台机器换了 IP、旧 IP 已失效：这时应该用 rehost-exit（不需要旧 IP 可达），
+    # 不能把用户引去 rollback + deploy（会换凭据、所有客户端重新导入）。
+    22) die 3 '经中转访问旧出口机失败。若还是同一台机器、只是 IP 变了：改用 rehost-exit（先把配置里的 EXIT_HOST，出口 IP 也变了就连同 EXPECTED_EXIT_IPV4，改成新值，给新 IP 补 known_hosts 的 ed25519 条目；见 chain/README.md 的「出口机换 IP」一节）。若确实换了机器而旧机器已经登录不了：私钥只在旧机器上，无法迁移，只能 rollback + deploy' ;;
     31) die 3 '中转实际协商 host-key 指纹漂移' ;;
     32) die 3 '旧出口机实际协商 host-key 指纹漂移' ;;
     *) die 5 '主机/密钥绑定核验异常' ;;
@@ -7911,7 +7914,7 @@ migrate_prepare() {
   # 新机器指纹经中转取得：同时证明中转到新机器的 SSH 可达（迁移后的所有管理都走这条路）。
   migrate_use_exit new
   new_fp="$(negotiated_hostkey_fingerprint chain-exit)" || die 3 "经中转访问新出口机 ${MIGRATE_TO}:${MIGRATE_TO_PORT} 失败；确认中转到新机器的 SSH 可达"
-  [[ "${new_fp}" != "${MIGRATE_OLD_EXIT_HOSTKEY_FINGERPRINT}" ]] || die 2 "新出口机 ${MIGRATE_TO} 的主机指纹与当前出口机相同：是同一台机器，换 IP 用 rehost-exit"
+  [[ "${new_fp}" != "${MIGRATE_OLD_EXIT_HOSTKEY_FINGERPRINT}" ]] || die 2 "新出口机 ${MIGRATE_TO} 的主机指纹与当前出口机相同：是同一台机器，只是换了 IP。请改用 rehost-exit：先把配置里的 EXIT_HOST（出口 IP 也变了就连同 EXPECTED_EXIT_IPV4）改成新值，给新 IP 补 known_hosts 的 ed25519 条目，再运行 rehost-exit（见 chain/README.md 的「出口机换 IP」一节）"
   MIGRATE_NEW_EXIT_HOSTKEY_FINGERPRINT="${new_fp}"
   EXIT_HOSTKEY_FINGERPRINT="${new_fp}"
   remote_platform_preflight
