@@ -1,5 +1,7 @@
 # 兼容承诺（1.x）
 
+[English](compatibility.en.md) | **简体中文**
+
 从 1.0.0 起，ownexit 遵循[语义化版本](https://semver.org/lang/zh-CN/)：主版本号.次版本号.修订号。本文件说明 1.x 内承诺什么、不承诺什么，以及升级时要注意的事。被承诺的接口逐项列在 [commands.md](commands.md) 与 [files.md](files.md)。
 
 ## 1. 冻结了什么
@@ -57,6 +59,6 @@
 
 ## 6. 如何守住这些承诺
 
-- `scripts/check_interface.sh`（CI 的 Interface freeze 步骤，lint 与 bash 3.2 两个 job 都运行）自动比对下列清单与本目录的参考文档，不一致时 CI 失败：`ownexit` 子命令；direct / connect / subctl / doctor / multi / chain 的长参数；direct / subctl / multi / chain 的子命令；链式 status 取值与其它命令输出行；connect 的 reason 取值；链配置键（并与配置解析代码对照）；链 state.env 键；直连 client.env 键；订阅文件名。
+- `scripts/check_interface.sh`（CI 的 Interface freeze 步骤，lint 与 bash 3.2 两个 job 都运行）自动比对下列清单与本目录的参考文档，不一致时 CI 失败：`ownexit` 子命令；direct / connect / subctl / doctor / multi / chain 的长参数；direct / subctl / multi / chain 的子命令；链式 status 取值与其它命令输出行；connect 的 reason 取值；链配置键（并与配置解析代码对照）；链 state.env 键；直连 client.env 键；订阅文件名；参考文档中英两版（`*.md` 与 `*.en.md`）的表格首列在占位符归一化后一致。`scripts/check_i18n.sh`（CI 同样运行）检查中英成对文档都存在、互相链接，英文页的链接不指回中文版、锚点有效。
 - 其余承诺（退出码、服务器路径与单元名、nft 表名、节点名与组名、multi 的输出与产物、doctor 的输出格式、conns 输出、环境变量、本机目录规则）由代码评审对照本目录人工核对。
-- 改动任何被承诺的接口时，同一个提交里必须更新本目录的参考文档与 CHANGELOG。
+- 改动任何被承诺的接口时，同一个提交里必须更新本目录的参考文档（中英两版）与 CHANGELOG。

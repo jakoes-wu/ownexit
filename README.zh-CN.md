@@ -77,7 +77,7 @@ pipx ensurepath            # 然后新开一个终端
 ```sh
 brew install jakoes-wu/tap/ownexit   # macOS（Homebrew），连同二维码工具 qrencode 一起装好
 pipx install ownexit                 # 其它系统，或不用 Homebrew 时；也可以 pip install --user ownexit
-ownexit                              # 在终端里只敲 ownexit：向导一步步问清楚，然后自动部署
+ownexit                              # 在终端里只敲 ownexit：先选语言，向导一步步问清楚，然后自动部署
 ```
 
 两种装法二选一即可（装的是同一个包）。

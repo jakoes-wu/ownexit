@@ -25,6 +25,9 @@ jobs:
       - name: Interface freeze
         # 1.x 冻结的参数、子命令、status 取值、配置 / 状态键、订阅文件名必须与 docs/reference/ 一致（docs/reference/compatibility.md）。
         run: scripts/check_interface.sh
+      - name: Bilingual docs
+        # 中英成对文档都存在、顶部互链，英文页不链回中文页、锚点有效（scripts/check_i18n.sh）。
+        run: scripts/check_i18n.sh
       - name: sing-box constants
         # 直连与链式各写了一份 sing-box 版本与官方包摘要，必须逐字一致，防止升级时只改一边。
         run: |
@@ -41,7 +44,7 @@ jobs:
         # 每个入口的 --help 都要退出 0，未知参数都要非 0 退出。
         run: |
           for f in direct/setup_direct.sh direct/connect_to.sh direct/sync_to_vps.sh direct/subctl direct/direct_remote.sh direct/doctor.sh \
-                   chain/setup_chain.sh chain/multi_chain_client.sh scripts/check_public.sh scripts/check_interface.sh; do
+                   chain/setup_chain.sh chain/multi_chain_client.sh scripts/check_public.sh scripts/check_interface.sh scripts/check_i18n.sh; do
             "$f" --help > /dev/null
             if "$f" --no-such-option < /dev/null > /dev/null 2>&1; then echo "$f accepted an unknown option"; exit 1; fi
           done
@@ -80,3 +83,5 @@ jobs:
           for f in chain/*.sh direct/*.sh direct/subctl; do /bin/bash -n "$f"; done
       - name: Interface freeze with /bin/bash
         run: /bin/bash scripts/check_interface.sh
+      - name: Bilingual docs with /bin/bash
+        run: /bin/bash scripts/check_i18n.sh

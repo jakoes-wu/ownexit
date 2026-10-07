@@ -77,7 +77,7 @@ Windows itself is not supported; use WSL. If your computer runs a proxy in TUN m
 ```sh
 brew install jakoes-wu/tap/ownexit   # macOS (Homebrew); also installs qrencode for QR codes
 pipx install ownexit                 # elsewhere, or without Homebrew; pip install --user ownexit also works
-ownexit                              # run it with no arguments in a terminal for a guided setup
+ownexit                              # no arguments in a terminal: pick a language, then a guided setup
 ```
 
 Pick one of the two (it is the same package).
@@ -129,7 +129,7 @@ The VPS is remembered, so later runs need no `--host`: `ownexit direct up` to re
 
 **Set up with the 233boy script by an earlier version?** Run `ownexit direct migrate` once. It keeps the existing UUID, keys, port and SNI, switches to ownexit's own service and removes the 233boy files (backed up first) — your clients and subscription URLs keep working.
 
-Step-by-step guide: [docs/manual/direct.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/manual/direct.md) (Chinese).
+Step-by-step guide: [docs/manual/direct.en.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/manual/direct.en.md).
 
 ## Quick start: relay
 
@@ -143,7 +143,7 @@ Step-by-step guide: [docs/manual/direct.md](https://github.com/jakoes-wu/ownexit
 
 2. **Import**: the node QR code and `vless://` link are printed at the end (any time later: `ownexit chain qr`). Open `https://ipinfo.io` on the device; it should show the exit's IP.
 
-Day to day (no `--id` needed while you have a single chain): `ownexit chain status | verify | conns | rollback`. `ownexit chain rotate-keys` replaces the exit's UUIDs, Reality key pair and short id in place (relay, ports and deployment stay; re-import afterwards). `add-device <name>` / `remove-device <name>` / `list-devices` manage per-device UUIDs; `qr --device <name>` shows one device's QR code. With several chains add `--id <name>`. If the relay also runs a direct exit and you migrate, reconfigure or uninstall that direct exit, run `ownexit chain rebaseline` afterwards so the chain re-records what it protects (the direct script reminds you). Relay blocked? Deploy a second relay with `init --id backup …` and combine both with `multi_chain_client.sh` — clients switch automatically. Full reference: [chain/README.md](https://github.com/jakoes-wu/ownexit/blob/main/chain/README.md); guide: [docs/manual/chain.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/manual/chain.md) (both in Chinese).
+Day to day (no `--id` needed while you have a single chain): `ownexit chain status | verify | conns | rollback`. `ownexit chain rotate-keys` replaces the exit's UUIDs, Reality key pair and short id in place (relay, ports and deployment stay; re-import afterwards). `add-device <name>` / `remove-device <name>` / `list-devices` manage per-device UUIDs; `qr --device <name>` shows one device's QR code. With several chains add `--id <name>`. If the relay also runs a direct exit and you migrate, reconfigure or uninstall that direct exit, run `ownexit chain rebaseline` afterwards so the chain re-records what it protects (the direct script reminds you). Relay blocked? Deploy a second relay with `init --id backup …` and combine both with `multi_chain_client.sh` — clients switch automatically. Full reference: [chain/README.en.md](https://github.com/jakoes-wu/ownexit/blob/main/chain/README.en.md); guide: [docs/manual/chain.en.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/manual/chain.en.md).
 
 ## Supported platforms
 
@@ -154,11 +154,11 @@ Day to day (no `--id` needed while you have a single chain): `ownexit chain stat
 | Server CPU | amd64 (tested on cloud servers) or arm64 (tested on Ubuntu 22.04 arm64 virtual machines) | amd64 (tested on cloud servers) or arm64 (tested on Ubuntu 22.04 arm64 virtual machines); relay and exit must match |
 | Clients | Clash Verge, mihomo, Shadowrocket tested; sing-box and v2rayN subscriptions provided; any VLESS-Reality client via `vless://` | Clash Verge, mihomo, Shadowrocket tested; any VLESS-Reality client via `vless://` |
 
-If your computer runs a proxy in TUN mode (Clash and similar), SSH to the servers gets cut off halfway through a deploy. Deploy commands now check the route to each server first and refuse when it goes through the TUN, telling you what to do: turn TUN off, or route the server IPs through the physical interface (Clash Verge: [docs/manual/clash-direct-ips.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/manual/clash-direct-ips.md), Chinese); pass `--allow-tun` to proceed anyway.
+If your computer runs a proxy in TUN mode (Clash and similar), SSH to the servers gets cut off halfway through a deploy. Deploy commands now check the route to each server first and refuse when it goes through the TUN, telling you what to do: turn TUN off, or route the server IPs through the physical interface (Clash Verge: [docs/manual/clash-direct-ips.en.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/manual/clash-direct-ips.en.md)); pass `--allow-tun` to proceed anyway.
 
 ## Stability
 
-From 1.0.0 the command-line interface, configuration keys and on-disk formats are frozen for the whole 1.x series: releases only add things, nothing is renamed or removed, and existing deployments keep working after an upgrade without redeploying or re-importing clients. Breaking changes are reserved for 2.0 and will come with a migration. The frozen surface is listed in [docs/reference/commands.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/reference/commands.md) and [docs/reference/files.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/reference/files.md); the rules are in [docs/reference/compatibility.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/reference/compatibility.md) (all in Chinese).
+From 1.0.0 the command-line interface, configuration keys and on-disk formats are frozen for the whole 1.x series: releases only add things, nothing is renamed or removed, and existing deployments keep working after an upgrade without redeploying or re-importing clients. Breaking changes are reserved for 2.0 and will come with a migration. The frozen surface is listed in [docs/reference/commands.en.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/reference/commands.en.md) and [docs/reference/files.en.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/reference/files.en.md); the rules are in [docs/reference/compatibility.en.md](https://github.com/jakoes-wu/ownexit/blob/main/docs/reference/compatibility.en.md). The scripts' progress messages are currently in Chinese, and the design records under `docs/feature/` are Chinese only; every user-facing document has an English edition.
 
 ## Security notes
 

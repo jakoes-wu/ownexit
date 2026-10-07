@@ -1,5 +1,7 @@
 # 命令参考（1.x 冻结）
 
+[English](commands.en.md) | **简体中文**
+
 本文件逐项列出 `ownexit` 各子命令的参数、子命令、退出码与机器可读输出。1.x 内这些项只增不减、含义不变，兼容规则见 [compatibility.md](compatibility.md)。表格中带反引号的首列由 `scripts/check_interface.sh` 与源码自动比对。
 
 所有子命令单独使用 `-h` / `--help` 时打印帮助并退出 0（帮助文字不冻结）；链式只在单独使用 `--help` 时显示帮助，`chain init --help` 以退出码 2 拒绝；`chain up --help` 打印帮助并退出 0。`git clone` 用法下各子命令对应的脚本见每节标题下的说明，参数与 `ownexit <子命令>` 完全相同。
@@ -11,7 +13,7 @@
 | 写法 | 作用 |
 | ---- | ---- |
 | `ownexit -h` / `ownexit --help` / `ownexit help` | 打印子命令列表，退出 0 |
-| `ownexit`（不带参数） | 标准输入与输出都是终端时进入向导（问直连还是链式、IP 与 SSH 端口），然后转给 `direct` 或 `chain up` 执行；取消时退出 130（Ctrl+C）或 1（输入结束）。非终端时打印子命令列表，退出 0 |
+| `ownexit`（不带参数） | 标准输入与输出都是终端时进入向导：先选语言（`OWNEXIT_LANG` 为 zh / en 时跳过），再问直连还是链式、IP 与 SSH 端口，然后转给 `direct` 或 `chain up` 执行；取消时退出 130（Ctrl+C）或 1（输入结束）。非终端时打印子命令列表，退出 0 |
 | `ownexit -V` / `ownexit --version` | 打印 `ownexit <版本>`，退出 0 |
 | `ownexit <子命令> …` | 转发给对应脚本，退出码即脚本的退出码 |
 
@@ -373,6 +375,6 @@ stdout 上带 `[multi-chain-client]` 前缀的下列行冻结（其余为日志�
 | `XDG_CONFIG_HOME` / `XDG_STATE_HOME` / `XDG_CACHE_HOME` | 改变配置、状态、缓存目录。链式与 doctor：值不是绝对路径时忽略、回落默认值；直连：按原值使用 |
 | `TMPDIR` | `ownexit multi render` 二维码的默认输出目录 |
 | `OWNEXIT_PYTHON` | 首次配免密时用来自动输入密码的 Python 解释器（需能 `import pexpect`）。`ownexit` 入口自动设为它自己的解释器（已设置时不覆盖）；直接运行脚本时可自己设置，未设置则依次尝试 `python3` 与系统 `expect` |
-| `OWNEXIT_LANG` | `zh` / `en` 强制 `ownexit --help` 的语言；未设或其它值时按 `LC_ALL` → `LC_MESSAGES` → `LANG` 是否以 `zh` 开头选择。只影响入口的帮助文字 |
+| `OWNEXIT_LANG` | 决定入口帮助与向导的语言：`zh` / `en` 时强制该语言，向导也不再问语言；未设或其它值时按 `LC_ALL` → `LC_MESSAGES` → `LANG` 是否以 `zh` 开头选择帮助语言，向导照常先问语言（回车默认取这个判断结果）。部署脚本的输出目前只有中文，不受它影响 |
 
 `~/.ssh/ownexit/`（专用密钥）不受 XDG 影响。以 `OWNEXIT_TEST_` 开头的变量是测试钩子，不属于公开接口，正常使用不要设置。

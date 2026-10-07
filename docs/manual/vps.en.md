@@ -120,7 +120,7 @@ Since the random ports are unknown before deploying, the simplest approach is to
 Firewalls **inside** the server:
 
 - Direct: if UFW is active, ownexit opens the proxy and subscription ports; if not, it leaves UFW alone.
-- Relay: UFW must be inactive, there must be no nftables tables other than ownexit's own, and legacy iptables must have no active rules. Restricting the exit's Reality port to the relay is done by default with an nftables table that ownexit adds on the exit (see the [relay guide](chain.md), in Chinese).
+- Relay: UFW must be inactive, there must be no nftables tables other than ownexit's own, and legacy iptables must have no active rules. Restricting the exit's Reality port to the relay is done by default with an nftables table that ownexit adds on the exit (see the [relay guide](chain.en.md)).
 
 ## 8. The provider only allows SSH keys
 
@@ -142,7 +142,7 @@ ownexit chain init --relay 203.0.113.10 --exit 203.0.113.20   # add --relay-port
 ownexit chain --id main deploy
 ```
 
-The first run asks for each server's root password (not echoed); after that only keys are used. Next steps: the [README](../../README.md#quick-start-direct), the [direct guide](direct.md) and the [relay guide](chain.md) (both in Chinese).
+The first run asks for each server's root password (not echoed); after that only keys are used. Next steps: the [README](../../README.md#quick-start-direct), the [direct guide](direct.en.md) and the [relay guide](chain.en.md).
 
 ## 10. Security tips
 

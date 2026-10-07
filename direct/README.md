@@ -1,7 +1,9 @@
 # 直连：一台 VPS 当出口
 
+[English](README.en.md) | **简体中文**
+
 ```sh
-./direct/setup_direct.sh --host 203.0.113.7   # 第一次会问一次 VPS 的 root 密码
+./direct/setup_direct.sh up --host 203.0.113.7   # 第一次会问一次 VPS 的 root 密码
 ```
 
 一步一步的说明（选机器、导入客户端、验证、排查）见 [`docs/manual/direct.md`](../docs/manual/direct.md)。

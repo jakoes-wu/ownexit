@@ -1,5 +1,7 @@
 # 链式代理：中转机 + 出口机
 
+[English](README.en.md) | **简体中文**
+
 客户端连接中转机的 TCP 端口，中转机用 `systemd-socket-proxyd` 把字节原样转发到出口机，VLESS-Reality 只在出口机终止。出口机的 IP 被墙时，换一台中转机即可，出口 IP 和客户端凭据都不变。
 
 ```text
