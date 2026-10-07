@@ -7,6 +7,7 @@
 #   - 默认检查本脚本所在的仓库；--root 指定另一个仓库副本（负向测试用）。
 #   - 不应被 source。
 #
+# 子命令清单含 direct（主参数循环的分支词）、subctl、multi、chain。
 # 用途：以后改动参数、子命令、status 取值、配置 / 状态键、订阅文件名时，必须同步更新参考文档，
 # 否则本脚本（CI 的 Interface freeze 步骤）失败。只守护“可机读”的清单；退出码、路径、节点名等由人工核对
 # （见 docs/reference/compatibility.md）。
@@ -144,6 +145,11 @@ done
 main_loop direct/subctl | sub_words > "${TMP}/a"
 doc_table "${CMDS}" "ownexit subctl" 子命令 > "${TMP}/b"
 compare "subctl 子命令" "${TMP}/a" "${TMP}/b"
+
+# 3b. direct 子命令（1.5.0 起的子命令形态：主参数循环里不以 - 开头的分支词）
+main_loop direct/setup_direct.sh | sub_words > "${TMP}/a"
+doc_table "${CMDS}" "ownexit direct" 子命令 > "${TMP}/b"
+compare "direct 子命令" "${TMP}/a" "${TMP}/b"
 
 # 4. multi 参数与子命令（parse_args 函数体）
 func_body chain/multi_chain_client.sh parse_args | long_opts > "${TMP}/a"

@@ -20,7 +20,7 @@
 | `direct/<safe_name>.env`（配置目录） | 记住的目标；只允许 `HOST` / `SSH_PORT` / `SSH_USER` 三个键 |
 | `direct/<safe_name>/state.env`（状态目录） | 订阅参数：`SUB_PORT`、`TOKEN`（32 位十六进制） |
 | `direct/<safe_name>/devices.env`（状态目录） | 每台额外设备的订阅 TOKEN，每行 `名字=TOKEN`；以 `!` 开头的行是待在 VPS 上删除的旧 TOKEN |
-| `direct/<safe_name>/ownexit-subscription/<TOKEN>/`（状态目录） | 本机渲染的订阅（同步到 VPS 的副本）；`ownexit subctl qr` 读其中 default 的 `node.txt` |
+| `direct/<safe_name>/ownexit-subscription/<TOKEN>/`（状态目录） | 本机渲染的订阅（同步到 VPS 的副本）；`ownexit direct qr` 读其中 default 的 `node.txt` |
 
 ## 链式（本机）
 
@@ -125,7 +125,7 @@
 | `/etc/ownexit-direct/client.env` | 公开的客户端参数（root 600，无私钥），键见下表“直连 client.env 键”；本机每次从这里读回参数渲染订阅 |
 | `/etc/ownexit-direct/devices.env` | 额外设备表，每行 `名字=UUID`（不含 default）；没有额外设备时不存在 |
 | `/etc/systemd/system/ownexit-direct.service` | 代理服务 |
-| `ownexit-subscription-ttl.timer` / `.service` | 订阅服务自动关闭的瞬时单元（`systemd-run` 创建、不落盘），只在用了 `--sub-ttl` / `subctl start --ttl` 时存在，到时 `systemctl stop ownexit-subscription`；VPS 重启后消失 |
+| `ownexit-subscription-ttl.timer` / `.service` | 订阅服务自动关闭的瞬时单元（`systemd-run` 创建、不落盘），只在用了 `--sub-ttl` / `direct sub start --ttl` 时存在，到时 `systemctl stop ownexit-subscription`；VPS 重启后消失 |
 | `/etc/systemd/system/ownexit-subscription.service` | 订阅服务（`python3 /opt/ownexit-subscription/subserver.py`，以 nobody 运行；1.3.0 之前是 `python3 -m http.server`，重跑一次 `ownexit direct` 即切换） |
 | `/opt/ownexit-subscription/` | 订阅目录：每个 TOKEN 一个子目录（文件见“订阅文件”）、订阅服务脚本 `subserver.py`、一个空 `index.html`（1.3.0 起服务脚本只响应白名单路径，根目录与其它路径一律 404；index.html 保留但不再承担防目录列表） |
 | `/var/backups/ownexit-direct/233boy-<时间>.tar.gz` | `--migrate` 前的 233boy 备份（含旧私钥，任何操作都不会删除） |

@@ -13,7 +13,7 @@
 
 ```sh
 pipx install ownexit
-ownexit direct --host 203.0.113.7   # 第一次会问一次 VPS 的 root 密码
+ownexit direct up --host 203.0.113.7   # 第一次会问一次 VPS 的 root 密码
 ```
 
 跑完后，把终端打印的订阅链接粘贴到 Clash Verge 或 Shadowrocket，就能用了。
@@ -87,7 +87,7 @@ ownexit                              # 在终端里只敲 ownexit：向导一步
 | `ownexit …` | 仓库里的脚本 |
 | ---- | ---- |
 | `ownexit direct` | `direct/setup_direct.sh` |
-| `ownexit subctl` | `direct/subctl` |
+| `ownexit subctl`（已废弃，改用 `ownexit direct sub …` / `status` / `log` …） | `direct/subctl` |
 | `ownexit connect` | `direct/connect_to.sh` |
 | `ownexit chain` | `chain/setup_chain.sh` |
 | `ownexit multi` | `chain/multi_chain_client.sh` |
@@ -105,7 +105,7 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 1. **部署**
 
    ```sh
-   ownexit direct --host 203.0.113.7          # SSH 端口不是 22 时加 --port 2222
+   ownexit direct up --host 203.0.113.7       # SSH 端口不是 22 时加 --port 2222
    ```
 
    依次完成：配免密、检查系统、开启 BBR、由服务器自己下载固定版本的 sing-box 官方包并校验 SHA-256、在服务器上生成 Reality 密钥、生成订阅、上传并逐层验证，全程不用回答问题。想自己指定伪装域名或代理端口，加 `--sni <域名>` 或 `--proxy-port <端口>`；以后换参数也是带新值重跑一次（UUID 与密钥不变）。
@@ -122,12 +122,12 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 3. **检查并收尾**：在设备上打开 `https://ipinfo.io`，应当显示你 VPS 的 IP。然后关掉订阅服务，需要时再开：
 
    ```sh
-   ownexit subctl stop
+   ownexit direct sub stop
    ```
 
-脚本会记住这台 VPS，之后不带参数也能用：`ownexit direct` 重新部署，`ownexit subctl status|start|stop|log|qr` 管理订阅服务、看日志、显示二维码，`ownexit direct --uninstall` 卸载，`ownexit direct --rotate-keys` 在服务器上更换全部设备的 UUID、Reality 密钥和 short id（所有设备都要重新导入订阅）。`ownexit direct --add-device phone` 给一台设备单独一个 UUID 和订阅地址，`--remove-device phone` 吊销它而不影响其它设备，`ownexit subctl devices` 列出设备。
+脚本会记住这台 VPS，之后不用再带 `--host`：`ownexit direct up` 重新部署，`ownexit direct sub start|stop` 开关订阅服务，`ownexit direct status|log|qr` 看状态、日志、二维码，`ownexit direct uninstall` 卸载，`ownexit direct rotate-keys` 在服务器上更换全部设备的 UUID、Reality 密钥和 short id（所有设备都要重新导入订阅）。`ownexit direct add-device phone` 给一台设备单独一个 UUID 和订阅地址，`ownexit direct remove-device phone` 吊销它而不影响其它设备，`ownexit direct devices` 列出设备。（旧写法 `ownexit subctl …`、`ownexit direct --rotate-keys` 等在 1.x 里照常可用，会提示新写法。）
 
-**以前用旧版装过（233boy 脚本）？** 运行一次 `ownexit direct --migrate`：沿用原有 UUID、密钥、端口和 SNI，换成本项目自己的服务，并删除 233boy 的文件（先打包备份）；客户端和订阅链接都不用动。
+**以前用旧版装过（233boy 脚本）？** 运行一次 `ownexit direct migrate`：沿用原有 UUID、密钥、端口和 SNI，换成本项目自己的服务，并删除 233boy 的文件（先打包备份）；客户端和订阅链接都不用动。
 
 逐步说明见 [docs/manual/direct.md](docs/manual/direct.md)。
 
@@ -164,7 +164,7 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 
 - 真实 IP、密码和密钥都不会进入本仓库。没有“编辑脚本顶部填 IP”的用法，也没有 `--password` 选项。密码交互输入（非交互场景用环境变量 `OWNEXIT_SSH_PASSWORD`），不写盘。
 - 密码输错最多可重试 3 次，每次只向服务器提交一次，不容易触发 fail2ban 一类的封禁。失败时最后一行是 `reason=bad-password`、`reason=password-disabled` 或 `reason=unreachable`。
-- 直连的订阅服务是明文 HTTP、靠随机路径保护。平时用 `ownexit subctl stop` 关闭，只在导入时打开；链接泄露时用 `ownexit direct --rotate-token` 换一个；节点凭据泄露时用 `--rotate-keys` 换一套。
+- 直连的订阅服务是明文 HTTP、靠随机路径保护。平时用 `ownexit direct sub stop` 关闭，只在导入时打开；链接泄露时用 `ownexit direct rotate-token` 换一个；节点凭据泄露时用 `ownexit direct rotate-keys` 换一套。
 - 中转机只运行 `systemd-socket-proxyd`；Reality 私钥只存在于出口机权限 600 的文件里。默认情况下，出口机的 Reality 端口只接受中转机的连接（一张随出口服务起停的 nftables 表）。
 - 直连和链式都由每台服务器下载固定版本的官方 sing-box 发布包，并校验归档和 binary 的 SHA-256；服务器访问不了 GitHub 时改由你的电脑下载后上传。Reality 私钥在服务器上生成，不离开服务器。
 
@@ -176,9 +176,9 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 
 **能改 SSH 端口或用户吗？** 直连用 `--port`、`--user`；链式用 `--relay-port`、`--exit-port`，链式要求 root。
 
-**我有好几台 VPS。** 用 `--host` 指定。不带 `--host` 时，`ownexit direct` 和 `ownexit subctl` 会列出记住的几台并退出。
+**我有好几台 VPS。** 用 `--host` 指定。不带 `--host` 时，`ownexit direct` 会列出记住的几台并退出。
 
-**怎么撤销？** 链式：`ownexit chain rollback`。直连：`ownexit direct --uninstall`（保留 SSH 免密与迁移备份）。
+**怎么撤销？** 链式：`ownexit chain rollback`。直连：`ownexit direct uninstall`（保留 SSH 免密与迁移备份）。
 
 **文件都在哪？** 密钥：`~/.ssh/ownexit/`；配置：`~/.config/ownexit/`；状态和订阅：`~/.local/state/ownexit/`。
 

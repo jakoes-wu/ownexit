@@ -19,7 +19,29 @@
 
 ## ownexit direct
 
-脚本：`direct/setup_direct.sh`。部署 / 复用 / 改参数 / 迁移 / 卸载直连出口，并生成订阅。
+脚本：`direct/setup_direct.sh`。部署 / 复用 / 改参数 / 迁移 / 卸载直连出口，并生成订阅；日常操作（原 `ownexit subctl`）也从这里进入。
+
+### 子命令
+
+子命令可以写在参数前后任意位置。不带子命令等同 `up`。
+
+| 子命令 | 作用 |
+| ---- | ---- |
+| `up` | 部署 / 复用（可带 `--host` `--sni` `--proxy-port` `--sub-ttl` `--allow-tun`）；不能与下面的维护子命令同用 |
+| `rotate-keys` | 重新生成全部设备的 UUID 与 Reality 密钥 / short id（同 `--rotate-keys`） |
+| `rotate-token` | 重新生成订阅 TOKEN 与端口（同 `--rotate-token`） |
+| `add-device` | 新增一台设备，跟设备名（同 `--add-device`） |
+| `remove-device` | 吊销一台设备，跟设备名（同 `--remove-device`） |
+| `migrate` | 把 233boy 旧版迁移为 ownexit-direct（同 `--migrate`） |
+| `uninstall` | 卸载直连服务与订阅服务（同 `--uninstall`） |
+| `sub` | 跟 `start [--ttl <时长>]` 或 `stop`：开关订阅服务（同 subctl 的 start / stop） |
+| `status` | 查看代理服务与订阅服务状态（同 subctl status） |
+| `log` | 查看代理服务日志，可跟行数（同 subctl log） |
+| `qr` | 终端显示 default 设备的节点二维码（同 subctl qr） |
+| `devices` | 只读列出设备与订阅地址（同 subctl devices） |
+| `login` | 免密登录 VPS（同 subctl login） |
+
+`sub` / `status` / `log` / `qr` / `devices` / `login` 是日常操作：整体交给 `direct/subctl` 执行，退出码即 subctl 的退出码（见下方 ownexit subctl 一节）；它们之前只能出现 `--host` / `--user` / `--port`，出现 `up`、维护子命令或部署参数时退出 2；它们之后的参数原样交给 subctl 校验。
 
 ### 参数
 
@@ -31,15 +53,15 @@
 | `--sni` | | Reality 伪装域名（新装默认 www.amazon.com） |
 | `--proxy-port` | | 代理端口（新装默认 20000-59999 随机） |
 | `--sub-ttl` | | 订阅服务启动后多久自动关闭（`<正整数>[s/m/h]`，不带单位按分钟，1 分钟到 24 小时）；不给则不自动关闭 |
-| `--migrate` | | 把 233boy 旧版迁移为 ownexit-direct（沿用原参数） |
-| `--uninstall` | | 卸载直连服务与订阅服务 |
-| `--rotate-token` | | 重新生成订阅 TOKEN 与端口（设备的 TOKEN 一并更换） |
-| `--rotate-keys` | | 重新生成全部设备的 UUID 与 Reality 密钥 / short id |
-| `--add-device` | | 新增一台设备（名字 `[a-z0-9][a-z0-9-]{0,31}`，不能是 default） |
-| `--remove-device` | | 吊销一台设备 |
+| `--migrate` | | 已废弃，用 `migrate` 子命令（仍可用，stderr 提示新写法） |
+| `--uninstall` | | 已废弃，用 `uninstall` 子命令 |
+| `--rotate-token` | | 已废弃，用 `rotate-token` 子命令 |
+| `--rotate-keys` | | 已废弃，用 `rotate-keys` 子命令 |
+| `--add-device` | | 已废弃，用 `add-device` 子命令（设备名 `[a-z0-9][a-z0-9-]{0,31}`，不能是 default） |
+| `--remove-device` | | 已废弃，用 `remove-device` 子命令 |
 | `--allow-tun` | | 本机到 VPS 的路由经代理 TUN 时默认拒绝部署（退出 1），加它只警告继续 |
 
-互斥规则：`--migrate`、`--uninstall`、`--rotate-token` 三者互斥；`--rotate-keys` 不能与 `--migrate` / `--uninstall` 同用；`--add-device` 与 `--remove-device` 互斥，且不能与 `--migrate` / `--uninstall` 同用；`--sni` / `--proxy-port` / `--sub-ttl` 不能与 `--uninstall` 同用。
+互斥规则（子命令与对应旧参数等同）：`migrate`、`uninstall`、`rotate-token` 三者互斥；`rotate-keys` 不能与 `migrate` / `uninstall` 同用；`add-device` 与 `remove-device` 互斥，且不能与 `migrate` / `uninstall` 同用；`--sni` / `--proxy-port` / `--sub-ttl` 不能与 `uninstall` 同用；`up` 不能与维护子命令同用。
 
 ### 退出码
 
@@ -55,7 +77,7 @@
 
 ## ownexit subctl
 
-脚本：`direct/subctl`。直连部署后的日常操作。
+脚本：`direct/subctl`。直连部署后的日常操作。**已废弃**（仍可用，最早 2.0 移除）：改用 `ownexit direct` 的子命令（start / stop → `sub start` / `sub stop`，其余同名）。直接调用时 stderr 打一行废弃提示；经 `ownexit direct` 转来时不打。
 
 ### 参数
 
@@ -90,7 +112,7 @@
 
 ## ownexit connect
 
-脚本：`direct/connect_to.sh`。给一台服务器配专用 SSH 密钥（`ownexit direct` 与 `ownexit chain init` 会自动调用）。
+脚本：`direct/connect_to.sh`。给一台服务器配专用 SSH 密钥（`ownexit direct` 与 `ownexit chain init` 会自动调用）。1.5.0 起不在 `ownexit --help` 里列出，命令照常可用。
 
 ### 参数
 
@@ -163,13 +185,13 @@
 | `ban` | 拉黑来源（跟 IPv4 或 CIDR） |
 | `unban` | 解除拉黑（跟 IPv4 或 CIDR） |
 | `banlist` | 对照本地与中转的黑名单 |
-| `rehost-exit` | 出口机同机换 IP 后原地迁移 |
+| `rehost-exit` | 已废弃（仍可用，stderr 提示）：出口机同机换 IP 后原地迁移，要先手改配置；改用 `migrate-exit` |
 | `rebaseline` | 重新登记中转机上的既有 sing-box |
 | `rotate-keys` | 更换全部设备的 UUID 与 Reality 密钥 / short id |
 | `add-device` | 新增一台设备（跟设备名） |
 | `remove-device` | 吊销一台设备（跟设备名） |
 | `list-devices` | 只读列出设备 |
-| `migrate-exit` | 出口机迁到另一台机器，凭据与客户端不变（跟 `--to` / `--abort` / `--abandon-cleanup`） |
+| `migrate-exit` | 出口机换了 IP 或换了机器，凭据与客户端不变（跟 `--to` / `--abort` / `--abandon-cleanup`）；新地址是同一台机器时自动原地切换（SSH 端口须不变，否则退出 2），旧 IP 不必可达 |
 
 ### 退出码
 
@@ -245,7 +267,7 @@ stdout 上的下列行冻结；stderr 上 `[chain][<子命令>] INFO / WARN / ER
 | `rotate=done` | `rotate=done chain=<链> result=<fresh / resumed / already / resumed-after-commit>` | rotate-keys |
 | `device=added` | `device=added chain=<链> name=<名字> node=<路径> result=<…>` | add-device |
 | `device=removed` | `device=removed chain=<链> name=<名字> result=<…>` | remove-device |
-| `rehost=noop` | `rehost=noop chain=<链> next=run-verify` | rehost-exit（无需迁移时） |
+| `rehost=noop` | `rehost=noop chain=<链> next=run-verify` | rehost-exit、migrate-exit（同机切换已完成、无需再迁时） |
 | `rebaseline=noop` | `rebaseline=noop chain=<链> kind=<yes / ownexit-direct / no>` | rebaseline（无需重新登记时） |
 | `banlist=consistent` | `banlist=consistent entries=<数量>` | banlist |
 | `banlist=inconsistent` | `banlist=inconsistent next=run-ban-or-unban` | banlist |
@@ -255,6 +277,7 @@ stdout 上的下列行冻结；stderr 上 `[chain][<子命令>] INFO / WARN / ER
 | `unbanned` | `unbanned entry=<条目> entries=<数量>` | unban |
 | `migrate=done` | `migrate=done chain=<链> exit=<新出口机 IP>:<端口> old_exit_cleanup=<done / pending>` | migrate-exit |
 | `migrate=aborted` | `migrate=aborted chain=<链>` | migrate-exit --abort |
+| `migrate=rehosted` | `migrate=rehosted chain=<链> exit=<新出口机 IP>:<端口>` | migrate-exit（新地址是同一台出口机，原地切换完成） |
 
 行首的键与取值冻结；其余键只冻结键名，键的顺序不承诺。
 

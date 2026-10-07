@@ -97,10 +97,10 @@ chain/multi_chain_client.sh --chains main,backup render
 chain/setup_chain.sh migrate-exit --to <新 IP>
 ```
 
-它会按现场告诉你下一步：
+它先判断新地址是不是同一台机器，再按现场处理：
 
 - **换了机器，旧机器还能登录**：直接迁移。配置（含私钥）从旧机器原样搬到新机器，切中转，删掉旧机器上本链的服务与文件，客户端不用动。步骤与中断处理见 [`chain/README.md` 的“出口机换一台机器”](../../chain/README.md#出口机换一台机器)。
-- **还是同一台机器、只是 IP 变了**（旧 IP 多半已经连不上）：它会提示改用 `rehost-exit`。照提示把配置里的 `EXIT_HOST`（出口 IP 也变了就连同 `EXPECTED_EXIT_IPV4`）改成新值，给新 IP 补 known_hosts 的 ed25519 条目，再运行 `rehost-exit`，见 [`chain/README.md` 的“出口机换 IP”](../../chain/README.md#出口机换-ip同一台机器)。`rehost-exit` 不需要旧 IP 可达。
+- **还是同一台机器、只是 IP 变了**（旧 IP 连不上也行）：自动识别，登记新 IP 的主机密钥、备份并改写配置，原地切换，输出 `migrate=rehosted`；SSH 端口要保持不变。细节见 [`chain/README.md` 的“出口机换 IP”](../../chain/README.md#出口机换-ip同一台机器)。
 - **换了机器，旧机器已经登录不了**：私钥只在旧机器上，无法迁移，只能 rollback 后重新部署（客户端要重新导入）。
 
 ## 8. 常见问题

@@ -102,10 +102,8 @@ chain/setup_chain.sh --id main ban 198.51.100.0/24
 chain/setup_chain.sh --id main unban 203.0.113.7
 chain/setup_chain.sh --id main banlist            # 对照本地黑名单与中转两个 unit 的 IPAddressDeny 回读值
 
-# 出口机同一台机器换了公网 IP（先改配置里的 EXIT_HOST / EXPECTED_EXIT_IPV4）
-chain/setup_chain.sh --id main rehost-exit
-
-# 出口机换一台机器（凭据与客户端不变；第一次会问新机器的 root 密码）
+# 出口机变了：换了公网 IP 或换了一台机器都用它（凭据与客户端不变）。
+# 同一台机器会自动识别并原地切换；换了机器时第一次会问新机器的 root 密码
 chain/setup_chain.sh --id main migrate-exit --to 203.0.113.30
 
 # 中转机上的直连迁移 / 改参数 / 新装 / 卸载之后，重新登记要保护的既有 sing-box
@@ -254,22 +252,18 @@ chain/setup_chain.sh --id main list-devices          # 只读：出口机上的�
 
 ## 出口机换 IP（同一台机器）
 
-> 不确定是换了 IP 还是换了机器时，先运行 `migrate-exit --to <新 IP>`：换了机器它直接迁移；同一台机器它会提示改用本节的 `rehost-exit`。
-
-服务商给出口机换了公网 IP、机器本身没换（ed25519 主机指纹不变）时，用 `rehost-exit` 原地迁移，不要 rollback 加 deploy：rollback 要连旧 IP，deploy 会重新生成凭据，所有客户端都得重新导入。
+服务商给出口机换了公网 IP、机器本身没换（ed25519 主机指纹不变）时，直接运行 `migrate-exit --to <新 IP>`，不要 rollback 加 deploy：rollback 要连旧 IP，deploy 会重新生成凭据，所有客户端都得重新导入。
 
 ```bash
-# 1. 配置里把 EXIT_HOST（出口 IP 也变了就连同 EXPECTED_EXIT_IPV4）改成新值，其余键不动
-# 2. known_hosts 补新 IP 的 ed25519 条目（同一台机器，主机公钥不变）；补完先核对指纹
-grep '^<旧IP> ssh-ed25519 ' ~/.ssh/known_hosts | sed 's/^<旧IP> /<新IP> /' >> ~/.ssh/known_hosts
-ssh-keygen -F <新IP> | tail -1 | ssh-keygen -lf -
-# 3. 迁移（共用这台出口机的每条链各跑一次）
-chain/setup_chain.sh --id main rehost-exit
+# 共用这台出口机的每条链各跑一次；旧 IP 已经连不上也可以
+chain/setup_chain.sh --id main migrate-exit --to <新IP>
 ```
 
-只允许配置里 `EXIT_HOST` / `EXPECTED_EXIT_IPV4` 两个键与状态不同，其余键不一致退出 2。经中转机登录新 IP 后，协商到的主机指纹必须等于状态里记录的值，否则退出 3（说明换成了另一台机器）。迁移顺序：出口机 owner → 中转机 owner 与 relay service 的 `ExecStart` 目标（改完 `daemon-reload`；正在运行的 relay 若仍指向旧目标就重启一次，在途连接会断开，客户端自动重连）→ 本地状态（旧状态归档到 `audit/rehosted.<部署ID>.<操作ID>/state.env`）→ 自动跑与 `verify` 相同的完整核验。UUID、Reality 密钥、端口和 `client/node.txt` 都不变，客户端不用重新导入。
+它经中转机用当前出口机的私钥连新 IP：协商到的主机指纹等于状态里记录的值，就认定是同一台机器，然后在同一条连接里读主机公钥与新的出口 IP（终端里要你确认出口 IP），把新 IP 的 ed25519 条目登记进 `~/.ssh/known_hosts`（已有相同条目不重复写；已有不同的 ed25519 条目就退出 3，交你核对），备份配置为 `<配置>.bak.<时间>` 并改写 `EXIT_HOST` / `EXPECTED_EXIT_IPV4`，再原地切换，成功时输出 `migrate=rehosted chain=<链> exit=<新IP>:<端口>`。指纹不同或连不上时按“换一台机器”处理（见下一节）。SSH 端口必须不变：同一台机器却给了不同的 `--to-port` 时退出 2。
 
-这个命令不走事务：每个远端步骤都用“整文件哈希守门 + 单行替换”，同时接受旧形态和已迁移形态，中途失败直接重跑同一条命令即可收敛；状态已经绑定新配置时输出 `rehost=noop` 并返回 0。退出码：0 成功或 noop；2 参数错误或其它配置键不一致；3 新 IP 不可达、缺 known_hosts 条目或不是同一台机器；5 锁、状态损坏、有未完成事务或收尾 verify 失败；1 远端迁移或本地提交失败（信息里带远端码 171–177 及含义）。
+改写配置之后中断的，重跑同一条命令即可续上（配置已指向新 IP、状态还是旧 IP 时，它只核实这两个键不同，补登记 known_hosts 后继续）；已经切换完成时输出 `rehost=noop`。旧写法 `rehost-exit`（先手改上面两个键并补 known_hosts，再运行它）已废弃，1.x 里照常可用，会提示改用 `migrate-exit`。迁移顺序：出口机 owner → 中转机 owner 与 relay service 的 `ExecStart` 目标（改完 `daemon-reload`；正在运行的 relay 若仍指向旧目标就重启一次，在途连接会断开，客户端自动重连）→ 本地状态（旧状态归档到 `audit/rehosted.<部署ID>.<操作ID>/state.env`）→ 自动跑与 `verify` 相同的完整核验。UUID、Reality 密钥、端口和 `client/node.txt` 都不变，客户端不用重新导入。
+
+原地切换不走事务：每个远端步骤都用“整文件哈希守门 + 单行替换”，同时接受旧形态和已迁移形态，中途失败直接重跑同一条命令即可收敛；状态已经绑定新配置时输出 `rehost=noop` 并返回 0。退出码：0 成功或 noop；2 参数错误、其它配置键不一致、同一台机器却换了 SSH 端口、未确认出口 IP；3 新 IP 不可达、known_hosts 里已有不符的条目或不是同一台机器；5 锁、状态损坏、有未完成事务或收尾 verify 失败；1 远端迁移或本地提交失败（信息里带远端码 171–177 及含义）。
 
 ## 出口机换一台机器
 

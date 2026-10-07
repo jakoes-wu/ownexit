@@ -71,53 +71,57 @@ readonly OP_UNIT='ownexit-direct-op'
 
 usage() {
   cat <<EOF
-用法: $(basename "$0") [选项]
+用法: ownexit direct [子命令] [选项]      （git clone 用法：$(basename "$0") [子命令] [选项]）
 
-第一次部署（会问一次 VPS 的 root 密码）:
-  $(basename "$0") --host 203.0.113.7
-SSH 端口不是 22 时:
-  $(basename "$0") --host 203.0.113.7 --port 2222
-之后重新部署 / 换了客户端要重新拉订阅（自动使用上次记住的 VPS）:
-  $(basename "$0")
-换 Reality 伪装域名或代理端口（UUID 与密钥不变，客户端需重新导入订阅）:
-  $(basename "$0") --sni www.apple.com
-  $(basename "$0") --proxy-port 34567
-把用 233boy 脚本装的旧版换成本项目的服务（沿用原有 UUID / 密钥 / 端口 / SNI，客户端不用动）:
-  $(basename "$0") --migrate
-卸载 VPS 上的直连服务与订阅服务（保留 SSH 免密与迁移备份）:
-  $(basename "$0") --uninstall
-怀疑订阅链接泄露，换一个新的订阅地址:
-  $(basename "$0") --rotate-token
-怀疑节点凭据泄露，换一套新的 UUID / Reality 密钥 / short id（所有设备都要重新导入订阅）:
-  $(basename "$0") --rotate-keys
-  $(basename "$0") --rotate-keys --rotate-token
-给一台新设备单独一套凭据和订阅地址 / 吊销一台设备（其它设备不受影响；列出设备用 ownexit subctl devices）:
-  $(basename "$0") --add-device phone
-  $(basename "$0") --remove-device phone
+部署（不带子命令等同 up；第一次会问一次 VPS 的 root 密码）:
+  ownexit direct up --host 203.0.113.7
+  ownexit direct up --host 203.0.113.7 --port 2222      # SSH 端口不是 22
+  ownexit direct up                                     # 重新部署 / 重新拉订阅（自动用上次记住的 VPS）
+  ownexit direct up --sni www.apple.com                 # 换伪装域名（UUID 与密钥不变，客户端需重新导入订阅）
+  ownexit direct up --proxy-port 34567                  # 换代理端口
+  ownexit direct up --sub-ttl 30m                       # 订阅服务 30 分钟后自动关闭
+
+维护:
+  ownexit direct rotate-token               怀疑订阅链接泄露：换一个新的订阅地址
+  ownexit direct rotate-keys                怀疑节点凭据泄露：换一套新的 UUID / Reality 密钥 / short id（所有设备都要重新导入）
+  ownexit direct rotate-keys rotate-token   两者一起换
+  ownexit direct add-device phone           给一台新设备单独一套凭据和订阅地址（其它设备不受影响）
+  ownexit direct remove-device phone        吊销一台设备
+  ownexit direct migrate                    把用 233boy 脚本装的旧版换成本项目的服务（沿用原有凭据与端口，客户端不用动）
+  ownexit direct uninstall                  卸载 VPS 上的直连服务与订阅服务（保留 SSH 免密与迁移备份）
+
+日常操作（不重新部署）:
+  ownexit direct sub start [--ttl 30m]      打开订阅服务（给新设备导入订阅时临时打开；--ttl 到时自动关闭）
+  ownexit direct sub stop                   关闭订阅服务（平时应保持关闭）
+  ownexit direct status                     查看代理服务与订阅服务状态
+  ownexit direct log [行数]                 查看代理服务最近的日志，默认 100 行
+  ownexit direct qr                         在终端显示节点二维码（需要 qrencode）
+  ownexit direct devices                    列出设备与各设备的订阅地址
+  ownexit direct login                      免密登录 VPS
+  记住了多台 VPS 时加 --host 指定，例：ownexit direct --host 203.0.113.7 status
 
 选项:
   --host <ip/host>            出口 VPS 地址；不给时用上次记住的 VPS，没有则交互提问
-  --allow-tun                 本机到 VPS 的路由经代理 TUN 时默认拒绝（部署途中 SSH 会被切断），加它只警告继续；
-                              让 VPS 的 IP 走物理网卡的做法见 docs/manual/clash-direct-ips.md
   -u, --user <user>           SSH 用户名，默认 root
   -P, --port <port>           SSH 端口，默认 22
   --sni <域名>                Reality 伪装域名；新装默认 ${DIRECT_SNI_DEFAULT}。不是每个 HTTPS 站点都能用
                               （实测 www.microsoft.com 不可用），改完先用一台设备确认能连上
   --proxy-port <端口>         代理端口；新装默认在 20000-59999 随机
   --sub-ttl <时长>            订阅服务启动后多久自动关闭（例：30m、2h；不带单位按分钟，1 分钟到 24 小时）；
-                              不给则不自动关闭，导入后手动 ownexit subctl stop
-  --migrate                   把 233boy 旧版迁移为本项目的服务（一次性）
-  --uninstall                 卸载直连服务与订阅服务
-  --rotate-token              重新生成 TOKEN 和 SUB_PORT，并清理 VPS 上旧 TOKEN 目录
-  --rotate-keys               重新生成全部设备的 UUID 与 Reality 密钥 / short id；失败时自动恢复原配置
-  --add-device <名字>         新增一台设备（名字 [a-z0-9-]，最多 32 个字符，不能是 default；每台 VPS 最多 32 台，含 default）
-  --remove-device <名字>      吊销一台设备，它的订阅地址同时删除
+                              不给则不自动关闭，导入后手动 ownexit direct sub stop
+  --allow-tun                 本机到 VPS 的路由经代理 TUN 时默认拒绝（部署途中 SSH 会被切断），加它只警告继续；
+                              让 VPS 的 IP 走物理网卡的做法见 docs/manual/clash-direct-ips.md
   -h, --help                  显示帮助
 
---migrate、--uninstall、--rotate-token 三者互斥；--rotate-keys 不能与 --migrate / --uninstall 同用；
---add-device 与 --remove-device 互斥，且不能与 --migrate / --uninstall 同用；--sni / --proxy-port 不能与 --uninstall 同用。
+migrate、uninstall、rotate-token 三者互斥；rotate-keys 不能与 migrate / uninstall 同用；
+add-device 与 remove-device 互斥，且不能与 migrate / uninstall 同用；--sni / --proxy-port / --sub-ttl 不能与 uninstall 同用；
+up 不能与维护子命令同用；日常操作不能与部署 / 维护参数同用（日常操作之后的参数交给它自己处理）。
 
-退出码: 0 全部通过；1 部署失败或有验证项未通过；2 参数错误、缺参数（非终端运行时）或服务器是旧版需要 --migrate。
+已废弃写法（仍可用，会提示新写法；最早 2.0 移除）:
+  --rotate-token / --rotate-keys / --add-device <名> / --remove-device <名> / --migrate / --uninstall
+  ownexit subctl <start|stop|status|log|qr|devices|login>   →  ownexit direct sub start / sub stop / status / …
+
+退出码: 0 全部通过；1 部署失败或有验证项未通过；2 参数错误、缺参数（非终端运行时）或服务器是旧版需要 migrate。
 EOF
 }
 
@@ -130,46 +134,97 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=target_lib.sh
 . "${SCRIPT_DIR}/target_lib.sh"
 
+# 子命令形态（1.5.0）：维护操作写成 direct rotate-keys 等子命令；旧的 --rotate-keys 等参数照常可用但已废弃，
+# 每次使用在 stderr 提示新写法。提示用字符串累积而不是数组：macOS 自带 bash 3.2 在 set -u 下展开空数组会报
+# unbound variable，脚本会在没有任何废弃参数的正常运行里直接退出。
+DEPRECATED_MSGS=""
+deprecated() { DEPRECATED_MSGS="${DEPRECATED_MSGS}[!] $1 已废弃（仍可用），改用：ownexit direct $2"$'\n'; }
+# 出现过 up、维护操作（子命令或旧参数）或部署参数（--sni 等）：之后再出现日常操作词（status 等）就是混用，报错。
+SAW_DEPLOY_ARG=0
+SAW_UP=0
+# 用户显式给出的 --host / --user / --port：转给 subctl 时原样带上。只带显式给出的，不带默认值——
+# subctl 没有 --host 时按“唯一记住的目标”解析，硬塞默认端口 22 会盖掉记住的非 22 端口。
+FWD_TARGET=()
+
+# 日常操作（原 subctl 的功能）整体转给 subctl，不在这里重写：sub start|stop、status、log、qr、devices、login。
+# 日常操作词之后的参数原样交给 subctl 校验与报错（-u / -P 换成 subctl 认的长参数）；exec 后退出码、交互终端都属于 subctl。
+# OWNEXIT_VIA_DIRECT=1 让 subctl 知道是经新写法进来的，不打废弃提示。
+forward_to_subctl() {
+  local word="$1" arg subctl_args
+  shift
+  (( SAW_DEPLOY_ARG == 0 )) || die_usage "${word} 是日常操作，不能与部署 / 维护参数同用（用 --help 查看用法）"
+  if [[ "${word}" == sub ]]; then
+    [[ "${1:-}" == start || "${1:-}" == stop ]] || die_usage "sub 后面跟 start 或 stop（例：ownexit direct sub stop）"
+    word="$1"
+    shift
+  fi
+  subctl_args=(${FWD_TARGET[@]+"${FWD_TARGET[@]}"} "${word}")
+  for arg in "$@"; do
+    [[ "${arg}" != -u ]] || arg=--user
+    [[ "${arg}" != -P ]] || arg=--port
+    subctl_args+=("${arg}")
+  done
+  OWNEXIT_VIA_DIRECT=1 exec bash "${SCRIPT_DIR}/subctl" "${subctl_args[@]}"
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --host)           HOST="${2:?--host 需要一个参数}"; shift 2 ;;
-    --host=*)         HOST="${1#*=}"; shift ;;
-    -u|--user)        SSH_USER="${2:?--user 需要一个参数}"; shift 2 ;;
-    --user=*)         SSH_USER="${1#*=}"; shift ;;
-    -P|--port)        SSH_PORT="${2:?--port 需要一个参数}"; shift 2 ;;
-    --port=*)         SSH_PORT="${1#*=}"; shift ;;
-    --sni)            WANT_SNI="${2:?--sni 需要一个参数}"; shift 2 ;;
-    --sni=*)          WANT_SNI="${1#*=}"; shift ;;
-    --proxy-port)     WANT_PROXY_PORT="${2:?--proxy-port 需要一个参数}"; shift 2 ;;
-    --proxy-port=*)   WANT_PROXY_PORT="${1#*=}"; shift ;;
-    --sub-ttl)        WANT_SUB_TTL="${2:?--sub-ttl 需要一个时长}"; shift 2 ;;
-    --sub-ttl=*)      WANT_SUB_TTL="${1#*=}"; shift ;;
-    --migrate)        DO_MIGRATE=1; shift ;;
-    --uninstall)      DO_UNINSTALL=1; shift ;;
-    --rotate-token)   ROTATE_TOKEN=1; shift ;;
-    --rotate-keys)    ROTATE_KEYS=1; shift ;;
-    --add-device)     WANT_ADD_DEVICE="${2:?--add-device 需要一个设备名}"; shift 2 ;;
-    --add-device=*)   WANT_ADD_DEVICE="${1#*=}"; shift ;;
-    --remove-device)  WANT_REMOVE_DEVICE="${2:?--remove-device 需要一个设备名}"; shift 2 ;;
-    --remove-device=*) WANT_REMOVE_DEVICE="${1#*=}"; shift ;;
-    --allow-tun)      ALLOW_TUN=1; shift ;;
+    --host)           HOST="${2:?--host 需要一个参数}"; FWD_TARGET+=(--host "${HOST}"); shift 2 ;;
+    --host=*)         HOST="${1#*=}"; FWD_TARGET+=(--host "${HOST}"); shift ;;
+    -u|--user)        SSH_USER="${2:?--user 需要一个参数}"; FWD_TARGET+=(--user "${SSH_USER}"); shift 2 ;;
+    --user=*)         SSH_USER="${1#*=}"; FWD_TARGET+=(--user "${SSH_USER}"); shift ;;
+    -P|--port)        SSH_PORT="${2:?--port 需要一个参数}"; FWD_TARGET+=(--port "${SSH_PORT}"); shift 2 ;;
+    --port=*)         SSH_PORT="${1#*=}"; FWD_TARGET+=(--port "${SSH_PORT}"); shift ;;
+    --sni)            WANT_SNI="${2:?--sni 需要一个参数}"; SAW_DEPLOY_ARG=1; shift 2 ;;
+    --sni=*)          WANT_SNI="${1#*=}"; SAW_DEPLOY_ARG=1; shift ;;
+    --proxy-port)     WANT_PROXY_PORT="${2:?--proxy-port 需要一个参数}"; SAW_DEPLOY_ARG=1; shift 2 ;;
+    --proxy-port=*)   WANT_PROXY_PORT="${1#*=}"; SAW_DEPLOY_ARG=1; shift ;;
+    --sub-ttl)        WANT_SUB_TTL="${2:?--sub-ttl 需要一个时长}"; SAW_DEPLOY_ARG=1; shift 2 ;;
+    --sub-ttl=*)      WANT_SUB_TTL="${1#*=}"; SAW_DEPLOY_ARG=1; shift ;;
+    --migrate)        DO_MIGRATE=1; SAW_DEPLOY_ARG=1; deprecated --migrate migrate; shift ;;
+    --uninstall)      DO_UNINSTALL=1; SAW_DEPLOY_ARG=1; deprecated --uninstall uninstall; shift ;;
+    --rotate-token)   ROTATE_TOKEN=1; SAW_DEPLOY_ARG=1; deprecated --rotate-token rotate-token; shift ;;
+    --rotate-keys)    ROTATE_KEYS=1; SAW_DEPLOY_ARG=1; deprecated --rotate-keys rotate-keys; shift ;;
+    --add-device)     WANT_ADD_DEVICE="${2:?--add-device 需要一个设备名}"; SAW_DEPLOY_ARG=1
+                      deprecated "--add-device" "add-device ${WANT_ADD_DEVICE}"; shift 2 ;;
+    --add-device=*)   WANT_ADD_DEVICE="${1#*=}"; SAW_DEPLOY_ARG=1; deprecated "--add-device" "add-device ${WANT_ADD_DEVICE}"; shift ;;
+    --remove-device)  WANT_REMOVE_DEVICE="${2:?--remove-device 需要一个设备名}"; SAW_DEPLOY_ARG=1
+                      deprecated "--remove-device" "remove-device ${WANT_REMOVE_DEVICE}"; shift 2 ;;
+    --remove-device=*) WANT_REMOVE_DEVICE="${1#*=}"; SAW_DEPLOY_ARG=1; deprecated "--remove-device" "remove-device ${WANT_REMOVE_DEVICE}"; shift ;;
+    --allow-tun)      ALLOW_TUN=1; SAW_DEPLOY_ARG=1; shift ;;
+    # 子命令（1.5.0 起的推荐写法）：与上面对应的旧参数共用同一组变量，后面的互斥检查与执行路径完全相同。
+    up)               SAW_UP=1; SAW_DEPLOY_ARG=1; shift ;;
+    rotate-keys)      ROTATE_KEYS=1; SAW_DEPLOY_ARG=1; shift ;;
+    rotate-token)     ROTATE_TOKEN=1; SAW_DEPLOY_ARG=1; shift ;;
+    migrate)          DO_MIGRATE=1; SAW_DEPLOY_ARG=1; shift ;;
+    uninstall)        DO_UNINSTALL=1; SAW_DEPLOY_ARG=1; shift ;;
+    add-device)       [[ $# -ge 2 && -n "$2" ]] || die_usage "add-device 需要一个设备名（例：ownexit direct add-device phone）"
+                      WANT_ADD_DEVICE="$2"; SAW_DEPLOY_ARG=1; shift 2 ;;
+    remove-device)    [[ $# -ge 2 && -n "$2" ]] || die_usage "remove-device 需要一个设备名（例：ownexit direct remove-device phone）"
+                      WANT_REMOVE_DEVICE="$2"; SAW_DEPLOY_ARG=1; shift 2 ;;
+    sub|status|log|qr|devices|login)
+                      FWD_WORD="$1"; shift; forward_to_subctl "${FWD_WORD}" "$@" ;;
     -h|--help)        usage; exit 0 ;;
     *)                die_usage "未知参数: $1（用 --help 查看用法）" ;;
   esac
 done
 
-(( DO_MIGRATE + DO_UNINSTALL + ROTATE_TOKEN <= 1 )) || die_usage "--migrate、--uninstall、--rotate-token 只能选一个"
-# 迁移承诺“沿用旧凭据”，与轮换矛盾；卸载后无凭据可换。要换旧版的凭据：先 --migrate，再 --rotate-keys。
-(( DO_MIGRATE + DO_UNINSTALL + ROTATE_KEYS <= 1 )) || die_usage "--rotate-keys 不能与 --migrate / --uninstall 同用（旧版先 --migrate 再 --rotate-keys）"
+[[ -z "${DEPRECATED_MSGS}" ]] || printf '%s' "${DEPRECATED_MSGS}" >&2
+if [[ "${SAW_UP}" == 1 ]] && { (( DO_MIGRATE + DO_UNINSTALL + ROTATE_TOKEN + ROTATE_KEYS > 0 )) || [[ -n "${WANT_ADD_DEVICE}${WANT_REMOVE_DEVICE}" ]]; }; then
+  die_usage "up 只用于部署，不能与 migrate / uninstall / rotate-token / rotate-keys / add-device / remove-device 同用"
+fi
+(( DO_MIGRATE + DO_UNINSTALL + ROTATE_TOKEN <= 1 )) || die_usage "migrate、uninstall、rotate-token 只能选一个"
+# 迁移承诺“沿用旧凭据”，与轮换矛盾；卸载后无凭据可换。要换旧版的凭据：先 migrate，再 rotate-keys。
+(( DO_MIGRATE + DO_UNINSTALL + ROTATE_KEYS <= 1 )) || die_usage "rotate-keys 不能与 migrate / uninstall 同用（旧版先 migrate 再 rotate-keys）"
 if [[ -n "${WANT_ADD_DEVICE}" || -n "${WANT_REMOVE_DEVICE}" ]]; then
-  [[ -z "${WANT_ADD_DEVICE}" || -z "${WANT_REMOVE_DEVICE}" ]] || die_usage "--add-device 与 --remove-device 一次只能用一个"
-  (( DO_MIGRATE + DO_UNINSTALL == 0 )) || die_usage "--add-device / --remove-device 不能与 --migrate / --uninstall 同用"
+  [[ -z "${WANT_ADD_DEVICE}" || -z "${WANT_REMOVE_DEVICE}" ]] || die_usage "add-device 与 remove-device 一次只能用一个"
+  (( DO_MIGRATE + DO_UNINSTALL == 0 )) || die_usage "add-device / remove-device 不能与 migrate / uninstall 同用"
   DEVICE_ARG="${WANT_ADD_DEVICE}${WANT_REMOVE_DEVICE}"
   [[ "${DEVICE_ARG}" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die_usage "设备名只允许小写字母、数字和 -，最多 32 个字符：${DEVICE_ARG}"
-  [[ "${DEVICE_ARG}" != default ]] || die_usage "default 指现有的那套凭据，不能新增或吊销；要整体换凭据用 --rotate-keys"
+  [[ "${DEVICE_ARG}" != default ]] || die_usage "default 指现有的那套凭据，不能新增或吊销；要整体换凭据用 ownexit direct rotate-keys"
 fi
 if [[ "${DO_UNINSTALL}" == 1 && ( -n "${WANT_SNI}" || -n "${WANT_PROXY_PORT}" || -n "${WANT_SUB_TTL}" ) ]]; then
-  die_usage "--uninstall 不能与 --sni / --proxy-port / --sub-ttl 同用"
+  die_usage "uninstall 不能与 --sni / --proxy-port / --sub-ttl 同用"
 fi
 if [[ -n "${WANT_SUB_TTL}" ]]; then
   SUB_TTL_SECONDS="$(parse_ttl "${WANT_SUB_TTL}")" || exit 2
@@ -511,7 +566,7 @@ ensure_sub_params() {
     pass "生成订阅参数：SUB_PORT=${SUB_PORT} TOKEN=${TOKEN}"
   else
     TOKEN_CHANGED=0
-    pass "复用已有订阅参数：SUB_PORT=${SUB_PORT}（TOKEN 不变；如需轮换用 --rotate-token）"
+    pass "复用已有订阅参数：SUB_PORT=${SUB_PORT}（TOKEN 不变；如需轮换用 ownexit direct rotate-token）"
   fi
 }
 
@@ -531,7 +586,7 @@ if [[ "${STATE}" == in_progress ]]; then
   RECOVERED_PARAMS="$(kv_get "${PROBE}" TXN_PARAMS)"
   run_op_to_end
   if ! op_ok && [[ "$(kv_get "${OP_RESULT}" REASON)" != rolled-back ]]; then
-    die "上次未完成的操作恢复失败（REASON=$(kv_get "${OP_RESULT}" REASON)），本次请求未执行；详见上方 [vps] 日志与 ownexit subctl log"
+    die "上次未完成的操作恢复失败（REASON=$(kv_get "${OP_RESULT}" REASON)），本次请求未执行；详见上方 [vps] 日志与 ownexit direct log"
   fi
   # 恢复完成的是一次改参数：节点参数已变，后面要提示重新导入与同机链的 rebaseline。
   # 只有结果 ok 才算凭据已换；rolled-back 表示回到了旧凭据，本次 --rotate-keys 仍要照常执行。
@@ -561,13 +616,13 @@ fi
 
 if [[ "${DO_UNINSTALL}" == 1 ]]; then
   case "${STATE}" in
-    legacy) die "服务器是 233boy 旧版，ownexit 不会卸载它：先运行 $(basename "$0") --migrate，或在 VPS 上用 233boy 自带的卸载" ;;
+    legacy) die "服务器是 233boy 旧版，ownexit 不会卸载它：先运行 ownexit direct migrate，或在 VPS 上用 233boy 自带的卸载" ;;
   esac
   LEFTOVER_STATE="${STATE}"
   # 先取消订阅自动关闭计时器：卸载后它到点去停一个已不存在的服务，会留下失败的瞬时单元。
   vssh "$(ttl_remote_cmd)" || true
   start_op uninstall
-  op_ok || die "卸载未完成（REASON=$(kv_get "${OP_RESULT}" REASON)）；重跑 --uninstall 会从中断处继续"
+  op_ok || die "卸载未完成（REASON=$(kv_get "${OP_RESULT}" REASON)）；重跑 ownexit direct uninstall 会从中断处继续"
   # 结果已读到、临时单元已结束：最后才删工作目录（结果通道在其中）。
   vssh "systemctl is-active --quiet '${OP_UNIT}' || rm -rf '${REMOTE_WORK}'" || true
   RESIDUE="$(vssh 'for u in ownexit-direct.service ownexit-subscription.service; do s=$(systemctl show "$u" -p LoadState --value 2>/dev/null); [ "$s" = not-found ] || echo "$u($s)"; done; for d in /etc/ownexit-direct /opt/ownexit-direct /opt/ownexit-subscription /var/lib/ownexit-direct; do [ -e "$d" ] && echo "$d"; done; true')"
@@ -607,8 +662,8 @@ DO_ROTATE=0
 case "${STATE}" in
   none)
     [[ "${DO_MIGRATE}" == 0 ]] || { echo "[!] 服务器上没有可迁移的 233boy 旧版" >&2; exit 2; }
-    [[ "${ROTATE_KEYS}" == 0 ]] || echo "[*] 新装本来就会生成全新凭据，忽略 --rotate-keys"
-    [[ -z "${WANT_ADD_DEVICE}${WANT_REMOVE_DEVICE}" ]] || die_usage "服务器上还没有部署：先运行 $(basename "$0") 完成部署，再新增 / 吊销设备"
+    [[ "${ROTATE_KEYS}" == 0 ]] || echo "[*] 新装本来就会生成全新凭据，忽略 rotate-keys"
+    [[ -z "${WANT_ADD_DEVICE}${WANT_REMOVE_DEVICE}" ]] || die_usage "服务器上还没有部署：先运行 ownexit direct up 完成部署，再新增 / 吊销设备"
     ensure_sub_params
     if [[ -n "${WANT_PROXY_PORT}" ]]; then
       [[ "${WANT_PROXY_PORT}" != "${SUB_PORT}" ]] || die_usage "--proxy-port 与订阅端口 ${SUB_PORT} 相同，请换一个"
@@ -624,7 +679,7 @@ case "${STATE}" in
       start_op migrate "MIGRATE_START=CLEAN"
       op_ok || die "迁移清理未完成（REASON=$(kv_get "${OP_RESULT}" REASON)）"
     elif [[ "${STATE}" == migrated_leftover ]]; then
-      echo "[!] 迁移未清理完，加 --migrate 继续清理 233boy 残留；本次按已迁移的新版处理"
+      echo "[!] 迁移未清理完，运行 ownexit direct migrate 继续清理 233boy 残留；本次按已迁移的新版处理"
     elif [[ "${DO_MIGRATE}" == 1 ]]; then
       echo "[*] 服务器已是新版，无需迁移，按复用处理"
     fi
@@ -658,8 +713,8 @@ case "${STATE}" in
         "DEVICE_ADD=${WANT_ADD_DEVICE}" "DEVICE_REMOVE=${WANT_REMOVE_DEVICE}"
       if ! op_ok; then
         case "$(kv_get "${OP_RESULT}" REASON)" in
-          *device-exists) die_usage "设备 ${WANT_ADD_DEVICE} 已存在（ownexit subctl devices 查看现有设备），VPS 未改动" ;;
-          *device-missing) die_usage "没有名为 ${WANT_REMOVE_DEVICE} 的设备（ownexit subctl devices 查看现有设备），VPS 未改动" ;;
+          *device-exists) die_usage "设备 ${WANT_ADD_DEVICE} 已存在（ownexit direct devices 查看现有设备），VPS 未改动" ;;
+          *device-missing) die_usage "没有名为 ${WANT_REMOVE_DEVICE} 的设备（ownexit direct devices 查看现有设备），VPS 未改动" ;;
           *device-limit) die_usage "设备数已达上限 32（含 default），VPS 未改动" ;;
         esac
         die "改参数失败（REASON=$(kv_get "${OP_RESULT}" REASON)），VPS 已恢复原配置"
@@ -673,7 +728,7 @@ case "${STATE}" in
       if [[ "${BIN_OK}" != "${BINARY_SHA256}" ]] || ! vssh "systemctl is-active --quiet ownexit-direct" >/dev/null 2>&1; then
         echo "[*] 二进制缺失或服务未运行，修复中"
         start_op repair
-        op_ok || die "服务无法启动（REASON=$(kv_get "${OP_RESULT}" REASON)），配置文件未改动；运行 ownexit subctl log 查看原因"
+        op_ok || die "服务无法启动（REASON=$(kv_get "${OP_RESULT}" REASON)），配置文件未改动；运行 ownexit direct log 查看原因"
       else
         pass "ownexit-direct 已在运行，参数不变"
       fi
@@ -681,7 +736,7 @@ case "${STATE}" in
     ;;
   legacy)
     if [[ "${DO_MIGRATE}" == 0 ]]; then
-      echo "[!] 服务器上是用 233boy 脚本装的旧版。运行 $(basename "$0") --migrate 换成本项目的服务：" >&2
+      echo "[!] 服务器上是用 233boy 脚本装的旧版。运行 ownexit direct migrate 换成本项目的服务：" >&2
       echo "    沿用原有 UUID / 密钥 / 端口 / SNI，客户端与订阅链接不用动；服务器本次未做任何改动" >&2
       exit 2
     fi
@@ -694,7 +749,7 @@ case "${STATE}" in
     CHANGED_PARAMS=1
     ;;
   conflict)
-    die "VPS 上的文件组合无法自动处理：$(kv_get "${PROBE}" SEEN)（sing-box.service=$(kv_get "${PROBE}" SINGBOX_UNIT)）。可运行 $(basename "$0") --uninstall 只删除 ownexit 的文件"
+    die "VPS 上的文件组合无法自动处理：$(kv_get "${PROBE}" SEEN)（sing-box.service=$(kv_get "${PROBE}" SINGBOX_UNIT)）。可运行 ownexit direct uninstall 只删除 ownexit 的文件"
     ;;
   *)
     die "未知服务器状态：${STATE}"
@@ -1028,7 +1083,7 @@ echo "[*] 验证：VPS 主机层"
 if [[ "$(vssh 'systemctl is-active ownexit-direct' 2>/dev/null || true)" == "active" ]]; then
   pass "ownexit-direct 服务 active"
 else
-  fail "ownexit-direct 服务非 active，运行 ownexit subctl log 查看日志"
+  fail "ownexit-direct 服务非 active，运行 ownexit direct log 查看日志"
 fi
 if vssh "ss -ltn | awk '{print \$4}' | grep -q ':${PROXY_PORT}\$'" >/dev/null 2>&1; then
   pass "代理端口 ${PROXY_PORT} 监听中"
@@ -1084,7 +1139,7 @@ done
 if [[ -n "${WANT_SUB_TTL}" ]]; then
   SUB_CLOSE_HINT="订阅服务将在 ${WANT_SUB_TTL} 后自动关闭，到时请先导入完"
 else
-  SUB_CLOSE_HINT="所有设备都导入后，关掉订阅服务缩小暴露面：ownexit subctl stop"
+  SUB_CLOSE_HINT="所有设备都导入后，关掉订阅服务缩小暴露面：ownexit direct sub stop"
 fi
 
 cat <<EOF
@@ -1118,16 +1173,16 @@ vless 节点链接（仅故障排查/备份用）:
 
 安全提醒:
   - 订阅是明文 HTTP：只在新增/更新客户端时手动拉取，不要配置成高频自动更新
-  - 以后要给新设备导入订阅：ownexit subctl start --ttl 30m（到时自动关闭），或先 start、导入后再 stop
-  - 怀疑订阅泄露时运行：$(basename "$0") --rotate-token
-  - 怀疑节点凭据泄露时运行：$(basename "$0") --rotate-keys（所有设备都要重新导入）
+  - 以后要给新设备导入订阅：ownexit direct sub start --ttl 30m（到时自动关闭），或先 sub start、导入后再 sub stop
+  - 怀疑订阅泄露时运行：ownexit direct rotate-token
+  - 怀疑节点凭据泄露时运行：ownexit direct rotate-keys（所有设备都要重新导入）
 EOF
 if command -v qrencode >/dev/null 2>&1; then
   echo
   echo "节点二维码（iPhone Shadowrocket / 安卓客户端扫码导入）:"
   qrencode -t ANSIUTF8 < "${STAGING}/${TOKEN}/node.txt"
 else
-  echo "[*] 想在终端显示节点二维码：安装 qrencode（macOS: brew install qrencode）后运行 ownexit subctl qr"
+  echo "[*] 想在终端显示节点二维码：安装 qrencode（macOS: brew install qrencode）后运行 ownexit direct qr"
 fi
 if [[ -n "${NEW_DEVICE_TOKENS}" ]]; then
   echo

@@ -11,7 +11,7 @@
 | 脚本 | 作用 |
 | ---- | ---- |
 | `setup_direct.sh` | 部署入口：配免密 → 检查系统 → 开 BBR → 装 sing-box → 生成并上传订阅 → 验证 |
-| `subctl` | 部署后的日常操作：`status` / `start` / `stop` 订阅服务、`log`、`qr`、`devices` 列出设备，或免密登录 VPS |
+| `subctl` | 部署后的日常操作：`status` / `start` / `stop` 订阅服务、`log`、`qr`、`devices` 列出设备，或免密登录 VPS。1.5.0 起由 `setup_direct.sh` 的 `sub start` / `sub stop` / `status` / `log` / `qr` / `devices` / `login` 子命令转来调用；直接调用已废弃（仍可用，会提示新写法） |
 | `connect_to.sh` | 给一台 VPS 配专用 SSH 密钥；`setup_direct.sh` 和链式的 `init` 会自动调用它 |
 | `sync_to_vps.sh` | 把本地渲染好的订阅目录上传到 VPS；由 `setup_direct.sh` 调用 |
 | `doctor.sh` | 诊断：检查本机环境、已记住的直连 VPS 和链，`--ip-check` 体检出口 IP，`--scan-sni` 扫描可用的伪装域名（`ownexit doctor`） |

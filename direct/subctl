@@ -18,6 +18,9 @@ usage() {
   cat <<'EOF'
 subctl —— 直连出口 VPS 的免密登录、订阅服务开关、日志与二维码
 
+已废弃（仍可用，最早 2.0 移除）：改用 ownexit direct 的子命令——start / stop 对应 sub start / sub stop，
+status / log / qr / devices / login 同名，例：ownexit direct sub stop、ownexit direct status。
+
 用法:
   subctl [--host <ip>] [--port <port>] [--user <user>] [子命令]
 
@@ -34,7 +37,7 @@ subctl —— 直连出口 VPS 的免密登录、订阅服务开关、日志与�
   help         显示本帮助（同 -h / --help）
 
 示例:
-  subctl status                         # 使用上次 setup_direct.sh 记住的 VPS
+  subctl status                         # 使用上次 ownexit direct 记住的 VPS
   subctl start
   subctl start --ttl 30m                # 30 分钟后自动关闭
   subctl log 300
@@ -86,9 +89,19 @@ if [[ -n "${WANT_TTL}" ]]; then
   [[ "${WANT_TTL}" =~ [smh]$ ]] || WANT_TTL="${WANT_TTL}m"
 fi
 
+# 1.5.0 起 subctl 并入 ownexit direct（sub start / sub stop / status / log / qr / devices / login），本命令废弃但照常可用。
+# 经 ownexit direct 转进来时设了 OWNEXIT_VIA_DIRECT=1，不提示；直接调用时在 stderr 提示一次新写法，stdout 不受影响。
+if [[ "${OWNEXIT_VIA_DIRECT:-}" != 1 ]]; then
+  case "${CMD}" in
+    start|stop) NEW_FORM="sub ${CMD}" ;;
+    *)          NEW_FORM="${CMD}" ;;
+  esac
+  echo "[!] ownexit subctl 已废弃（仍可用），改用：ownexit direct ${NEW_FORM}" >&2
+fi
+
 # subctl 不负责首次部署：没有记住的目标时不交互提问，直接提示先跑 setup_direct.sh。
 # shellcheck disable=SC2034  # 由 target_lib.sh 的 resolve_target 读取
-TARGET_NO_PROMPT_HINT="还没有记住任何 VPS，请先运行 setup_direct.sh --host <ip> 完成部署，或给 subctl 加 --host"
+TARGET_NO_PROMPT_HINT="还没有记住任何 VPS，请先运行 ownexit direct up --host <ip> 完成部署，或加 --host 指定"
 resolve_target
 
 # 密钥路径推导必须与 connect_to.sh / setup_direct.sh 完全一致
@@ -101,11 +114,11 @@ if [[ "${CMD}" == qr ]]; then
   STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/ownexit/direct/${SAFE_NAME}"
   TOKEN="$(awk -F= '$1 == "TOKEN" {print $2; exit}' "${STATE_DIR}/state.env" 2>/dev/null || true)"
   NODE_FILE="${STATE_DIR}/ownexit-subscription/${TOKEN}/node.txt"
-  [[ -n "${TOKEN}" && -f "${NODE_FILE}" ]] || die "本机没有这台 VPS 的订阅，先运行 ownexit direct --host ${HOST}"
+  [[ -n "${TOKEN}" && -f "${NODE_FILE}" ]] || die "本机没有这台 VPS 的订阅，先运行 ownexit direct up --host ${HOST}"
   qrencode -t ANSIUTF8 < "${NODE_FILE}"
   exit 0
 fi
-[[ -f "${KEY}" ]] || die "未找到密钥 ${KEY}，请先运行 setup_direct.sh --host ${HOST} 完成部署"
+[[ -f "${KEY}" ]] || die "未找到密钥 ${KEY}，请先运行 ownexit direct up --host ${HOST} 完成部署"
 
 # SetEnv 强制给远端发 VPS 上存在的 locale，覆盖本机转发来的 zh_CN.UTF-8，
 # 避免远端 bash setlocale 失败刷 "cannot change locale" 警告（VPS 未生成 zh_CN）
@@ -125,7 +138,7 @@ case "${CMD}" in
     if [[ -n "${WANT_TTL}" ]]; then
       echo "[+] 已启动 ${SUB_SERVICE}，${WANT_TTL} 后自动关闭"
     else
-      echo "[+] 已启动 ${SUB_SERVICE}（临时开；客户端更新完订阅后执行 subctl stop 关回）"
+      echo "[+] 已启动 ${SUB_SERVICE}（临时开；客户端更新完订阅后执行 ownexit direct sub stop 关回）"
     fi
     ;;
   stop)
@@ -138,7 +151,7 @@ if [ -e /etc/systemd/system/ownexit-direct.service ]; then
   echo -n '代理服务 ownexit-direct : '; systemctl is-active ownexit-direct 2>/dev/null || true
 elif [ -L /usr/local/bin/sb ]; then
   echo -n '代理服务（旧版 233boy）  : '; systemctl is-active sing-box 2>/dev/null || true
-  echo '  建议运行 ownexit direct --migrate 换成本项目的服务（参数不变，客户端不用动）'
+  echo '  建议运行 ownexit direct migrate 换成本项目的服务（参数不变，客户端不用动）'
 else
   echo '代理服务               : 未安装'
 fi
