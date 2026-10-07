@@ -254,6 +254,8 @@ chain/setup_chain.sh --id main list-devices          # 只读：出口机上的�
 
 ## 出口机换 IP（同一台机器）
 
+> 不确定是换了 IP 还是换了机器时，先运行 `migrate-exit --to <新 IP>`：换了机器它直接迁移；同一台机器它会提示改用本节的 `rehost-exit`。
+
 服务商给出口机换了公网 IP、机器本身没换（ed25519 主机指纹不变）时，用 `rehost-exit` 原地迁移，不要 rollback 加 deploy：rollback 要连旧 IP，deploy 会重新生成凭据，所有客户端都得重新导入。
 
 ```bash

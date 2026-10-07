@@ -42,7 +42,7 @@ _TEXT = {
         "subctl": "直连订阅服务的开关、状态、日志、二维码，或免密登录 VPS",
         "multi": "把多条链合成一份客户端配置",
         "connect": "给一台服务器配免密 SSH（direct / chain 会自动调用）",
-        "tail": "命令后面的参数原样交给对应脚本；用 `ownexit <命令> --help` 看它的参数。",
+        "tail": "命令后面的参数原样交给对应脚本；用 `ownexit <命令> --help` 看它的参数。\n在终端里只敲 `ownexit`（不带参数）进入向导，一步步问清楚再部署。",
         "examples": "示例:",
     },
     "en": {
@@ -55,7 +55,7 @@ _TEXT = {
         "subctl": "subscription service start / stop / status, service log, node QR code, or log in",
         "multi": "combine several chains into one client config",
         "connect": "set up key-based SSH login to a server (called by direct / chain automatically)",
-        "tail": "Arguments after the command go to the script unchanged; use `ownexit <command> --help` for its options.",
+        "tail": "Arguments after the command go to the script unchanged; use `ownexit <command> --help` for its options.\nRun `ownexit` with no arguments in a terminal for a guided setup.",
         "examples": "examples:",
     },
 }
@@ -97,8 +97,118 @@ def _usage():
     return "\n".join(lines)
 
 
+# 向导文案（中 / 英）。向导只负责问清楚“直连还是链式、IP 和端口”，然后转给 direct / chain up 执行，
+# 不做任何部署逻辑；所以它问错了也只影响传给脚本的参数，脚本自己仍会逐项校验。
+_WIZARD = {
+    "zh": {
+        "title": "ownexit 向导（随时 Ctrl+C 退出）",
+        "mode": "在你这里能直接连上这台 VPS 吗？（大多数海外 VPS 在国内连不上或很慢，就选 2）\n"
+                "  1) 能 —— 直连，1 台 VPS\n"
+                "  2) 不能 —— 链式，前面加一台中转机，共 2 台\n"
+                "请选择 [1/2]: ",
+        "vps": "VPS 的公网 IPv4: ",
+        "relay": "中转机的公网 IPv4: ",
+        "exit": "出口机（最终出网的那台）的公网 IPv4: ",
+        "port": "{} 的 SSH 端口 [22]: ",
+        "bad_ip": "不是有效的 IPv4，请重输。",
+        "bad_port": "端口要是 1-65535 的数字，请重输。",
+        "same": "中转机和出口机必须是两台不同的机器，请重输出口机。",
+        "run": "即将运行：ownexit {}",
+        "cancel": "已取消",
+    },
+    "en": {
+        "title": "ownexit guided setup (Ctrl+C to quit at any time)",
+        "mode": "Can you reach this VPS directly from where you are? (Many VPSes abroad are unreachable or slow from mainland China; pick 2 then.)\n"
+                "  1) Yes - direct, one VPS\n"
+                "  2) No  - relay chain, add a relay in front, two servers\n"
+                "Choose [1/2]: ",
+        "vps": "Public IPv4 of the VPS: ",
+        "relay": "Public IPv4 of the relay: ",
+        "exit": "Public IPv4 of the exit (where traffic finally leaves): ",
+        "port": "SSH port of {} [22]: ",
+        "bad_ip": "Not a valid IPv4 address, try again.",
+        "bad_port": "The port must be a number from 1 to 65535, try again.",
+        "same": "The relay and the exit must be two different servers; enter the exit again.",
+        "run": "About to run: ownexit {}",
+        "cancel": "Cancelled",
+    },
+}
+
+
+def _is_ipv4(value):
+    """与脚本同一口径：四段十进制、每段 0-255、不带前导零。"""
+    parts = value.split(".")
+    if len(parts) != 4:
+        return False
+    for part in parts:
+        if not part.isdigit() or (len(part) > 1 and part[0] == "0") or int(part) > 255:
+            return False
+    return True
+
+
+def _ask(text, check, error):
+    while True:
+        value = input(text).strip()
+        if check(value):
+            return value
+        print(error)
+
+
+def _ask_port(text, error):
+    value = _ask(text, lambda v: v == "" or (v.isdigit() and v[0] != "0" and int(v) <= 65535), error)
+    return value or "22"
+
+
+def _wizard():
+    """交互式问清部署方式与地址，返回要转发的参数列表（如 ["direct", "--host", "203.0.113.7"]）。"""
+    t = _WIZARD[_lang()]
+    print(t["title"])
+    print()
+    mode = _ask(t["mode"], lambda v: v in ("1", "2"), "1 / 2")
+    if mode == "1":
+        host = _ask(t["vps"], _is_ipv4, t["bad_ip"])
+        port = _ask_port(t["port"].format(host), t["bad_port"])
+        args = ["direct", "--host", host]
+        if port != "22":
+            args += ["--port", port]
+        return args
+    relay = _ask(t["relay"], _is_ipv4, t["bad_ip"])
+    relay_port = _ask_port(t["port"].format(relay), t["bad_port"])
+    while True:
+        exit_host = _ask(t["exit"], _is_ipv4, t["bad_ip"])
+        if exit_host != relay:
+            break
+        print(t["same"])
+    exit_port = _ask_port(t["port"].format(exit_host), t["bad_port"])
+    args = ["chain", "up", "--relay", relay, "--exit", exit_host]
+    if relay_port != "22":
+        args += ["--relay-port", relay_port]
+    if exit_port != "22":
+        args += ["--exit-port", exit_port]
+    return args
+
+
 def main(argv=None):
     args = sys.argv[1:] if argv is None else list(argv)
+    if not args and sys.stdin.isatty() and sys.stdout.isatty():
+        # 只有在交互终端里不带参数才进向导；脚本、管道、CI 里照旧打印帮助，行为与 1.3.0 相同。
+        t = _WIZARD[_lang()]
+        try:
+            args = _wizard()
+        except KeyboardInterrupt:
+            print()
+            print(t["cancel"])
+            return 130
+        except EOFError:
+            print()
+            print(t["cancel"])
+            return 1
+        print(t["run"].format(" ".join(args)))
+        if os.environ.get("OWNEXIT_TEST_WIZARD_PRINT") == "1":
+            # 测试钩子：只打印将要转发的参数，不执行（OWNEXIT_TEST_ 前缀不属于公开接口）。
+            for arg in args:
+                print(arg)
+            return 0
     if not args or args[0] in ("-h", "--help", "help"):
         print(_usage())
         return 0

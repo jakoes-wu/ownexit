@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-06
+
+### 新增
+
+- 向导：在终端里只敲 `ownexit`（不带参数），先问“在你这里能直接连上这台 VPS 吗”，再问 IP 与 SSH 端口，然后自动执行 `ownexit direct` 或 `ownexit chain up`。脚本、管道里不带参数仍打印帮助。
+- Homebrew 一行安装：`brew install jakoes-wu/tap/ownexit`（macOS），连同 qrencode 一起装好。
+- 直连订阅服务可选自动关闭：`ownexit direct --sub-ttl 30m`、`ownexit subctl start --ttl 30m`，到时在 VPS 上自动停掉订阅服务；不给则与之前一样一直开着。`subctl status` 显示离自动关闭还剩多久，`subctl stop` 一并取消计时。
+
+### 变更
+
+- 手册与帮助把“出口机变了”统一为先运行 `migrate-exit`；同一台机器只换了 IP 时（包括旧 IP 已经连不上），它的提示现在指向 `rehost-exit`，并写清楚之前要改哪些配置。
+
 ## [1.3.0] - 2026-10-06
 
 ### 新增

@@ -109,12 +109,15 @@ curl -x http://127.0.0.1:7890 https://ipinfo.io   # 另开终端验证
 
 ## 6. 日常维护
 
+部署时加 `--sub-ttl 30m`（例：`ownexit direct --host <IP> --sub-ttl 30m`），订阅服务会在 30 分钟后自动关闭；不加则一直开着，导入后手动 `subctl stop`。自动关闭的计时只在当前开机周期内有效：VPS 重启后订阅服务会按开机自启重新起来并一直开着，需要再 `subctl stop` 或 `subctl start --ttl …`。
+
 ```sh
 ./direct/subctl status      # 代理服务和订阅服务的状态
 ./direct/subctl log         # 代理服务最近 100 行日志（log 300 看 300 行）
 ./direct/subctl qr          # 在终端显示节点二维码（需要 qrencode）
 ./direct/subctl stop        # 所有设备导入后关掉订阅服务（推荐常态）
 ./direct/subctl start       # 给新设备导入前临时打开，用完再 stop
+./direct/subctl start --ttl 30m   # 打开并在 30 分钟后自动关闭，不用记得 stop
 ./direct/subctl             # 免密登录这台 VPS
 ./direct/setup_direct.sh --rotate-token   # 怀疑订阅链接泄露时换一个新地址
 ./direct/setup_direct.sh --rotate-keys    # 怀疑节点凭据泄露时换一套 UUID / Reality 密钥 / short id

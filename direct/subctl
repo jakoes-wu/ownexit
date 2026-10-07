@@ -23,7 +23,9 @@ subctl —— 直连出口 VPS 的免密登录、订阅服务开关、日志与�
 
 子命令:
   login        免密登录 VPS（交互式 SSH，默认）
-  start        启动订阅服务（给新设备导入订阅时临时打开；用完记得 stop）
+  start [--ttl <时长>]
+               启动订阅服务（给新设备导入订阅时临时打开）；--ttl 到时自动关闭（例：30m、2h，
+               不带单位按分钟，1 分钟到 24 小时），不给则一直开着，用完记得 stop
   stop         停止订阅服务（平时应保持关闭，缩小公网暴露）
   status       查看代理服务与订阅服务状态
   log [行数]   查看代理服务最近的日志，默认 100 行
@@ -34,6 +36,7 @@ subctl —— 直连出口 VPS 的免密登录、订阅服务开关、日志与�
 示例:
   subctl status                         # 使用上次 setup_direct.sh 记住的 VPS
   subctl start
+  subctl start --ttl 30m                # 30 分钟后自动关闭
   subctl log 300
   subctl qr
   subctl devices
@@ -51,6 +54,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 CMD=""
 LOG_LINES=100
+# start --ttl 的原值与秒数；空 = 不自动关闭。
+WANT_TTL=""
+TTL_SECONDS=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --host)    HOST="${2:?--host 需要一个参数}"; shift 2 ;;
@@ -59,6 +65,8 @@ while [[ $# -gt 0 ]]; do
     --port=*)  SSH_PORT="${1#*=}"; shift ;;
     --user)    SSH_USER="${2:?--user 需要一个参数}"; shift 2 ;;
     --user=*)  SSH_USER="${1#*=}"; shift ;;
+    --ttl)     WANT_TTL="${2:?--ttl 需要一个时长}"; shift 2 ;;
+    --ttl=*)   WANT_TTL="${1#*=}"; shift ;;
     help|-h|--help) usage; exit 0 ;;
     login|start|stop|status|qr|devices)
       [[ -z "${CMD}" ]] || die_usage "只能给一个子命令（已有 ${CMD}）"
@@ -71,6 +79,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 CMD="${CMD:-login}"
+if [[ -n "${WANT_TTL}" ]]; then
+  [[ "${CMD}" == start ]] || die_usage "--ttl 只能跟 start 一起用"
+  TTL_SECONDS="$(parse_ttl "${WANT_TTL}")" || exit 2
+  # 不带单位按分钟：提示里补上 m，避免显示成“30 后自动关闭”。
+  [[ "${WANT_TTL}" =~ [smh]$ ]] || WANT_TTL="${WANT_TTL}m"
+fi
 
 # subctl 不负责首次部署：没有记住的目标时不交互提问，直接提示先跑 setup_direct.sh。
 # shellcheck disable=SC2034  # 由 target_lib.sh 的 resolve_target 读取
@@ -106,11 +120,16 @@ case "${CMD}" in
     exec ssh "${SSH_BASE[@]}" "${TGT}"
     ;;
   start)
-    rcmd "systemctl start '${SUB_SERVICE}'"
-    echo "[+] 已启动 ${SUB_SERVICE}（临时开；客户端更新完订阅后执行 subctl stop 关回）"
+    # 先清掉上一次的自动关闭计时器，避免旧计时器在新的一次开放中途把服务关掉；带 --ttl 再起新的。
+    rcmd "systemctl start '${SUB_SERVICE}'; $(ttl_remote_cmd "${TTL_SECONDS}")"
+    if [[ -n "${WANT_TTL}" ]]; then
+      echo "[+] 已启动 ${SUB_SERVICE}，${WANT_TTL} 后自动关闭"
+    else
+      echo "[+] 已启动 ${SUB_SERVICE}（临时开；客户端更新完订阅后执行 subctl stop 关回）"
+    fi
     ;;
   stop)
-    rcmd "systemctl stop '${SUB_SERVICE}'"
+    rcmd "$(ttl_remote_cmd); systemctl stop '${SUB_SERVICE}'"
     echo "[+] 已停止 ${SUB_SERVICE}"
     ;;
   status)
@@ -125,6 +144,9 @@ else
 fi
 echo -n '订阅服务（运行）        : '; systemctl is-active ${SUB_SERVICE} 2>/dev/null || true
 echo -n '订阅服务（开机自启）    : '; systemctl is-enabled ${SUB_SERVICE} 2>/dev/null || true
+# list-timers 一行是「NEXT（星期 日期 时间 时区 4 段）LEFT（如 1h 29min left）…」，只取 LEFT 列。
+ttl_line="\$(systemctl list-timers ownexit-subscription-ttl.timer --no-legend 2>/dev/null | sed -n 's/^[^ ]* [^ ]* [^ ]* [^ ]*  *\(.* left\) .*/\1/p' | head -n 1)"
+[ -z "\${ttl_line}" ] || echo "订阅服务自动关闭        : \${ttl_line}"
 REMOTE
     ;;
   log)

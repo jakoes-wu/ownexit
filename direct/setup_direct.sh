@@ -51,6 +51,9 @@ DO_MIGRATE=0
 DO_UNINSTALL=0
 WANT_SNI=""
 WANT_PROXY_PORT=""
+# --sub-ttl：订阅服务自动关闭的时长（原值，如 30m）；空 = 不自动关闭（默认，与 1.3.0 相同）。
+WANT_SUB_TTL=""
+SUB_TTL_SECONDS=""
 
 # sing-box 固定版本与官方包摘要：必须与 chain/setup_chain.sh 的同名常量逐字一致（CI 的“sing-box 常量一致”检查）。
 readonly SING_BOX_VERSION='1.13.14'
@@ -101,6 +104,8 @@ SSH 端口不是 22 时:
   --sni <域名>                Reality 伪装域名；新装默认 ${DIRECT_SNI_DEFAULT}。不是每个 HTTPS 站点都能用
                               （实测 www.microsoft.com 不可用），改完先用一台设备确认能连上
   --proxy-port <端口>         代理端口；新装默认在 20000-59999 随机
+  --sub-ttl <时长>            订阅服务启动后多久自动关闭（例：30m、2h；不带单位按分钟，1 分钟到 24 小时）；
+                              不给则不自动关闭，导入后手动 ownexit subctl stop
   --migrate                   把 233boy 旧版迁移为本项目的服务（一次性）
   --uninstall                 卸载直连服务与订阅服务
   --rotate-token              重新生成 TOKEN 和 SUB_PORT，并清理 VPS 上旧 TOKEN 目录
@@ -137,6 +142,8 @@ while [[ $# -gt 0 ]]; do
     --sni=*)          WANT_SNI="${1#*=}"; shift ;;
     --proxy-port)     WANT_PROXY_PORT="${2:?--proxy-port 需要一个参数}"; shift 2 ;;
     --proxy-port=*)   WANT_PROXY_PORT="${1#*=}"; shift ;;
+    --sub-ttl)        WANT_SUB_TTL="${2:?--sub-ttl 需要一个时长}"; shift 2 ;;
+    --sub-ttl=*)      WANT_SUB_TTL="${1#*=}"; shift ;;
     --migrate)        DO_MIGRATE=1; shift ;;
     --uninstall)      DO_UNINSTALL=1; shift ;;
     --rotate-token)   ROTATE_TOKEN=1; shift ;;
@@ -161,8 +168,13 @@ if [[ -n "${WANT_ADD_DEVICE}" || -n "${WANT_REMOVE_DEVICE}" ]]; then
   [[ "${DEVICE_ARG}" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die_usage "设备名只允许小写字母、数字和 -，最多 32 个字符：${DEVICE_ARG}"
   [[ "${DEVICE_ARG}" != default ]] || die_usage "default 指现有的那套凭据，不能新增或吊销；要整体换凭据用 --rotate-keys"
 fi
-if [[ "${DO_UNINSTALL}" == 1 && ( -n "${WANT_SNI}" || -n "${WANT_PROXY_PORT}" ) ]]; then
-  die_usage "--uninstall 不能与 --sni / --proxy-port 同用"
+if [[ "${DO_UNINSTALL}" == 1 && ( -n "${WANT_SNI}" || -n "${WANT_PROXY_PORT}" || -n "${WANT_SUB_TTL}" ) ]]; then
+  die_usage "--uninstall 不能与 --sni / --proxy-port / --sub-ttl 同用"
+fi
+if [[ -n "${WANT_SUB_TTL}" ]]; then
+  SUB_TTL_SECONDS="$(parse_ttl "${WANT_SUB_TTL}")" || exit 2
+  # 不带单位按分钟：提示里补上 m，避免显示成“30 后自动关闭”。
+  [[ "${WANT_SUB_TTL}" =~ [smh]$ ]] || WANT_SUB_TTL="${WANT_SUB_TTL}m"
 fi
 if [[ -n "${WANT_SNI}" && ! "${WANT_SNI}" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]; then
   die_usage "--sni 必须是域名：${WANT_SNI}"
@@ -552,6 +564,8 @@ if [[ "${DO_UNINSTALL}" == 1 ]]; then
     legacy) die "服务器是 233boy 旧版，ownexit 不会卸载它：先运行 $(basename "$0") --migrate，或在 VPS 上用 233boy 自带的卸载" ;;
   esac
   LEFTOVER_STATE="${STATE}"
+  # 先取消订阅自动关闭计时器：卸载后它到点去停一个已不存在的服务，会留下失败的瞬时单元。
+  vssh "$(ttl_remote_cmd)" || true
   start_op uninstall
   op_ok || die "卸载未完成（REASON=$(kv_get "${OP_RESULT}" REASON)）；重跑 --uninstall 会从中断处继续"
   # 结果已读到、临时单元已结束：最后才删工作目录（结果通道在其中）。
@@ -985,8 +999,11 @@ rm -f '${SUB_BASE_DIR}/${SUB_SERVICE}.service'
 systemctl daemon-reload
 systemctl enable '${SUB_SERVICE}' >/dev/null 2>&1
 systemctl restart '${SUB_SERVICE}'
+# 先清掉上一次留下的自动关闭计时器（不存在时无副作用）；给了 --sub-ttl 才再起一个。
+$(ttl_remote_cmd "${SUB_TTL_SECONDS}")
 REMOTE
 pass "订阅服务已启动"
+[[ -z "${WANT_SUB_TTL}" ]] || pass "订阅服务将在 ${WANT_SUB_TTL} 后自动关闭"
 
 # 防火墙：只在 ufw 已启用时放行代理端口和订阅端口，不主动开启防火墙
 UFW_STATUS="$(vssh "command -v ufw >/dev/null 2>&1 && ufw status | head -n 1 || echo none" || true)"
@@ -1064,6 +1081,12 @@ done
 
 # ---------- 9. 交付汇总 ----------
 
+if [[ -n "${WANT_SUB_TTL}" ]]; then
+  SUB_CLOSE_HINT="订阅服务将在 ${WANT_SUB_TTL} 后自动关闭，到时请先导入完"
+else
+  SUB_CLOSE_HINT="所有设备都导入后，关掉订阅服务缩小暴露面：ownexit subctl stop"
+fi
+
 cat <<EOF
 
 ==================== 交付结果 ====================
@@ -1072,7 +1095,7 @@ cat <<EOF
            ${SUB_URL}
            iPhone / 安卓也可以直接扫下面的二维码
   2. 在设备上打开 https://ipinfo.io，应显示 ${VPS_PUBLIC_IP:-VPS IP}
-  3. 所有设备导入后关掉订阅服务：ownexit subctl stop（以后加设备先 start 再 stop）
+  3. ${SUB_CLOSE_HINT}
   4. 出问题先跑：ownexit doctor
 
 按客户端固定格式的订阅地址（一般不需要，自适应地址认不出你的客户端时用）:
@@ -1091,11 +1114,11 @@ vless 节点链接（仅故障排查/备份用）:
      v2rayN / v2rayNG：订阅分组 → 添加 → 粘贴同一条 URL → 更新订阅
      sing-box 官方客户端（1.12+）：配置 → 新建 → 远程 → 粘贴 sing-box 订阅 URL
   3. 连上后访问 ipinfo.io，确认出口 IP = ${VPS_PUBLIC_IP:-VPS IP}
-  4. 所有设备都导入后，关掉订阅服务缩小暴露面：ownexit subctl stop
+  4. ${SUB_CLOSE_HINT}
 
 安全提醒:
   - 订阅是明文 HTTP：只在新增/更新客户端时手动拉取，不要配置成高频自动更新
-  - 以后要给新设备导入订阅：先 ownexit subctl start，导入后再 stop
+  - 以后要给新设备导入订阅：ownexit subctl start --ttl 30m（到时自动关闭），或先 start、导入后再 stop
   - 怀疑订阅泄露时运行：$(basename "$0") --rotate-token
   - 怀疑节点凭据泄露时运行：$(basename "$0") --rotate-keys（所有设备都要重新导入）
 EOF

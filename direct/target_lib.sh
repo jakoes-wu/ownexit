@@ -105,3 +105,29 @@ save_target() {
   printf 'HOST=%s\nSSH_PORT=%s\nSSH_USER=%s\n' "${HOST}" "${SSH_PORT}" "${SSH_USER}" > "${tmp}"
   mv -f "${tmp}" "${file}"
 }
+
+# 订阅服务自动关闭的时长：<正整数>[s|m|h]，不带单位按分钟；换算成秒后必须在 60 秒到 24 小时之间。
+# 输出秒数；格式或范围不对时以退出码 2 结束（参数错误）。setup_direct.sh 的 --sub-ttl 与 subctl start --ttl 共用。
+parse_ttl() {
+  local value="$1" number unit seconds
+  [[ "${value}" =~ ^([1-9][0-9]{0,5})([smh]?)$ ]] || die_usage "时长格式不对：${value}（例：30m、2h、90s；不带单位按分钟）"
+  number="${BASH_REMATCH[1]}"
+  unit="${BASH_REMATCH[2]:-m}"
+  case "${unit}" in
+    s) seconds="${number}" ;;
+    m) seconds=$((number * 60)) ;;
+    h) seconds=$((number * 3600)) ;;
+  esac
+  (( seconds >= 60 && seconds <= 86400 )) || die_usage "时长要在 1 分钟到 24 小时之间：${value}"
+  printf '%s\n' "${seconds}"
+}
+
+# 远端命令片段：清掉上一次的自动关闭计时器（不存在时无副作用）；seconds 非空时再起一个瞬时计时器，
+# 到时 systemctl stop 订阅服务。瞬时单元不落盘，VPS 重启后消失——订阅服务按 enabled 照常起来，与不设时长一致。
+ttl_remote_cmd() {
+  local seconds="${1:-}"
+  printf '%s' "systemctl stop ownexit-subscription-ttl.timer >/dev/null 2>&1 || true; systemctl reset-failed ownexit-subscription-ttl.timer ownexit-subscription-ttl.service >/dev/null 2>&1 || true"
+  # AccuracySec=1s：默认精度 1 分钟，会让 2m 实际在 2-3 分钟之间触发；RemainAfterElapse=no + --collect：触发后卸载，
+  # 不留 inactive / failed 的同名单元挡住下一次 systemd-run。写法与 chain 的 fail-closed watchdog 一致。
+  [[ -z "${seconds}" ]] || printf '%s' "; systemd-run --quiet --collect --unit=ownexit-subscription-ttl --on-active=${seconds} --timer-property=AccuracySec=1s --timer-property=RemainAfterElapse=no /bin/systemctl stop ownexit-subscription"
+}
