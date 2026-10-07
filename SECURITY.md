@@ -1,14 +1,37 @@
-# 安全策略
+# Security policy / 安全策略
 
-## 支持的版本
+[English](#english) | [简体中文](#简体中文)
+
+## English
+
+### Supported versions
+
+Only the latest release receives security fixes.
+
+### Reporting a vulnerability
+
+Please report privately through [GitHub Security Advisories](https://github.com/jakoes-wu/ownexit/security/advisories/new) rather than a public issue. Include the version, the operating systems of the control machine and the servers, and the steps to reproduce (mask IPs, UUIDs, node links and similar first). You will get a reply within a week.
+
+### Security boundaries by design
+
+- Real configuration, keys and state live only outside the repository on your computer (`~/.config/ownexit/`, `~/.local/state/ownexit/`, `~/.ssh/ownexit/`), with modes 600 / 700; the chain script refuses to read a configuration located inside the repository.
+- The password is typed only once, when setting up key login (or passed in an environment variable); it is never written to disk or printed, and there is no `--password` command-line option.
+- The direct subscription service is plain HTTP protected by a random path; turn it off with `ownexit direct sub stop` once every device has imported. If a subscription URL leaks, replace it with `ownexit direct rotate-token`; if node credentials leak, replace them with `ownexit direct rotate-keys` (direct) or `ownexit chain rotate-keys` (relay chain). New credentials are likewise generated only on the server.
+- In a relay chain the relay only runs `systemd-socket-proxyd` for TCP forwarding and holds no keys; the Reality private key exists only in the exit's mode-600 configuration.
+- The relay port of a chain has no authentication: anyone can reach the exit's Reality inbound through the relay (but cannot use it without credentials); block unknown sources with `ban`. By default the exit's Reality port admits only the relay (`EXIT_SOURCE_FILTER=managed`, an nftables table that starts and stops with the exit service).
+- sing-box is installed from the pinned official release (the same for direct and chain: each server downloads it itself, and the SHA-256 of both the archive and the binary are hard-coded in the scripts; if the server download fails, your computer downloads and uploads it). The Reality private key is generated on the server and never leaves it. The only exception is the chain `migrate-exit` to another machine: the exit configuration (including the private key) is read from the old exit over SSH, passes only through your computer's process memory and pipes, and is written straight into a mode-600 file on the new exit — never to your disk, never in command-line arguments or logs; the copy on the old machine is deleted after the migration (except with `--abandon-cleanup`).
+
+## 简体中文
+
+### 支持的版本
 
 只有最新版本会收到安全修复。
 
-## 报告漏洞
+### 报告漏洞
 
 请通过 [GitHub Security Advisories](https://github.com/jakoes-wu/ownexit/security/advisories/new) 私下报告，不要开公开 issue。请附上版本、控制端与服务器的系统，以及复现步骤（记得先遮盖 IP、UUID、节点链接等信息）。一周内会回复。
 
-## 设计上的安全边界
+### 设计上的安全边界
 
 - 真实配置、密钥和状态只存放在本机仓库外（`~/.config/ownexit/`、`~/.local/state/ownexit/`、`~/.ssh/ownexit/`），权限 600 / 700；链式脚本会拒绝读取位于仓库内的配置。
 - 密码只在第一次配免密时交互输入（或经环境变量传入），不写盘、不打印，也没有 `--password` 命令行选项。

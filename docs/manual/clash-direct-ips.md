@@ -1,5 +1,7 @@
 # 让指定 IP 不走 Clash Verge 的代理
 
+[English](clash-direct-ips.en.md) | **简体中文**
+
 本机开着 Clash Verge（尤其是 TUN 模式）时，连 VPS、中转机、出口机的 SSH 也会被它接管：可能经代理节点绕一圈，也可能被代理切换中途断开。部署、`verify`、`migrate-exit` 这类命令一路都靠 SSH，断开后会以退出码 3 停下或留下待收尾的步骤。最省事的办法是让这几台服务器的 IP 直接连出去，不经过 Clash。
 
 本文在 Clash Verge Rev 2.5.7（mihomo 内核，macOS，TUN 开启）上实测通过。其它版本请按第 4 节逐项核对。

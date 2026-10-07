@@ -1,5 +1,7 @@
 # 文件参考（1.x 冻结）
 
+[English](files.en.md) | **简体中文**
+
 本文件列出 ownexit 在本机与服务器上读写的文件、键与路径。1.x 内这些路径、键与格式只增不减、含义不变；标为“参考”或“内部”的不属于公开接口，兼容规则见 [compatibility.md](compatibility.md)。表格中带反引号的首列由 `scripts/check_interface.sh` 与源码自动比对。
 
 ## 本机目录

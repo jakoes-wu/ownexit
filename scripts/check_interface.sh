@@ -8,6 +8,7 @@
 #   - 不应被 source。
 #
 # 子命令清单含 direct（主参数循环的分支词）、subctl、multi、chain。
+# 另比对 docs/reference/ 下中英两版（*.md 与 *.en.md）的表格首列（第 14 项）。
 # 用途：以后改动参数、子命令、status 取值、配置 / 状态键、订阅文件名时，必须同步更新参考文档，
 # 否则本脚本（CI 的 Interface freeze 步骤）失败。只守护“可机读”的清单；退出码、路径、节点名等由人工核对
 # （见 docs/reference/compatibility.md）。
@@ -51,7 +52,8 @@ cd "${ROOT}" || { echo "[!] 无法进入 ${ROOT}" >&2; exit 2; }
 
 CMDS=docs/reference/commands.md
 FILES=docs/reference/files.md
-for f in "${CMDS}" "${FILES}" src/ownexit/cli.py direct/setup_direct.sh direct/connect_to.sh direct/subctl direct/doctor.sh \
+for f in "${CMDS}" "${FILES}" docs/reference/compatibility.md \
+         docs/reference/commands.en.md docs/reference/files.en.md docs/reference/compatibility.en.md src/ownexit/cli.py direct/setup_direct.sh direct/connect_to.sh direct/subctl direct/doctor.sh \
          direct/direct_remote.sh chain/setup_chain.sh chain/multi_chain_client.sh chain/chain.example.env; do
   [[ -f "${f}" ]] || { echo "[!] 缺少文件：${f}" >&2; exit 2; }
 done
@@ -226,6 +228,26 @@ compare "直连 client.env 键" "${TMP}/a" "${TMP}/b"
 grep -oE '"\$\{RENDER_DIR\}/[a-z.-]+"' direct/setup_direct.sh | sed -E 's/.*\/([a-z.-]+)"/\1/' > "${TMP}/a"
 doc_h3 "${FILES}" "订阅文件" > "${TMP}/b"
 compare "订阅文件名" "${TMP}/a" "${TMP}/b"
+
+# 14. 参考文档中英两版（docs/feature/feature-bilingual-docs.md §5.1.3）：所有表格行首列反引号值按文件顺序逐行一致。
+# 不复用 compare()：它 sort -u 去重，而首列值大量重复（--host、CHAIN_ID …），删掉一行重复值会漏检；这里不排序不去重，
+# 行数与行序走样都能抓到。占位符 <…> 两侧统一换成 <>，英文版可以写 <name>、中文版写 <名字>。围栏代码块里的行跳过。
+first_cols() {
+  awk '/^```/ {inblock = !inblock; next} !inblock && /^\| `/ { s = $0; sub(/^\| `/, "", s); sub(/`.*/, "", s); print s }' "$1" \
+    | sed -E 's/<[^>]*>/<>/g'
+}
+for name in commands files compatibility; do
+  first_cols "docs/reference/${name}.md" > "${TMP}/zh"
+  first_cols "docs/reference/${name}.en.md" > "${TMP}/en"
+  if [[ -s "${TMP}/zh" ]] && diff "${TMP}/zh" "${TMP}/en" > "${TMP}/d"; then
+    N_OK=$((N_OK + 1))
+    printf '[ok] %s 中英两版表格首列（%s 行）\n' "${name}" "$(awk 'END {print NR}' "${TMP}/zh")"
+  else
+    N_FAIL=$((N_FAIL + 1))
+    printf '[FAIL] %s 中英两版表格首列不一致（< 中文版 / > 英文版）：\n' "${name}"
+    sed 's/^/       /' "${TMP}/d"
+  fi
+done
 
 echo "interface: ok=${N_OK} fail=${N_FAIL}"
 [[ "${N_FAIL}" -eq 0 ]]

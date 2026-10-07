@@ -1,8 +1,26 @@
-# 更新日志
+# Changelog / 更新日志
 
-本项目的所有重要变更都记录在这里。格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
+All notable changes to this project are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [Semantic Versioning](https://semver.org/). From 1.6.0 each entry is in English and Chinese; earlier entries are Chinese only.
+
+本项目的所有重要变更都记录在这里。格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。1.6.0 起每个条目中英双语，此前的条目只有中文。
 
 ## [Unreleased]
+
+## [1.6.0] - 2026-10-06
+
+### Added / 新增
+
+- The guided setup (`ownexit` with no arguments in a terminal) now asks for the language first (中文 / English); Enter keeps the language detected from your locale, and setting `OWNEXIT_LANG=zh|en` skips the question. In English it also notes that the setup scripts' progress output is currently in Chinese.
+- 向导（在终端里只敲 `ownexit`）第一步先选语言（中文 / English）；回车沿用按系统语言判断的结果，设 `OWNEXIT_LANG=zh|en` 可跳过这一步。选 English 时会提示部署脚本的进度输出目前是中文。
+- English editions of the user-facing documentation: the direct, relay chain and Clash direct-IP guides, the three reference documents, and the `chain/` and `direct/` READMEs (`*.en.md`); `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md` and the issue / pull request templates are now bilingual. The English README links to the English editions.
+- 面向用户的文档有了英文版：直连、链式、Clash 直连 IP 三篇手册，三篇参考文档，以及 `chain/`、`direct/` 的 README（`*.en.md`）；`CONTRIBUTING.md`、`SECURITY.md`、`CODE_OF_CONDUCT.md` 与 issue / PR 模板改为中英双语。英文 README 改链英文版。
+- Checks that keep the two languages in step: `scripts/check_interface.sh` now also compares the table first columns of the Chinese and English reference documents, and the new `scripts/check_i18n.sh` checks that document pairs exist, link to each other, and that English pages neither link back to Chinese editions nor use broken anchors. Both run in CI.
+- 防止中英两版走样的检查：`scripts/check_interface.sh` 增加中英参考文档表格首列比对；新增 `scripts/check_i18n.sh` 检查成对文档存在、互相链接，英文页不链回中文版、锚点有效。两者都接入 CI。
+
+### Changed / 变更
+
+- `OWNEXIT_LANG` is documented as controlling both the entry point's help and the guided setup (previously described as affecting the help only).
+- 参考文档里 `OWNEXIT_LANG` 的说明改为“决定入口帮助与向导的语言”（原写只影响帮助）。
 
 ## [1.5.0] - 2026-10-06
 
