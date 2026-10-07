@@ -125,11 +125,11 @@
 | `/etc/ownexit-direct/client.env` | 公开的客户端参数（root 600，无私钥），键见下表“直连 client.env 键”；本机每次从这里读回参数渲染订阅 |
 | `/etc/ownexit-direct/devices.env` | 额外设备表，每行 `名字=UUID`（不含 default）；没有额外设备时不存在 |
 | `/etc/systemd/system/ownexit-direct.service` | 代理服务 |
-| `/etc/systemd/system/ownexit-subscription.service` | 订阅服务（`python3 -m http.server`，以 nobody 运行） |
-| `/opt/ownexit-subscription/` | 订阅目录：每个 TOKEN 一个子目录（文件见“订阅文件”），根目录一个空 `index.html`（防止列出 TOKEN） |
+| `/etc/systemd/system/ownexit-subscription.service` | 订阅服务（`python3 /opt/ownexit-subscription/subserver.py`，以 nobody 运行；1.3.0 之前是 `python3 -m http.server`，重跑一次 `ownexit direct` 即切换） |
+| `/opt/ownexit-subscription/` | 订阅目录：每个 TOKEN 一个子目录（文件见“订阅文件”）、订阅服务脚本 `subserver.py`、一个空 `index.html`（1.3.0 起服务脚本只响应白名单路径，根目录与其它路径一律 404；index.html 保留但不再承担防目录列表） |
 | `/var/backups/ownexit-direct/233boy-<时间>.tar.gz` | `--migrate` 前的 233boy 备份（含旧私钥，任何操作都不会删除） |
 
-订阅地址：`http://<VPS 地址>:<SUB_PORT>/<TOKEN>/<文件名>`。default 设备用 `state.env` 的 TOKEN，额外设备各用自己的 TOKEN。
+订阅地址：`http://<VPS 地址>:<SUB_PORT>/<TOKEN>/<文件名>`。default 设备用 `state.env` 的 TOKEN，额外设备各用自己的 TOKEN。1.3.0 起另有自适应地址 `http://<VPS 地址>:<SUB_PORT>/<TOKEN>/sub`（不是文件）：User-Agent 含 clash / mihomo / stash / verge 返回 `clash.yaml`，含 sing-box / singbox 或以 sfa/、sfi/、sfm/ 开头返回 `sing-box.json`，其余返回 `shadowrocket.txt`。其它路径一律 404。
 
 内部（不属于公开接口）：`/opt/ownexit-direct/bin/` 下的二进制布局、`/var/lib/ownexit-direct/` 下的操作工作目录。
 

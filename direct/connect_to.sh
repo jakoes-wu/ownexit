@@ -2,8 +2,9 @@
 # connect_to.sh —— 给一台 VPS 配好专用 SSH 密钥并验证免密登录（直连和链式的 init 都调用它）。
 #
 # 前置:
-#   - 在本机运行；需要 ssh、ssh-keygen，第一次配免密还需要 expect（macOS: brew install expect；
-#     Debian/Ubuntu: sudo apt install expect）。
+#   - 在本机运行；需要 ssh、ssh-keygen，第一次配免密还需要能自动输入密码的工具，二选一：
+#     Python 包 pexpect（pipx / pip 安装 ownexit 时自动带上；入口把自己的解释器路径放在 OWNEXIT_PYTHON 里，
+#     git clone 用法可 pip3 install pexpect）或系统命令 expect（macOS: brew install expect；Debian/Ubuntu: sudo apt install expect）。
 #   - 目标 VPS 允许用密码 SSH 登录（只在第一次配免密时用一次）。
 #   - 密码来源：终端里交互输入（不回显）；非交互运行时读环境变量 OWNEXIT_SSH_PASSWORD。
 #     没有 --password 选项，避免密码进入 shell 历史和进程列表。
@@ -144,22 +145,27 @@ forget_old_host_key() {
   fi
 }
 
-require_expect() {
+# 选自动输入密码的后端：先 pexpect（OWNEXIT_PYTHON 指向的解释器，其次 PATH 里的 python3），再 expect；都没有才报错。
+# pexpect 优先是因为 pipx 安装的 ownexit 自带它，用户不必再装系统包；expect 保留给 git clone 用法与老环境。
+PASSWORD_BACKEND=""
+PYTHON_BIN=""
+select_password_backend() {
+  local candidate
+  for candidate in "${OWNEXIT_PYTHON:-}" python3; do
+    [[ -n "${candidate}" ]] || continue
+    if "${candidate}" -c 'import pexpect' >/dev/null 2>&1; then
+      PASSWORD_BACKEND=pexpect
+      PYTHON_BIN="${candidate}"
+      echo "[*] 密码输入方式：pexpect（${PYTHON_BIN}）"
+      return
+    fi
+  done
   if command -v expect >/dev/null 2>&1; then
+    PASSWORD_BACKEND=expect
+    echo "[*] 密码输入方式：expect"
     return
   fi
-
-  case "$(uname -s)" in
-    Darwin)
-      die "缺少 expect，无法自动输入密码。请先运行: brew install expect"
-      ;;
-    Linux)
-      die "缺少 expect，无法自动输入密码。Ubuntu/Debian 可运行: sudo apt install expect"
-      ;;
-    *)
-      die "缺少 expect，无法自动输入密码。请先安装 expect"
-      ;;
-  esac
+  die "缺少自动输入密码的工具。pipx 安装的 ownexit 自带（重新运行 pipx install --force ownexit）；git clone 用法运行 pip3 install pexpect，或安装 expect（macOS: brew install expect；Debian/Ubuntu: sudo apt install expect）"
 }
 
 # 交互读取密码到 PASS（不回显）。非终端且没有 OWNEXIT_SSH_PASSWORD 时以退出码 2 结束，避免卡住等输入。
@@ -182,6 +188,75 @@ prompt_password() {
 # 密码每个会话只发一次：服务器第二次提示时立即停下，不重发同一个错密码，
 # 这样每输错一次服务器只记一次失败，降低触发 fail2ban 一类封禁的概率。
 run_with_password() {
+  case "${PASSWORD_BACKEND}" in
+    pexpect) run_with_password_pexpect "$@" ;;
+    *) run_with_password_expect "$@" ;;
+  esac
+}
+
+# pexpect 版：与下面 expect 版同一组模式、同一套返回码；密码只经环境变量进入 Python，不进脚本正文与 argv。
+# 子进程输出原样回显（logfile_read），与 Tcl expect 默认 log_user 1 一致；密码由 ssh 关回显，不会出现在输出里。
+# pexpect 用 setsid 起子进程（pid 等于进程组号），判定失败后 killpg(TERM) 再退出，与 expect 版 kill -TERM -[exp_pid] 等价。
+run_with_password_pexpect() {
+  local rc=0
+  export CONNECT_TO_PASS="${PASS}"
+  "${PYTHON_BIN}" - "$@" <<'PEXPECT_EOF' || rc=$?
+import os
+import signal
+import sys
+
+import pexpect
+
+child = pexpect.spawn(sys.argv[1], sys.argv[2:], timeout=30, encoding="utf-8", codec_errors="replace")
+child.logfile_read = sys.stdout
+sent = False
+
+
+def bail(code):
+    try:
+        os.killpg(child.pid, signal.SIGTERM)
+    except OSError:
+        pass
+    sys.exit(code)
+
+
+patterns = [
+    r"(?i)are you sure you want to continue connecting",
+    r"(?i)password:",
+    r"(?i)permission denied",
+    r"(?i)(connection refused|no route to host|could not resolve|connection timed out|operation timed out|network is unreachable)",
+    r"(?i)(connection closed by|connection reset|kex_exchange_identification)",
+    pexpect.TIMEOUT,
+    pexpect.EOF,
+]
+while True:
+    index = child.expect(patterns)
+    if index == 0:
+        child.sendline("yes")
+    elif index == 1:
+        if sent:
+            bail(5)
+        sent = True
+        child.sendline(os.environ["CONNECT_TO_PASS"])
+    elif index == 2:
+        bail(5 if sent else 6)
+    elif index == 3:
+        bail(7)
+    elif index == 4:
+        bail(5 if sent else 7)
+    elif index == 5:
+        bail(124)
+    else:
+        child.close()
+        if child.exitstatus is not None:
+            sys.exit(child.exitstatus)
+        sys.exit(128 + (child.signalstatus or 0))
+PEXPECT_EOF
+  unset CONNECT_TO_PASS
+  return "${rc}"
+}
+
+run_with_password_expect() {
   local rc=0
   export CONNECT_TO_PASS="${PASS}"
   expect -f - -- "$@" <<'EXPECT_EOF' || rc=$?
@@ -249,7 +324,7 @@ push_public_key_once() {
 # 密码来自环境变量时不重试（重试也只会再提交同一个错密码）。
 install_public_key_with_password() {
   local attempt=1 rc
-  require_expect
+  select_password_backend
   [[ -n "${PASS}" ]] || prompt_password
   while true; do
     if command -v ssh-copy-id >/dev/null 2>&1; then

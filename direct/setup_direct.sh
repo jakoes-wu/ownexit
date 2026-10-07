@@ -3,7 +3,7 @@
 #
 # 前置:
 #   - 在本机运行（macOS 已验证；Linux 未测试）；本机需要 ssh、scp、ssh-keygen、curl、openssl、base64，
-#     第一次配免密还需要 expect（macOS: brew install expect）；显示二维码需要 qrencode（可选）。
+#     第一次配免密还需要能自动输入密码的工具：pexpect（pipx 安装自带，经 OWNEXIT_PYTHON 传入）或 expect；显示二维码需要 qrencode（可选）。
 #   - 一台可以用 root 密码 SSH 登录的 Debian / Ubuntu VPS（systemd ≥ 240）；第一次运行会交互问一次密码，之后全程免密。
 #   - sing-box 由 VPS 自己从 GitHub 下载固定版本官方包并校验 SHA-256（下载失败时由本机下载后上传），全程无交互。
 #   - 不应被 source。
@@ -17,7 +17,8 @@
 #      新装、修复、改参数、迁移（--migrate）、卸载（--uninstall）；改动 sing-box 的操作由 VPS 上的
 #      systemd 临时单元执行（direct_remote.sh），SSH 断开不影响，中途断电下次运行自动恢复
 #   5. 从 VPS 读回 /etc/ownexit-direct/client.env 得到节点参数（服务器是唯一权威源）
-#   6. 在本地暂存目录渲染订阅产物：<TOKEN>/clash.yaml、shadowrocket.txt、node.txt、sing-box.json、空 index.html、订阅服务单元
+#   6. 在本地暂存目录渲染订阅产物：<TOKEN>/clash.yaml、shadowrocket.txt、node.txt、sing-box.json、订阅服务脚本 subserver.py、订阅服务单元
+#      （空 index.html 保留，防目录列表现由 subserver.py 的路径白名单保证）
 #   7. 调 sync_to_vps.sh 一次性同步到 VPS /opt/ownexit-subscription/，启用订阅服务
 #   8. 分层验证：VPS 主机、订阅服务、订阅链接拉取校验
 #   9. 打印订阅 URL、节点链接、二维码（有 qrencode 时）与后续步骤；同机有链时提示 rebaseline
@@ -226,7 +227,7 @@ tun_precheck() {
     echo "[*] 目标 ${ip} 不是 IPv4，跳过 TUN 自检"
     return 0
   fi
-  iface="$(route_interface "${ip}")"
+  iface="$(route_interface "${ip}" || true)"  # 缺 route / ip 命令时管道失败，set -e 下会静默退出；这里只要“取不到就跳过”
   if [[ -z "${iface}" ]]; then
     echo "[*] 无法判定到 ${ip} 的出接口，跳过 TUN 自检"
     return 0
@@ -899,13 +900,21 @@ PROXY_UUID="$(kv_get "${CLIENT_ENV}" UUID)"
 NODE_NAME="ownexit-direct"
 SR_LINK="$(make_sr_link "${PROXY_UUID}" "${NODE_NAME}")"
 
-# 空 index.html：python3 http.server 对无 index.html 的根目录会返回目录列表，
-# 把所有 TOKEN 目录名暴露出来，随机 token 形同虚设
+# 空 index.html 保留（老版本靠它防止 http.server 列出 TOKEN 目录）；现在的订阅服务脚本只响应白名单路径，
+# 根目录、本文件、index.html 一律 404，防目录列表不再依赖它。
 : > "${STAGING}/index.html"
+# 订阅服务脚本随订阅目录一起同步到 VPS：按客户端 User-Agent 返回对应格式的 /<TOKEN>/sub，老的固定文件路径照旧。
+cp "${SCRIPT_DIR}/subserver.py" "${STAGING}/subserver.py" || die "复制 subserver.py 失败"
+chmod 644 "${STAGING}/subserver.py"
+# 本机有 python3 时先编译一遍（compile 不写 __pycache__），别把语法错的脚本送上服务器。
+if command -v python3 >/dev/null 2>&1; then
+  python3 -c 'import sys; compile(open(sys.argv[1]).read(), sys.argv[1], "exec")' "${STAGING}/subserver.py" \
+    || die "subserver.py 编译失败"
+fi
 
 # 订阅服务 systemd 单元：SUB_PORT 在本地渲染时替换（systemd 不展开占位符）。
 # 以 nobody 非 root 运行：高位端口无需 root、只读分发 world-readable 静态文件，
-# 最小权限缩小 python http.server 万一被利用时的爆炸半径（root→无权用户）。
+# 最小权限缩小订阅服务万一被利用时的爆炸半径（root→无权用户）。
 cat > "${STAGING}/${SUB_SERVICE}.service" <<EOF
 [Unit]
 Description=ownexit subscription files
@@ -913,7 +922,7 @@ After=network-online.target
 
 [Service]
 WorkingDirectory=${SUB_BASE_DIR}
-ExecStart=/usr/bin/python3 -m http.server ${SUB_PORT} --bind 0.0.0.0
+ExecStart=/usr/bin/python3 ${SUB_BASE_DIR}/subserver.py --port ${SUB_PORT} --root ${SUB_BASE_DIR}
 Restart=always
 User=nobody
 
@@ -935,7 +944,7 @@ if command -v python3 >/dev/null 2>&1; then
   python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "${STAGING}/${TOKEN}/sing-box.json" \
     || die "本地渲染的 sing-box.json 不是合法 JSON"
 fi
-grep -qF "http.server ${SUB_PORT}" "${STAGING}/${SUB_SERVICE}.service" \
+grep -qF "subserver.py --port ${SUB_PORT} " "${STAGING}/${SUB_SERVICE}.service" \
   || die "systemd 单元 SUB_PORT 替换失败"
 pass "本地订阅产物渲染并校验完成"
 
@@ -995,6 +1004,8 @@ CLASH_URL="http://${HOST}:${SUB_PORT}/${TOKEN}/clash.yaml"
 SR_URL="http://${HOST}:${SUB_PORT}/${TOKEN}/shadowrocket.txt"
 SINGBOX_URL="http://${HOST}:${SUB_PORT}/${TOKEN}/sing-box.json"
 NODE_URL="http://${HOST}:${SUB_PORT}/${TOKEN}/node.txt"
+# 自适应地址：服务器按客户端 User-Agent 返回上面三种格式之一，用户只需要这一条。
+SUB_URL="http://${HOST}:${SUB_PORT}/${TOKEN}/sub"
 
 echo "[*] 验证：VPS 主机层"
 if [[ "$(vssh 'systemctl is-active ownexit-direct' 2>/dev/null || true)" == "active" ]]; then
@@ -1026,14 +1037,30 @@ if curl -fsS -m 15 "${CLASH_URL}" | cmp -s - "${STAGING}/${TOKEN}/clash.yaml"; t
 else
   fail "Clash 订阅链接拉取失败或内容不一致：${CLASH_URL}"
 fi
-ROOT_BODY="$(curl -fsS -m 15 "http://${HOST}:${SUB_PORT}/" 2>/dev/null || echo "__CURL_FAIL__")"
-if [[ "${ROOT_BODY}" == "__CURL_FAIL__" ]]; then
-  fail "根路径请求失败：http://${HOST}:${SUB_PORT}/"
-elif [[ -z "${ROOT_BODY}" ]]; then
-  pass "根路径返回空 index.html，TOKEN 不泄露"
-else
-  fail "根路径返回非空内容（可能是目录列表，泄露 TOKEN），请检查 ${SUB_BASE_DIR}/index.html"
-fi
+# 自适应订阅：四种 User-Agent 必须各自拿到对应文件（最后一种模拟认不出的客户端 → base64 列表）。
+SUB_OK=1
+while IFS='|' read -r ua expected; do
+  if ! curl -fsS -m 15 -A "${ua}" "${SUB_URL}" 2>/dev/null | cmp -s - "${STAGING}/${TOKEN}/${expected}"; then
+    fail "自适应订阅 UA=${ua} 返回与 ${expected} 不一致：${SUB_URL}"
+    SUB_OK=0
+  fi
+done <<'UA_CASES'
+clash-verge/2.0|clash.yaml
+SFA/1.12 sing-box|sing-box.json
+Shadowrocket/2.2|shadowrocket.txt
+curl/8|shadowrocket.txt
+UA_CASES
+[[ "${SUB_OK}" == 0 ]] || pass "自适应订阅：clash / sing-box / shadowrocket / 未知 UA 四种返回正确"
+# 非白名单路径一律 404：根目录、服务脚本本身、TOKEN 目录都不能列出或下载，TOKEN 不泄露。
+NOT_FOUND_OK=1
+for probe in "/" "/subserver.py" "/${TOKEN}/"; do
+  code="$(curl -s -m 15 -o /dev/null -w '%{http_code}' "http://${HOST}:${SUB_PORT}${probe}" 2>/dev/null || echo 000)"
+  if [[ "${code}" != 404 ]]; then
+    fail "订阅服务对 ${probe} 返回 ${code}（应为 404）"
+    NOT_FOUND_OK=0
+  fi
+done
+[[ "${NOT_FOUND_OK}" == 0 ]] || pass "订阅服务非白名单路径返回 404，TOKEN 不泄露"
 
 # ---------- 9. 交付汇总 ----------
 
@@ -1041,13 +1068,14 @@ cat <<EOF
 
 ==================== 交付结果 ====================
 下一步（最常用）:
-  1. 导入：Clash Verge / mihomo 粘贴 ${CLASH_URL}
-           iPhone Shadowrocket 粘贴 ${SR_URL}（或扫下面的二维码）
+  1. 导入：所有客户端都粘贴这一条订阅地址（Clash Verge / mihomo / Shadowrocket / v2rayN / sing-box 自动得到各自的格式）：
+           ${SUB_URL}
+           iPhone / 安卓也可以直接扫下面的二维码
   2. 在设备上打开 https://ipinfo.io，应显示 ${VPS_PUBLIC_IP:-VPS IP}
   3. 所有设备导入后关掉订阅服务：ownexit subctl stop（以后加设备先 start 再 stop）
   4. 出问题先跑：ownexit doctor
 
-订阅链接（客户端「新增订阅链接」直接粘贴）:
+按客户端固定格式的订阅地址（一般不需要，自适应地址认不出你的客户端时用）:
   Clash Verge / mihomo : ${CLASH_URL}
   Shadowrocket / v2rayN: ${SR_URL}
   sing-box             : ${SINGBOX_URL}
@@ -1086,6 +1114,7 @@ if [[ -n "${NEW_DEVICE_TOKENS}" ]]; then
     mark=""
     [[ "${dev_name}" != "${WANT_ADD_DEVICE:-}" || -z "${WANT_ADD_DEVICE:-}" ]] || mark="  ← 新增：只把这一组发给新设备"
     echo "  设备 ${dev_name}${mark}"
+    echo "    自适应（推荐）       : http://${HOST}:${SUB_PORT}/${dev_token}/sub"
     echo "    Clash Verge / mihomo : http://${HOST}:${SUB_PORT}/${dev_token}/clash.yaml"
     echo "    Shadowrocket / v2rayN: http://${HOST}:${SUB_PORT}/${dev_token}/shadowrocket.txt"
     echo "    sing-box             : http://${HOST}:${SUB_PORT}/${dev_token}/sing-box.json"

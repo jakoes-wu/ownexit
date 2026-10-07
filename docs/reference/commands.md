@@ -346,6 +346,7 @@ stdout 上带 `[multi-chain-client]` 前缀的下列行冻结（其余为日志�
 | `OWNEXIT_SSH_PASSWORD` | 非交互配免密时提供 root 密码；`ownexit connect`、`ownexit direct` 首次部署、`ownexit chain init` 都会用到（经子进程继承） |
 | `XDG_CONFIG_HOME` / `XDG_STATE_HOME` / `XDG_CACHE_HOME` | 改变配置、状态、缓存目录。链式与 doctor：值不是绝对路径时忽略、回落默认值；直连：按原值使用 |
 | `TMPDIR` | `ownexit multi render` 二维码的默认输出目录 |
+| `OWNEXIT_PYTHON` | 首次配免密时用来自动输入密码的 Python 解释器（需能 `import pexpect`）。`ownexit` 入口自动设为它自己的解释器（已设置时不覆盖）；直接运行脚本时可自己设置，未设置则依次尝试 `python3` 与系统 `expect` |
 | `OWNEXIT_LANG` | `zh` / `en` 强制 `ownexit --help` 的语言；未设或其它值时按 `LC_ALL` → `LC_MESSAGES` → `LANG` 是否以 `zh` 开头选择。只影响入口的帮助文字 |
 
 `~/.ssh/ownexit/`（专用密钥）不受 XDG 影响。以 `OWNEXIT_TEST_` 开头的变量是测试钩子，不属于公开接口，正常使用不要设置。

@@ -46,5 +46,5 @@
 | `~/.ssh/ownexit/id_ed25519_<user>_<host>_<port>` | 每台 VPS 的专用密钥 |
 | `~/.config/ownexit/direct/` | 记住的目标 VPS |
 | `~/.local/state/ownexit/direct/<user>_<host>_<port>/` | `state.env`（订阅 `SUB_PORT` 与 `TOKEN`，权限 600）和本地渲染的订阅目录 |
-| VPS 上 `/opt/ownexit-subscription/` | 订阅文件；根目录放一个空 `index.html`，不暴露 TOKEN |
-| VPS 上 `ownexit-subscription.service` | 只读订阅服务（以 `nobody` 运行的 `python3 -m http.server`） |
+| VPS 上 `/opt/ownexit-subscription/` | 订阅文件与订阅服务脚本 `subserver.py`；服务只响应 `/<TOKEN>/<文件名>` 与自适应 `/<TOKEN>/sub`，其它路径 404，不暴露 TOKEN（空 `index.html` 保留，已不承担防列目录） |
+| VPS 上 `ownexit-subscription.service` | 只读订阅服务（以 `nobody` 运行的 `python3 subserver.py`；1.3.0 之前是 `python3 -m http.server`，重跑一次 `ownexit direct` 即切换） |

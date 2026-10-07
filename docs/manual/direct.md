@@ -36,7 +36,7 @@
 **一台电脑**（macOS 已验证；Linux 已在 Ubuntu 22.04 验证），装好：
 
 - `git`、`ssh`、`curl`、`openssl`（macOS 自带）
-- `expect`：第一次配免密时自动输入密码用，macOS 执行 `brew install expect`，Debian / Ubuntu 执行 `sudo apt install expect`
+- 自动输入密码的工具（第一次配免密时用）：pipx 安装的 ownexit 自带 Python 包 pexpect，不用另装；用 git clone 直接跑脚本时，运行 `pip3 install pexpect`，或装系统的 `expect`（macOS `brew install expect`，Debian / Ubuntu `sudo apt install expect`），二选一
 - `qrencode`（可选）：在终端显示节点二维码用，macOS 执行 `brew install qrencode`
 
 ## 3. 部署
@@ -56,7 +56,7 @@ SSH 端口不是 22 时加 `--port 2222`。本手册下文的命令按 git clone
    这一步由 VPS 上的一个 systemd 临时任务执行：中途网络断开不影响它，VPS 断电重启后再运行一次本命令会从中断处接着做完。
 4. **生成订阅并验证**：从 VPS 读回节点参数，在本地渲染四种订阅，上传到 VPS 并起一个只读订阅服务，然后逐项验证。本机装了 `qrencode` 时，最后还会在终端显示节点二维码。
 
-结束时打印四条订阅链接：
+结束时打印一条自适应订阅地址 `.../sub`：所有客户端都粘贴这一条，服务器按客户端返回对应格式（Clash Verge / mihomo 得到 `clash.yaml`，sing-box 得到 `sing-box.json`，其它客户端得到 base64 节点列表）。下面四条按格式固定的地址照旧可用，自适应地址认不出你的客户端时用：
 
 | 链接 | 给谁用 |
 | ---- | ---- |
@@ -103,7 +103,7 @@ curl -x http://127.0.0.1:7890 https://ipinfo.io   # 另开终端验证
 | ---- | ---- |
 | VPS 主机 | sing-box 服务运行中，代理端口在监听 |
 | 订阅服务 | 订阅服务运行中，端口在监听 |
-| 订阅内容 | 从本机拉取的 `clash.yaml` 与本地渲染结果逐字节一致；根路径返回空内容，不暴露订阅地址 |
+| 订阅内容 | 从本机拉取的 `clash.yaml` 与本地渲染结果逐字节一致；自适应地址用四种客户端标识各请求一次，返回对应格式；根路径、服务脚本、TOKEN 目录都返回 404，不暴露订阅地址 |
 
 客户端侧的出口需要你在设备上确认。
 

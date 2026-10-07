@@ -52,21 +52,23 @@ ownexit direct --host 203.0.113.7   # 第一次会问一次 VPS 的 root 密码
 | | 直连 | 链式 |
 | ---- | ---- | ---- |
 | 操作系统 | macOS 或 Linux | macOS 或 Linux（WSL 按 Linux 算） |
-| 必需 | Python 3.8+ 与 `pipx`、`ssh`、`curl`、`openssl`、`expect` | 同左 |
+| 必需 | Python 3.8+ 与 `pipx`、`ssh`、`curl`、`openssl` | 同左 |
 | 可选 | `qrencode`：在终端显示节点二维码时用 | `qrencode`：`ownexit multi render` 输出二维码时用 |
 
 缺什么装什么：
 
 ```sh
 # macOS（需要 Homebrew，https://brew.sh）；ssh、curl、openssl 系统自带
-brew install pipx expect
+brew install pipx
 pipx ensurepath            # 然后新开一个终端
 
 # Debian / Ubuntu / WSL
 sudo apt update
-sudo apt install -y pipx expect openssh-client curl openssl
+sudo apt install -y pipx openssh-client curl openssl
 pipx ensurepath            # 然后新开一个终端
 ```
+
+第一次给服务器配免密时要自动输入一次 root 密码，用的是 Python 包 pexpect，pipx 安装 ownexit 时会一起装上。用 git clone 直接跑脚本时，运行 `pip3 install pexpect`，或者装系统的 `expect`（macOS `brew install expect`，Debian / Ubuntu `sudo apt install expect`），二选一。
 
 不支持 Windows 原生运行，请用 WSL。电脑上的代理开着 TUN 模式（Clash 等）时，部署期间先关掉，见[支持的平台](#支持的平台)。
 
@@ -105,7 +107,7 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 
    依次完成：配免密、检查系统、开启 BBR、由服务器自己下载固定版本的 sing-box 官方包并校验 SHA-256、在服务器上生成 Reality 密钥、生成订阅、上传并逐层验证，全程不用回答问题。想自己指定伪装域名或代理端口，加 `--sni <域名>` 或 `--proxy-port <端口>`；以后换参数也是带新值重跑一次（UUID 与密钥不变）。
 
-2. **导入设备**：脚本最后打印四条链接。
+2. **导入设备**：脚本最后打印一条订阅地址 `…/sub`，所有客户端都粘贴这一条即可：服务器按客户端返回对应格式（Clash Verge / mihomo 得到 Clash 配置，sing-box 得到 sing-box 配置，Shadowrocket、v2rayN 等得到节点列表）。手机也可以直接扫终端里的二维码。认不出你的客户端时，用下面按格式固定的地址：
 
    | 链接 | 给谁用 |
    | ---- | ---- |
