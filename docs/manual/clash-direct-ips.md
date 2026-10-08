@@ -30,6 +30,8 @@ cd ~/Library/Application\ Support/io.github.clash-verge-rev.clash-verge-rev/prof
 cp Script.js Script.js.bak.$(date +%Y%m%d_%H%M%S)
 ```
 
+Linux / WSL：路径一般在 `~/.config/clash-verge-rev/profiles/Script.js`（按你的实际安装位置确认），备份命令把 `cd` 的路径换掉即可。
+
 ## 3. 修改全局扩展脚本
 
 可以直接编辑上面的文件，也可以在 Clash Verge 的“订阅”页打开“全局扩展脚本”编辑。
@@ -51,11 +53,15 @@ const DIRECT_IPS = ["203.0.113.10", "203.0.113.20"];
   // ----------- DIRECT-IPS BEGIN -----------
   if (DIRECT_IPS_ENABLED) {
     // 规则模式：直连规则放在最前面（规则自上而下匹配）；no-resolve 只按目标 IP 匹配，不做 DNS 解析。
-    const directRules = DIRECT_IPS.map((ip) => `IP-CIDR,${ip}/32,DIRECT,no-resolve`);
+    // IPv6 用 IP-CIDR6 + /128，IPv4 用 IP-CIDR + /32。
+    const ruleOf = (ip) => ip.includes(":")
+      ? `IP-CIDR6,${ip}/128,DIRECT,no-resolve`
+      : `IP-CIDR,${ip}/32,DIRECT,no-resolve`;
+    const directRules = DIRECT_IPS.map(ruleOf);
     config.rules = directRules.concat((config.rules || []).filter((r) => !directRules.includes(r)));
     // 全局模式不看规则：让这些 IP 根本不进 TUN，系统直接走物理网卡。
     config.tun = config.tun || {};
-    const excludes = DIRECT_IPS.map((ip) => `${ip}/32`);
+    const excludes = DIRECT_IPS.map((ip) => ip.includes(":") ? `${ip}/128` : `${ip}/32`);
     config.tun["route-exclude-address"] = (config.tun["route-exclude-address"] || [])
       .filter((a) => !excludes.includes(a))
       .concat(excludes);
@@ -63,7 +69,7 @@ const DIRECT_IPS = ["203.0.113.10", "203.0.113.20"];
   // ----------- DIRECT-IPS END -----------
 ```
 
-把 `DIRECT_IPS` 换成你自己服务器的 IP：直连 VPS、中转机、出口机都可以放进去。要按网段放行，把 `/32` 改成对应的前缀长度。
+把 `DIRECT_IPS` 换成你自己服务器的 IP：直连 VPS、中转机、出口机都可以放进去，IPv6 地址也能直接填（脚本会自动用 `/128` 和 `IP-CIDR6`）。要按网段放行，把 `/32` 改成对应的前缀长度（IPv6 从 `/128` 起）。
 
 原来没有全局扩展脚本时，整个文件写成：
 
@@ -88,7 +94,9 @@ route -n get 203.0.113.10 | grep interface   # 应显示 en0 一类的物理网�
 route -n get 1.1.1.1 | grep interface        # 对照：其它地址仍走 utun
 ```
 
-4. 再 SSH 一次，Clash Verge 的“连接”页里应该搜不到这个 IP。这说明连接已经绕开了 Clash，是预期结果。
+Linux / WSL：用 `ip route get 203.0.113.10`，看 `dev` 后面是物理网卡（如 `eth0`）而不是 tun 设备。
+
+4. 再 SSH 一次，到 Clash Verge 的“连接”页搜这个 IP：TUN 排除生效的话搜不到；如果看到一条 DIRECT 记录，那是规则模式的兜底，也算正常。只有全局模式下还走了代理节点，才算没生效。
 
 第 3 步如果仍显示 utun，可能是你的 Clash Verge 版本用自己的 TUN 设置覆盖了脚本里的 `route-exclude-address`。这时：
 - 规则模式下，直连规则照样生效；
@@ -104,6 +112,6 @@ route -n get 1.1.1.1 | grep interface        # 对照：其它地址仍走 utun
 
 ## 6. 注意
 
-- **系统代理**：Clash Verge 同时开着系统代理时，浏览器这类会读系统代理的程序，访问这些 IP 时仍会交给 Clash，全局模式下会走代理节点。SSH、curl 这类命令行程序默认不读系统代理，除非终端里设置了 `http_proxy` / `https_proxy`，这种情况下用 `env -u http_proxy -u https_proxy <命令>` 临时去掉。
+- **系统代理**：Clash Verge 同时开着系统代理时，浏览器这类会读系统代理的程序，访问这些 IP 时仍会交给 Clash，全局模式下会走代理节点。SSH、curl 这类命令行程序默认不读系统代理，除非终端里设置了 `http_proxy` / `https_proxy`，这种情况下用 `env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u all_proxy -u ALL_PROXY <命令>` 临时去掉。
 - **节点服务器本身**：某个 IP 同时是 Clash 里某个节点的服务器地址时也可以加：到它的连接直接走物理网卡，而客户端连节点本来就要直接连到它，节点照常可用。
 - **哪些 IP 经过了 TUN**：`ownexit doctor` 会指出本机到哪些服务器 IP 的路由经过 TUN，可以拿来核对是否漏加。

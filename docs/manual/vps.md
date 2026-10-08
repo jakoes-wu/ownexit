@@ -51,6 +51,8 @@
 - lisa：打开 [lisahost.com](https://lisahost.com/aff.php?aff=14727)，在产品列表里找“美国 9929 精品网络双 ISP 住宅 IP VPS”，选“精简版”下单。
 - nodemach：打开 [nodemach.com](https://www.nodemach.com/welcome?vcd=d6521618)（直接进入注册页），注册后在产品列表里找“精品线路 CN2 GIA”，选“Lite 套餐”下单。
 
+说明：lisa 的链接是返佣链接，nodemach 的链接带追踪参数；走这些链接下单，价格和官网直接下单一样。
+
 价格以官网当前显示为准。
 
 ## 4. 下单
