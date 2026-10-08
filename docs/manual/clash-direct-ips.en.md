@@ -30,6 +30,8 @@ cd ~/Library/Application\ Support/io.github.clash-verge-rev.clash-verge-rev/prof
 cp Script.js Script.js.bak.$(date +%Y%m%d_%H%M%S)
 ```
 
+Linux / WSL: the path is usually `~/.config/clash-verge-rev/profiles/Script.js` (confirm against your install location); same backup command with the `cd` path swapped.
+
 ## 3. Edit the global extension script
 
 Edit the file above directly, or open "Global Extend Script" on Clash Verge's Profiles page.
@@ -51,11 +53,15 @@ Inside `main`, before `return config;`, add:
   // ----------- DIRECT-IPS BEGIN -----------
   if (DIRECT_IPS_ENABLED) {
     // Rule mode: put the direct rules first (rules match top to bottom); no-resolve matches the target IP only, without DNS.
-    const directRules = DIRECT_IPS.map((ip) => `IP-CIDR,${ip}/32,DIRECT,no-resolve`);
+    // IPv6 uses IP-CIDR6 + /128, IPv4 uses IP-CIDR + /32.
+    const ruleOf = (ip) => ip.includes(":")
+      ? `IP-CIDR6,${ip}/128,DIRECT,no-resolve`
+      : `IP-CIDR,${ip}/32,DIRECT,no-resolve`;
+    const directRules = DIRECT_IPS.map(ruleOf);
     config.rules = directRules.concat((config.rules || []).filter((r) => !directRules.includes(r)));
     // Global mode ignores rules: keep these IPs out of TUN entirely so the system uses the physical interface.
     config.tun = config.tun || {};
-    const excludes = DIRECT_IPS.map((ip) => `${ip}/32`);
+    const excludes = DIRECT_IPS.map((ip) => ip.includes(":") ? `${ip}/128` : `${ip}/32`);
     config.tun["route-exclude-address"] = (config.tun["route-exclude-address"] || [])
       .filter((a) => !excludes.includes(a))
       .concat(excludes);
@@ -63,7 +69,7 @@ Inside `main`, before `return config;`, add:
   // ----------- DIRECT-IPS END -----------
 ```
 
-Replace `DIRECT_IPS` with your own servers' IPs: the direct VPS, the relay and the exit can all go in. To allow a whole range, change `/32` to the matching prefix length.
+Replace `DIRECT_IPS` with your own servers' IPs: the direct VPS, the relay and the exit can all go in, and IPv6 addresses work too (the script automatically uses `/128` and `IP-CIDR6` for them). To allow a whole range, change `/32` to the matching prefix length (start from `/128` for IPv6).
 
 If you had no global extension script before, write the whole file as:
 
@@ -88,7 +94,9 @@ route -n get 203.0.113.10 | grep interface   # should show a physical interface 
 route -n get 1.1.1.1 | grep interface        # for comparison: other addresses still use utun
 ```
 
-4. SSH once more: the IP should no longer appear on Clash Verge's Connections page. That means the connection bypassed Clash, which is what you want.
+Linux / WSL: use `ip route get 203.0.113.10` and check that `dev` shows a physical interface (e.g. `eth0`), not a tun device.
+
+4. SSH once more and search for the IP on the Connections page: if the TUN exclusion took effect you won't find it; a DIRECT entry is the rule-mode fallback and also counts as fine. Only a proxy node in global mode means it didn't work.
 
 If step 3 still shows utun, your Clash Verge version may override the script's `route-exclude-address` with its own TUN settings. In that case:
 - in rule mode, the direct rules still apply;
@@ -104,6 +112,6 @@ Pick one; after any of them, re-activate the profile and turn TUN off and on:
 
 ## 6. Notes
 
-- **System proxy**: if Clash Verge also has the system proxy on, programs that read it (such as browsers) still hand connections to these IPs to Clash, and in global mode they go through a proxy node. Command-line programs such as SSH and curl do not read the system proxy by default, unless `http_proxy` / `https_proxy` is set in the terminal; in that case drop them for one command with `env -u http_proxy -u https_proxy <command>`.
+- **System proxy**: if Clash Verge also has the system proxy on, programs that read it (such as browsers) still hand connections to these IPs to Clash, and in global mode they go through a proxy node. Command-line programs such as SSH and curl do not read the system proxy by default, unless `http_proxy` / `https_proxy` is set in the terminal; in that case drop them for one command with `env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u all_proxy -u ALL_PROXY <command>`.
 - **Node servers themselves**: an IP that is also the server address of a Clash node can be added too: connections to it then use the physical interface, and since the client connects to the node directly anyway, the node keeps working.
 - **Which IPs go through TUN**: `ownexit doctor` lists the server IPs whose routes from your computer go through TUN, so you can check you have not missed any.
