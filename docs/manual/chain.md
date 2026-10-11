@@ -91,6 +91,18 @@ chain/multi_chain_client.sh --chains main,backup render
 
 `render` 生成的 `clash-snippet.yaml` 带一个 `fallback` 自动组（`Exit-Relay-auto`），合并进 Clash Verge 后，当前中转不可用时会自动切到下一条。确认新链可用后，可以 `rollback` 被墙的那条，并从 `--chains` 里去掉它。
 
+### 出口机有多个 IP
+
+出口机配了多个公网 IPv4 时，可以每条链用一个，得到出口 IP 不同的几个节点（中转机可以共用一台）。先在出口机上确认这些地址都配在网卡上（`ip -4 addr`）、各自能出站（`curl --interface <地址> ipinfo.io/ip`）。然后每条链起一个名字，`--exit` 都填出口机的 SSH 地址，`--exit-bind` 填这条链要用的出站地址：
+
+```bash
+chain/setup_chain.sh up --id ip1 --relay 203.0.113.10 --exit 198.51.100.20 --exit-bind 198.51.100.20
+chain/setup_chain.sh up --id ip2 --relay 203.0.113.10 --exit 198.51.100.20 --exit-bind 198.51.100.21
+chain/multi_chain_client.sh --chains ip1,ip2 --mixed-exits render
+```
+
+`render` 加了 `--mixed-exits` 时生成的是手动选择组 `Exit-Relay-select`：在客户端里自己选用哪个出口 IP，不会自动切换。想查每个出口 IP 的归属与可用性，运行 `ownexit doctor --ip-check`。限制与细节见 [`chain/README.md` 的“一台出口机多个出口 IP”](../../chain/README.md#一台出口机多个出口-ip)。
+
 ## 7. 出口机变了
 
 出口机换了 IP 或换了一台机器，都不要 rollback 再 deploy（那样会重新生成凭据，所有客户端都要重新导入）。入口统一是 `migrate-exit`：
@@ -104,6 +116,7 @@ chain/setup_chain.sh migrate-exit --to <新 IP>
 - **换了机器，旧机器还能登录**：直接迁移。配置（含私钥）从旧机器原样搬到新机器，切中转，删掉旧机器上本链的服务与文件，客户端不用动。步骤与中断处理见 [`chain/README.md` 的“出口机换一台机器”](../../chain/README.md#出口机换一台机器)。
 - **还是同一台机器、只是 IP 变了**（旧 IP 连不上也行）：自动识别，登记新 IP 的主机密钥、备份并改写配置，原地切换，输出 `migrate=rehosted`；SSH 端口要保持不变。细节见 [`chain/README.md` 的“出口机换 IP”](../../chain/README.md#出口机换-ip同一台机器)。
 - **换了机器，旧机器已经登录不了**：私钥只在旧机器上，无法迁移，只能 rollback 后重新部署（客户端要重新导入）。
+- **这条链用 `--exit-bind` 绑定了出站地址**：同一台机器换地址照常可用（绑定地址要还在网卡上）；换一台机器不支持，先 rollback，再在新机器上重新部署。
 
 ## 8. 常见问题
 

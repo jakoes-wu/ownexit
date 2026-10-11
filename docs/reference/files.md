@@ -60,8 +60,9 @@
 | `REALITY_SERVER_NAME` | Reality 伪装域名（ASCII FQDN） |
 | `RELAY_COHOSTS_SINGBOX` | 中转机上的既有 sing-box：`yes`（233boy 安装）/ `ownexit-direct`（ownexit 直连）/ `no`（没有） |
 | `EXIT_SOURCE_FILTER` | 出口机 Reality 端口如何只放行中转：`managed`（本项目加 nft 白名单）/ `provider`（服务商安全组负责）/ `none` |
+| `EXIT_BIND_IPV4` | 可选（2.1.0 起）。出口机上已配置的一个 IPv4：这条链在出口机上的 IPv4 出站连接从它发起，`EXPECTED_EXIT_IPV4` 是从它出去时的公网 IP。没有这个键时不绑定，行为与配置摘要都和之前相同。由 `init` / `up` 的 `--exit-bind` 写入，deploy 之后不要改 |
 
-配置必须且只能包含这 13 个键；2.x 内新增的键必须是可选的（缺省时行为与之前相同）。
+配置必须包含前 13 个必填键，另外只允许上表标为可选的键；2.x 内新增的键必须是可选的（缺省时行为与之前相同）。
 
 ### 链 state.env 键（参考）
 
@@ -183,3 +184,4 @@
 | `Exit-via-Relay-<id>_<名字>` | 链式额外设备 |
 | `PROXY` | 直连 clash.yaml 的选择组 |
 | `Exit-Relay-auto` | `ownexit multi render` 的自动组 |
+| `Exit-Relay-select` | `ownexit multi render --group select`（含 `--mixed-exits`）的手动选择组 |

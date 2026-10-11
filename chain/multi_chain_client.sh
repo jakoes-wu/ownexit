@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # multi_chain_client.sh —— 多链客户端聚合：把多条已 deploy 的链（每台中转机一条、共用同一台出口机）的节点
 # 聚合成一组客户端产物，客户端用 fallback 组在中转机之间自动切换；某台中转被墙时无需人工换节点。
+# 加 --mixed-exits 时也可以聚合出口 IP 不同的链（例如一台出口机多个 IP、每条链绑定一个）：这时生成手动选择组，
+# 不做自动切换——自动切换会在使用者不知情时换掉出口 IP。
 #
 # 架构：客户端 → 中转机 A / B / …（各自一条 chain，systemd-socket-proxyd 转发）→ 同一台出口机出口机。
 # 本脚本完全不连中转机与出口机，只读本机 chain 产物（env + node.txt），写自己的产物目录。
@@ -9,7 +11,8 @@
 #   - 控制端 macOS（Apple 芯片 / Intel）或 Linux（amd64 / arm64，含 WSL），/bin/bash 3.2 及以上；git clone 使用时 git 是读取真实配置前的防泄漏闸门依赖（pip 安装的副本不在仓库里，跳过该闸门）。
 #   - --chains 里每个 CHAIN_ID 都已由 setup_chain.sh deploy 且 status=deployed/healthy：
 #     本脚本按固定路径读 ${XDG_CONFIG_HOME:-~/.config}/ownexit/chains/<id>.env（只取 CHAIN_ID / RELAY_HOST / EXPECTED_EXIT_IPV4）
-#     与 ${XDG_STATE_HOME:-~/.local/state}/ownexit/chains/<id>/client/node.txt（只读）。各链的 EXPECTED_EXIT_IPV4 必须相同。
+#     与 ${XDG_STATE_HOME:-~/.local/state}/ownexit/chains/<id>/client/node.txt（只读）。各链的 EXPECTED_EXIT_IPV4 必须相同，
+#     除非加 --mixed-exits。
 #   - 本机依赖：route nc curl openssl tar git shasum（或 openssl dgst）；render 生成二维码时另需 qrencode（--no-qr 可免）。
 #   - 不修改 setup_chain.sh 的任何状态（state.env / node.txt 只读），不写 known_hosts，不改出口机白名单，不改防火墙。
 # 调用方：由使用者直接执行；不应被 source。
@@ -36,6 +39,8 @@ readonly BINARY_SHA256_DARWIN_ARM64='813d8effd02a19572a8d75aef29fc073101404ca535
 readonly RELEASE_BASE_URL='https://github.com/SagerNet/sing-box/releases/download/v1.13.14'
 readonly LOG_TAG='[multi-chain-client]'
 readonly AUTO_GROUP_NAME='Exit-Relay-auto'
+# --group select 的组名：手动选择组不是“自动组”，另起名字；已冻结的 Exit-Relay-auto 含义不变。
+readonly SELECT_GROUP_NAME='Exit-Relay-select'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SCRIPT_PATH="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
@@ -50,6 +55,12 @@ INTERVAL_SEC='300'
 QR_OUT=''
 OPEN_DIR=1
 NO_QR=0
+# --mixed-exits：允许各链出口 IP 不同（逐链按自己的出口 IP 核验）。缺省 0 = 维持“出口 IP 必须相同”。
+MIXED_EXITS=0
+# 下面三项记录参数是否显式给出，供参数循环结束后的组合校验使用（--mixed-exits 可以写在 --group 之后）。
+GROUP_GIVEN=0
+TEST_URL_GIVEN=0
+INTERVAL_GIVEN=0
 
 CONFIG_HOME=''
 STATE_HOME=''
@@ -57,11 +68,12 @@ CACHE_HOME=''
 OUT_DIR=''
 OP_TMP=''
 
-# 链记录：每行 "id|host|port|uuid|sni|pbk|sid|name"，顺序 = --chains 顺序 = fallback 优先级；
+# 链记录：每行 "id|host|port|uuid|sni|pbk|sid|name|exit_ip"，顺序 = --chains 顺序 = fallback 优先级；
 # 凭据逐链各异，任何字段都不得重新生成（否则与该链出口机侧凭据不匹配）。
 CHAIN_RECORDS=''
 CHAIN_COUNT=0
-# 所有链共用的出口 IP：verify 的唯一允许值；跨链不一致直接退出 2。
+# 第一条链的出口 IP：没有 --mixed-exits 时其余各链必须与它相同，不一致直接退出 2。
+# verify 逐链比对的是链记录第 9 个字段（该链自己的出口 IP），两者在没有 --mixed-exits 时相等。
 EXPECTED_EXIT_IPV4=''
 
 # 临时 sing-box 进程 pid 登记文件（OP_TMP 下，每行一个）。verify_one 在命令替换子 shell 里运行，改变量父进程看不到，
@@ -73,14 +85,14 @@ usage() {
   if [[ "${OWNEXIT_UI_LANG}" == en ]]; then
     cat <<EOF
 Usage:
-  $(basename "${SCRIPT_PATH}") --chains <id>[,<id>...] [--name <bundle name>] verify
-  $(basename "${SCRIPT_PATH}") --chains <id>[,<id>...] [--name <bundle name>] render [--group fallback|url-test] [--test-url <url>]
+  $(basename "${SCRIPT_PATH}") --chains <id>[,<id>...] [--name <bundle name>] [--mixed-exits] verify
+  $(basename "${SCRIPT_PATH}") --chains <id>[,<id>...] [--name <bundle name>] [--mixed-exits] render [--group fallback|url-test|select] [--test-url <url>]
                                    [--interval <seconds>] [--qr-out <new dir>] [--no-open] [--no-qr]
   $(basename "${SCRIPT_PATH}") -h | --help
 
 What it does:
   verify        from this computer, one real Reality handshake per chain entry plus an exit-IP check against three endpoints
-                (at least 2 succeed and all equal EXPECTED_EXIT_IPV4); a chain is marked skipped when the route to its entry
+                (at least 2 succeed and all equal that chain's EXPECTED_EXIT_IPV4); a chain is marked skipped when the route to its entry
                 goes through a TUN (the local proxy's TUN mode is on).
   render        bundles each chain's node.txt: nodes.txt (one vless URI per chain, verbatim), clash-snippet.yaml (proxies plus
                 an automatic group, to merge into Clash Verge by hand), one QR code per chain (iPhone Shadowrocket, in a private
@@ -92,8 +104,12 @@ Arguments:
                        \${XDG_CONFIG_HOME:-~/.config}/ownexit/chains/<id>.env and
                        \${XDG_STATE_HOME:-~/.local/state}/ownexit/chains/<id>/client/node.txt.
   --name <bundle name> output directory name, default all ([a-z0-9][a-z0-9-]{0,31}).
-  --group <type>       automatic group type, default fallback (when the current node times out, take the first available in
-                       order); url-test is the alternative.
+  --mixed-exits        allow chains with different exit IPs (for example one exit with several IPs, one chain bound to
+                       each); every chain is verified against its own EXPECTED_EXIT_IPV4, and render builds a manual
+                       select group (automatic switching would change the exit IP without you noticing).
+  --group <type>       group type, default fallback (when the current node times out, take the first available in
+                       order); url-test is the alternative; select is a manual group named Exit-Relay-select with no
+                       health check (the default, and the only choice, with --mixed-exits).
   --test-url <url>     health-check URL of the automatic group, default https://www.gstatic.com/generate_204.
   --interval <seconds> health-check interval of the automatic group, default 300.
   --qr-out <dir>       QR code output directory; must not exist (an existing path or a broken symlink is refused, nothing is
@@ -106,11 +122,13 @@ Output (render):
   \${XDG_STATE_HOME:-~/.local/state}/ownexit/multi-chain-client/<bundle name>/nodes.txt
   \${XDG_STATE_HOME:-~/.local/state}/ownexit/multi-chain-client/<bundle name>/clash-snippet.yaml
   <QR directory>/qr-<n>-<node name>.png (contains plaintext credentials; delete after scanning)
-  Node name = Exit-via-Relay-<id> from each chain's node.txt; automatic group name Exit-Relay-auto. The terminal never
+  Node name = Exit-via-Relay-<id> from each chain's node.txt; automatic group name Exit-Relay-auto (Exit-Relay-select for
+  --group select). The terminal never
   prints uuid / pbk / sid / full URIs.
 
 Exit codes:
-  0 success; 2 argument / env / node.txt validation error, or EXPECTED_EXIT_IPV4 differs between chains; 5 verify found an
+  0 success; 2 argument / env / node.txt validation error, or EXPECTED_EXIT_IPV4 differs between chains without
+  --mixed-exits; 5 verify found an
   unhealthy chain or all were skipped; 1 runtime failure (missing local dependency, rendering).
 
 Typical use:
@@ -127,14 +145,14 @@ EOF
     # i18n:zh-begin
     cat <<EOF
 用法:
-  $(basename "${SCRIPT_PATH}") --chains <id>[,<id>...] [--name <聚合名>] verify
-  $(basename "${SCRIPT_PATH}") --chains <id>[,<id>...] [--name <聚合名>] render [--group fallback|url-test] [--test-url <url>]
+  $(basename "${SCRIPT_PATH}") --chains <id>[,<id>...] [--name <聚合名>] [--mixed-exits] verify
+  $(basename "${SCRIPT_PATH}") --chains <id>[,<id>...] [--name <聚合名>] [--mixed-exits] render [--group fallback|url-test|select] [--test-url <url>]
                                    [--interval <秒>] [--qr-out <新目录>] [--no-open] [--no-qr]
   $(basename "${SCRIPT_PATH}") -h | --help
 
 作用:
   verify        从本机对每条链的入口各做一次真实 Reality 握手 + 出口 IP 三端点仲裁（至少 2 个端点成功且都等于
-                EXPECTED_EXIT_IPV4）；到该入口的路由经 TUN（本机代理的 TUN 模式开着）时该链标 skipped。
+                该链的 EXPECTED_EXIT_IPV4）；到该入口的路由经 TUN（本机代理的 TUN 模式开着）时该链标 skipped。
   render        聚合各链 node.txt：nodes.txt（每链一行 vless URI，原文）、clash-snippet.yaml（proxies + 自动组，
                 供 Clash Verge 手工 merge）、每链一张二维码（iPhone Shadowrocket，放临时私有目录）。
 
@@ -143,7 +161,10 @@ EOF
                        每个 id 固定读 \${XDG_CONFIG_HOME:-~/.config}/ownexit/chains/<id>.env 与
                        \${XDG_STATE_HOME:-~/.local/state}/ownexit/chains/<id>/client/node.txt。
   --name <聚合名>      产物目录名，默认 all（[a-z0-9][a-z0-9-]{0,31}）。
-  --group <类型>       自动组类型，默认 fallback（当前节点超时时按顺序取第一个可用）；可选 url-test。
+  --mixed-exits        允许各链出口 IP 不同（例如一台出口机多个 IP、每条链绑定一个）：逐链按自己的 EXPECTED_EXIT_IPV4
+                       核验；render 生成手动选择组（自动切换会在不知情时换掉出口 IP）。
+  --group <类型>       组类型，默认 fallback（当前节点超时时按顺序取第一个可用）；可选 url-test；select 是手动选择组
+                       Exit-Relay-select，不做健康检查（--mixed-exits 时的默认值，也是唯一可选值）。
   --test-url <url>     自动组健康检查地址，默认 https://www.gstatic.com/generate_204。
   --interval <秒>      自动组健康检查间隔，默认 300。
   --qr-out <目录>      二维码输出目录，必须不存在（已存在/断开的符号链接都拒绝，不覆盖）；默认在 \${TMPDIR:-/tmp} 下新建。
@@ -155,10 +176,10 @@ EOF
   \${XDG_STATE_HOME:-~/.local/state}/ownexit/multi-chain-client/<聚合名>/nodes.txt
   \${XDG_STATE_HOME:-~/.local/state}/ownexit/multi-chain-client/<聚合名>/clash-snippet.yaml
   <二维码目录>/qr-<n>-<节点名>.png（含明文凭据，扫完即删）
-  节点名 = 各链 node.txt 里的 Exit-via-Relay-<id>；自动组名 Exit-Relay-auto。终端不打印 uuid / pbk / sid / 完整 URI。
+  节点名 = 各链 node.txt 里的 Exit-via-Relay-<id>；自动组名 Exit-Relay-auto（--group select 时为 Exit-Relay-select）。终端不打印 uuid / pbk / sid / 完整 URI。
 
 退出码:
-  0 成功；2 参数 / env / node.txt 校验错误、EXPECTED_EXIT_IPV4 跨链不一致；5 verify 有链不健康或全部 skipped；
+  0 成功；2 参数 / env / node.txt 校验错误、没有 --mixed-exits 时 EXPECTED_EXIT_IPV4 跨链不一致；5 verify 有链不健康或全部 skipped；
   1 运行时失败（本机依赖缺失、渲染）。
 
 典型用法:
@@ -363,16 +384,18 @@ parse_args() {
         AGG_NAME="$2"; shift 2 ;;
       --group)
         [[ "${COMMAND}" == render ]] || die 2 "$(L '--group 只能跟在 render 后' '--group can only follow render')"
-        [[ "$#" -ge 2 && ( "${2:-}" == fallback || "${2:-}" == url-test ) ]] || die 2 "$(L '--group 只接受 fallback 或 url-test' '--group only accepts fallback or url-test')"
-        GROUP_TYPE="$2"; shift 2 ;;
+        [[ "$#" -ge 2 && ( "${2:-}" == fallback || "${2:-}" == url-test || "${2:-}" == select ) ]] || die 2 "$(L '--group 只接受 fallback、url-test 或 select' '--group only accepts fallback, url-test or select')"
+        GROUP_TYPE="$2"; GROUP_GIVEN=1; shift 2 ;;
+      --mixed-exits)
+        MIXED_EXITS=1; shift ;;
       --test-url)
         [[ "${COMMAND}" == render ]] || die 2 "$(L '--test-url 只能跟在 render 后' '--test-url can only follow render')"
         [[ "$#" -ge 2 && "${2:-}" =~ ^https?://[A-Za-z0-9._/:@%+=~-]+$ ]] || die 2 "$(L '--test-url 必须是 http(s) URL 且不含空白/引号' '--test-url must be an http(s) URL without whitespace or quotes')"
-        TEST_URL="$2"; shift 2 ;;
+        TEST_URL="$2"; TEST_URL_GIVEN=1; shift 2 ;;
       --interval)
         [[ "${COMMAND}" == render ]] || die 2 "$(L '--interval 只能跟在 render 后' '--interval can only follow render')"
         [[ "$#" -ge 2 && "${2:-}" =~ ^[1-9][0-9]{0,5}$ ]] || die 2 "$(L '--interval 必须是正整数秒' '--interval must be a positive number of seconds')"
-        INTERVAL_SEC="$2"; shift 2 ;;
+        INTERVAL_SEC="$2"; INTERVAL_GIVEN=1; shift 2 ;;
       --qr-out)
         [[ "${COMMAND}" == render ]] || die 2 "$(L '--qr-out 只能跟在 render 后' '--qr-out can only follow render')"
         [[ "$#" -ge 2 && -n "${2:-}" ]] || die 2 "$(L '--qr-out 需要目录' '--qr-out needs a directory')"
@@ -392,6 +415,15 @@ parse_args() {
   done
   [[ -n "${COMMAND}" ]] || die 2 "$(L '缺少子命令（verify / render）' 'Missing subcommand (verify / render)')"
   [[ -n "${CHAINS_ARG}" ]] || die 2 "$(L '缺少 --chains' 'Missing --chains')"
+  # 组合校验放在循环之后：--mixed-exits 与 --group 的先后顺序不限。
+  if [[ "${MIXED_EXITS}" == 1 ]]; then
+    # 出口 IP 不同的链不能放进自动切换组：当前节点一超时就会换到另一个出口 IP，使用者看不出来。
+    [[ "${GROUP_GIVEN}" == 0 || "${GROUP_TYPE}" == select ]] || die 2 "$(L "--mixed-exits 只能配合 --group select（${GROUP_TYPE} 会自动切换到出口 IP 不同的节点）" "--mixed-exits only works with --group select (${GROUP_TYPE} would switch automatically to a node with a different exit IP)")"
+    GROUP_TYPE=select
+  fi
+  if [[ "${GROUP_TYPE}" == select ]]; then
+    [[ "${TEST_URL_GIVEN}" == 0 && "${INTERVAL_GIVEN}" == 0 ]] || die 2 "$(L '手动选择组（--group select）不做健康检查，不能同时给 --test-url / --interval' 'A manual group (--group select) has no health check; do not combine it with --test-url / --interval')"
+  fi
 }
 
 # ---------- 本地依赖与配置 ----------
@@ -553,15 +585,15 @@ ${id}|"*) die 2 "$(L "--chains 里 CHAIN_ID 重复：${id}" "Duplicate CHAIN_ID 
     exit_ip="${env_fields#*|}"
     if [[ -z "${EXPECTED_EXIT_IPV4}" ]]; then
       EXPECTED_EXIT_IPV4="${exit_ip}"
-    elif [[ "${exit_ip}" != "${EXPECTED_EXIT_IPV4}" ]]; then
+    elif [[ "${MIXED_EXITS}" == 0 && "${exit_ip}" != "${EXPECTED_EXIT_IPV4}" ]]; then
       die 2 "$(L "链 ${id} 的 EXPECTED_EXIT_IPV4 与前面的链不一致；本脚本只聚合共用同一出口机出口的链" "Chain ${id}: EXPECTED_EXIT_IPV4 differs from the previous chains; this script only combines chains that share the same exit IP")"
     fi
     node_fields="$(read_chain_node "${id}" "${host}")"
     if [[ -z "${CHAIN_RECORDS}" ]]; then
-      CHAIN_RECORDS="${id}|${host}|${node_fields}"
+      CHAIN_RECORDS="${id}|${host}|${node_fields}|${exit_ip}"
     else
       CHAIN_RECORDS="${CHAIN_RECORDS}
-${id}|${host}|${node_fields}"
+${id}|${host}|${node_fields}|${exit_ip}"
     fi
     count="$((count + 1))"
   done
@@ -569,7 +601,7 @@ ${id}|${host}|${node_fields}"
   CHAIN_COUNT="${count}"
 }
 
-# 第 index 条链记录的第 field 个字段：1 id / 2 host / 3 port / 4 uuid / 5 sni / 6 pbk / 7 sid / 8 name。
+# 第 index 条链记录的第 field 个字段：1 id / 2 host / 3 port / 4 uuid / 5 sni / 6 pbk / 7 sid / 8 name / 9 该链的出口 IP。
 chain_field() {
   printf '%s\n' "${CHAIN_RECORDS}" | sed -n "$1p" | cut -d'|' -f"$2"
 }
@@ -702,9 +734,11 @@ choose_local_port() {
 # 与 setup_chain.sh smoke_from_mac 同步的本机侧 smoke，差异：逐链分类返回而不是 die；
 # 临时进程 pid 写进 TEMP_PID_FILE 供 EXIT trap 收尾（本函数在子 shell 里跑，改变量传不回父进程），不接入 chain 的 fifo gate / local-process 登记。
 verify_one() {
-  local index host interface local_port config log pid started success timeouts mismatch endpoint result rc
+  local index host interface local_port config log pid started success timeouts mismatch endpoint result rc expected_exit
   index="$1"
   host="$(chain_field "${index}" 2)"
+  # 逐链取自己的出口 IP：--mixed-exits 时各链不同，拿第一条链的值去比会把正常的链判成 mismatch。
+  expected_exit="$(chain_field "${index}" 9)"
   interface="$(route_interface "${host}")"
   [[ -n "${interface}" ]] || { printf 'error|0\n'; return 0; }
   if interface_is_tunnel "${interface}"; then
@@ -746,7 +780,7 @@ verify_one() {
     if [[ "${rc}" -eq 28 ]]; then
       timeouts="$((timeouts + 1))"
     elif is_ipv4 "${result}"; then
-      if [[ "${result}" == "${EXPECTED_EXIT_IPV4}" ]]; then
+      if [[ "${result}" == "${expected_exit}" ]]; then
         success="$((success + 1))"
       else
         mismatch="$((mismatch + 1))"
@@ -767,9 +801,10 @@ verify_one() {
 }
 
 cmd_verify() {
-  local index outcome result endpoints started_at elapsed unhealthy skipped
+  local index outcome result endpoints started_at elapsed unhealthy skipped exit_suffix
   unhealthy=0
   skipped=0
+  [[ "${MIXED_EXITS}" == 0 ]] || log_info "mixed-exits=1"
   prepare_local_binary
   index=1
   while (( index <= CHAIN_COUNT )); do
@@ -778,8 +813,11 @@ cmd_verify() {
     result="${outcome%%|*}"
     endpoints="${outcome#*|}"
     elapsed="$(( $(date '+%s') - started_at ))"
-    printf '%s verify chain=%s addr=%s result=%s endpoints=%s/3 elapsed=%ss\n' \
-      "${LOG_TAG}" "$(chain_field "${index}" 1)" "$(chain_field "${index}" 2)" "${result}" "${endpoints}" "${elapsed}"
+    # exit= 只在 --mixed-exits 时输出：没有它时这一行与之前逐字节相同（已冻结的行，只做兼容新增）。
+    exit_suffix=''
+    [[ "${MIXED_EXITS}" == 0 ]] || exit_suffix=" exit=$(chain_field "${index}" 9)"
+    printf '%s verify chain=%s addr=%s result=%s endpoints=%s/3 elapsed=%ss%s\n' \
+      "${LOG_TAG}" "$(chain_field "${index}" 1)" "$(chain_field "${index}" 2)" "${result}" "${endpoints}" "${elapsed}" "${exit_suffix}"
     case "${result}" in
       ok) ;;
       skipped) skipped="$((skipped + 1))" ;;
@@ -848,6 +886,16 @@ render_entry_names() {
 # 自动组：fallback = 当前节点超时时按顺序取第一个可用（--chains 第一条排首位 → 它可用时行为与单节点一致）；
 # url/interval 显式写出，lazy 等其余字段用 mihomo 默认。
 render_auto_group() {
+  # select：手动选择组，没有健康检查，所以不写 url / interval；节点顺序仍按 --chains。
+  if [[ "${GROUP_TYPE}" == select ]]; then
+    cat <<EOF
+  - name: ${SELECT_GROUP_NAME}
+    type: select
+    proxies:
+EOF
+    render_entry_names
+    return 0
+  fi
   cat <<EOF
   - name: ${AUTO_GROUP_NAME}
     type: ${GROUP_TYPE}
@@ -899,6 +947,7 @@ render_qr_codes() {
 
 cmd_render() {
   local nodes snippet index qr_dir
+  [[ "${MIXED_EXITS}" == 0 ]] || log_info "mixed-exits=1"
   ensure_private_dir "${OUT_DIR}" || die 1 "$(L "产物目录身份或权限不安全：${OUT_DIR}" "The output directory's ownership or permissions are unsafe: ${OUT_DIR}")"
   nodes="${OUT_DIR}/nodes.txt"
   snippet="${OUT_DIR}/clash-snippet.yaml"

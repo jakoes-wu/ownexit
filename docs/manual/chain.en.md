@@ -93,6 +93,18 @@ chain/multi_chain_client.sh --chains main,backup render
 
 The `clash-snippet.yaml` from `render` has a `fallback` auto group (`Exit-Relay-auto`); once merged into Clash Verge, it switches to the next chain automatically when the current relay is unavailable. After confirming the new chain works, you can `rollback` the blocked one and drop it from `--chains`.
 
+### The exit has several IPs
+
+When the exit has several public IPv4 addresses, each chain can use one of them, giving you nodes with different exit IPs (they can share one relay). First check on the exit that the addresses are configured (`ip -4 addr`) and that each can reach the internet (`curl --interface <address> ipinfo.io/ip`). Then give each chain a name, always pass the exit's SSH address as `--exit`, and pass the outbound address for that chain as `--exit-bind`:
+
+```bash
+chain/setup_chain.sh up --id ip1 --relay 203.0.113.10 --exit 198.51.100.20 --exit-bind 198.51.100.20
+chain/setup_chain.sh up --id ip2 --relay 203.0.113.10 --exit 198.51.100.20 --exit-bind 198.51.100.21
+chain/multi_chain_client.sh --chains ip1,ip2 --mixed-exits render
+```
+
+With `--mixed-exits`, `render` builds the manual group `Exit-Relay-select`: you pick the exit IP yourself in the client, and nothing switches automatically. To see where each exit IP belongs and what it can reach, run `ownexit doctor --ip-check`. Limits and details are in ["Several exit IPs on one exit" in `chain/README.en.md`](../../chain/README.en.md#several-exit-ips-on-one-exit).
+
 ## 7. The exit changed
 
 Whether the exit got a new IP or you moved to another machine, do not rollback and deploy again (that generates new credentials, and every client has to import again). There is one entry point, `migrate-exit`:
@@ -106,6 +118,7 @@ It first works out whether the new address is the same machine, then:
 - **A new machine, and the old one can still be reached**: migrates directly. The configuration (including the private key) is moved unchanged from the old machine to the new one, the relay is switched over, and this chain's service and files are removed from the old machine; clients need no changes. For the steps and interruption handling see [Moving the exit to another machine in `chain/README.en.md`](../../chain/README.en.md#moving-the-exit-to-another-machine).
 - **The same machine with a new IP** (it works even if the old IP is unreachable): detected automatically; it registers the new IP's host key, backs up and rewrites the configuration, switches over in place and prints `migrate=rehosted`. The SSH port must stay the same. Details in [Exit IP changed in `chain/README.en.md`](../../chain/README.en.md#exit-ip-changed-same-machine).
 - **A new machine, and the old one can no longer be reached**: the private key exists only on the old machine, so it cannot be migrated; the only option is rollback and a fresh deploy (clients must import again).
+- **The chain binds its outbound address with `--exit-bind`**: a new address on the same machine works as usual (the bound address must still be configured there); moving to another machine is not supported, so rollback first and deploy again on the new machine.
 
 ## 8. Troubleshooting
 

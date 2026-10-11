@@ -129,6 +129,7 @@ Script: `chain/setup_chain.sh`. Relay + exit chain. Apart from `init` / `up`, ev
 | `--exit-port` | init | The exit's SSH port, default 22 |
 | `--sni` | init | Reality camouflage domain, default www.amazon.com |
 | `--exit-source-filter` | init | managed (default) / provider / none |
+| `--exit-bind` | init / up | An IPv4 already configured on the exit: this chain's outbound connections leave from it (for an exit with several IPs); written to the configuration key `EXIT_BIND_IPV4`; default: not bound |
 | `--with-fail-closed` | verify | Also verifies that nothing leaks out of the exit while the relay is stopped |
 | `--allow-tun` | deploy / up (accepted but ignored by init) | When the route from this computer to a server goes through a proxy TUN, it refuses by default (exit 3); this option only warns and continues |
 | `--device` | qr | Shows that device's node QR code; without it shows default |
@@ -159,7 +160,7 @@ Script: `chain/setup_chain.sh`. Relay + exit chain. Apart from `init` / `up`, ev
 | `add-device` | Adds a device (followed by its name) |
 | `remove-device` | Revokes a device (followed by its name) |
 | `list-devices` | Read-only list of devices |
-| `migrate-exit` | The exit got a new IP or moved to another machine; credentials and clients stay the same (followed by `--to` / `--abort` / `--abandon-cleanup`); when the new address is the same machine it switches over in place automatically (the SSH port must stay the same, otherwise exit 2), and the old IP need not be reachable |
+| `migrate-exit` | The exit got a new IP or moved to another machine; credentials and clients stay the same (followed by `--to` / `--abort` / `--abandon-cleanup`); when the new address is the same machine it switches over in place automatically (the SSH port must stay the same, otherwise exit 2), and the old IP need not be reachable; a chain that sets `EXIT_BIND_IPV4` only supports a new address on the same machine (the bound address must still be configured there), and moving it to another machine exits 2 |
 
 ### Exit codes
 
@@ -167,8 +168,8 @@ Script: `chain/setup_chain.sh`. Relay + exit chain. Apart from `init` / `up`, ev
 | ---- | ---- |
 | 0 | Success, or `status` is deployed / not_deployed |
 | 1 | Runtime failure (remote operation, local commit and so on) |
-| 2 | Argument error (including the `rehost-exit` removed in 2.0, which suggests `migrate-exit --to <new IP>`), configuration not matching state, refused device operation; with `--id` omitted, no configuration or several; `up` with an existing configuration but different addresses; `qr` with no such device |
-| 3 | Failed pre-check / check, unreachable server or mismatching host fingerprint (any `preflight` failure is 3; failed key setup or probes in `init` / `up` are 3 too); the pre-deploy check of `deploy` / `up` found a route through TUN without `--allow-tun` |
+| 2 | Argument error (including the `rehost-exit` removed in 2.0, which suggests `migrate-exit --to <new IP>`), configuration not matching state, refused device operation; with `--id` omitted, no configuration or several; `up` with an existing configuration but different addresses or a different `--exit-bind`; `qr` with no such device; moving a chain that sets `EXIT_BIND_IPV4` to another exit |
+| 3 | Failed pre-check / check, unreachable server or mismatching host fingerprint (any `preflight` failure is 3; failed key setup or probes in `init` / `up` are 3 too); the pre-deploy check of `deploy` / `up` found a route through TUN without `--allow-tun`; `preflight` / `deploy` / `up` / `migrate-exit` found that `EXIT_BIND_IPV4` is not configured on the exit, or the exit has no `ip` command to check it (when `verify` finds it, the code is 5 as in the next row) |
 | 4 | The deployment phase of `deploy` / `up` failed (unreachable servers are still 3; refusal during an exit migration is also 4); `migrate-exit` found this chain's files on the new exit |
 | 5 | `status` unhealthy (busy / stale_lock / incomplete / unreachable / orphaned / drifted), `verify` failed; for `qr`: chain not deployed, lock busy / stale, or node file not matching state; for other commands: lock, corrupted state, unfinished transaction or failed final verify; rebaseline / rotate-keys / add-device / remove-device refused during an exit migration |
 | 6 | `rollback` pre-check or execution failed (including refusal during an exit migration) |
@@ -270,7 +271,8 @@ Script: `chain/multi_chain_client.sh`. Combines several chains into one set of c
 | ---- | ---- | ---- |
 | `--chains` | | Comma-separated chain names; the order is the auto group's priority (required) |
 | `--name` | | Output directory name, default all |
-| `--group` | | Auto group type: fallback (default) / url-test |
+| `--group` | | Group type: fallback (default) / url-test / select (a manual group without health check; cannot be combined with `--test-url` / `--interval`) |
+| `--mixed-exits` | | Allow chains with different exit IPs: each chain is verified against its own exit IP, and render only builds a select group (exit 2 together with `--group fallback` / `url-test`) |
 | `--test-url` | | The auto group's health-check URL, default https://www.gstatic.com/generate_204 |
 | `--interval` | | The auto group's health-check interval (seconds), default 300 |
 | `--qr-out` | | QR code output directory (must not exist); by default a new one under `${TMPDIR:-/tmp}` |
@@ -290,7 +292,7 @@ Script: `chain/multi_chain_client.sh`. Combines several chains into one set of c
 | ---- | ---- |
 | 0 | Success |
 | 1 | Runtime failure (missing local dependency, rendering) |
-| 2 | Argument / configuration / node.txt validation error, or EXPECTED_EXIT_IPV4 differs across chains |
+| 2 | Argument / configuration / node.txt validation error, or EXPECTED_EXIT_IPV4 differs across chains without `--mixed-exits` |
 | 5 | A chain is unhealthy in verify, or all are skipped |
 
 ### Output
@@ -299,7 +301,7 @@ The following lines on stdout with the `[multi-chain-client]` prefix are frozen 
 
 | Line | Description |
 | ---- | ---- |
-| `[multi-chain-client] verify chain=<chain> addr=<relay address> result=<result> endpoints=<n>/3 elapsed=<seconds>s` | result ∈ ok / skipped / timeout / blocked / mismatch / error |
+| `[multi-chain-client] verify chain=<chain> addr=<relay address> result=<result> endpoints=<n>/3 elapsed=<seconds>s` | result ∈ ok / skipped / timeout / blocked / mismatch / error; with `--mixed-exits` the line ends with an extra `exit=<that chain's exit IP>` |
 | `[multi-chain-client] render nodes=<path>` | Node list file |
 | `[multi-chain-client] render clash_snippet=<path>` | Clash snippet file |
 | `[multi-chain-client] render qr_dir=<path>` | QR code directory (when QR codes are generated) |
@@ -316,7 +318,7 @@ Script: `direct/doctor.sh`. Read-only diagnostics of this computer, direct VPSes
 | `--port` | | With `--host`: SSH port, default 22 |
 | `--user` | | With `--host`: SSH user, default root |
 | `--chain` | | Check only this chain (can be combined with `--host`) |
-| `--ip-check` | | Also check the exit IP from the exit server |
+| `--ip-check` | | Also check the exit IP from the exit server; a chain that sets `EXIT_BIND_IPV4` is checked from the bound address |
 | `--scan-sni` | | Also scan camouflage domains from the exit server |
 | `--sni-candidates` | | With `--scan-sni`: comma-separated candidate domains (at most 30) |
 | `--local-only` | | Check only this computer (cannot be combined with `--host` / `--chain` / `--ip-check` / `--scan-sni`) |

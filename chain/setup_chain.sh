@@ -78,6 +78,8 @@ INIT_RELAY_PORT='22'
 INIT_EXIT_PORT='22'
 INIT_SNI='www.amazon.com'
 INIT_EXIT_SOURCE_FILTER='managed'
+# --exit-bind：出口机上已配置的本机 IPv4；空 = 不绑定，出站走系统默认源地址。
+INIT_EXIT_BIND=''
 WITH_FAIL_CLOSED=0
 # 只读命令（status、不带 --with-fail-closed 的 verify、conns、banlist）置 1：SSH 连接层失败时重试
 # （docs/feature/feature-doctor-ipcheck.md §5.1.4）。修改类命令保持 0，重放部分执行的修改没有幂等证据。
@@ -102,6 +104,7 @@ INIT_RELAY_PORT_GIVEN=0
 INIT_EXIT_PORT_GIVEN=0
 INIT_SNI_GIVEN=0
 INIT_FILTER_GIVEN=0
+INIT_EXIT_BIND_GIVEN=0
 INIT_ID_GIVEN=0
 # 中转受管 drop-in 文件名；verify/rollback 只放行这一个文件，其余 drop-in 一律判 drifted。
 readonly RELAY_BLACKLIST_DROPIN='50-ownexit-chain-blacklist.conf'
@@ -118,6 +121,9 @@ EXIT_SSH_PORT=''
 EXIT_SSH_USER=''
 EXIT_SSH_KEY=''
 EXPECTED_EXIT_IPV4=''
+# 可选配置键：该链在出口机上的出站连接从这个本机 IPv4 发起（一台出口机多个 IP 时各链各用一个）。
+# 可以是私网地址（NAT 后的机器），所以公网出口 IP 仍以 EXPECTED_EXIT_IPV4 为准；空 = 配置里没有这个键。
+EXIT_BIND_IPV4=''
 REALITY_SERVER_NAME=''
 RELAY_COHOSTS_SINGBOX=''
 # 出口机 Reality 端口如何限定只允许中转来源：
@@ -181,7 +187,7 @@ usage() {
     cat <<EOF
 Usage:
   $(basename "${SCRIPT_PATH}") init [--relay <ipv4>] [--exit <ipv4>] [--id <name>] [--relay-port <n>] [--exit-port <n>] [--sni <domain>]
-                    [--exit-source-filter managed|provider|none]
+                    [--exit-source-filter managed|provider|none] [--exit-bind <ipv4>]
   $(basename "${SCRIPT_PATH}") up [--relay <ipv4>] [--exit <ipv4>] [--id <name>] [other init options] [--allow-tun]
   $(basename "${SCRIPT_PATH}") --id <name> <subcommand>          # same as --config ~/.config/ownexit/chains/<name>.env
   $(basename "${SCRIPT_PATH}") <subcommand> [args]               # --id can be omitted when this computer has only one chain
@@ -267,7 +273,8 @@ Arguments:
                 default main; --relay-port / --exit-port SSH ports, default 22; --sni Reality camouflage domain, default
                 www.amazon.com; --exit-source-filter how the exit's Reality port admits only the relay: managed (default,
                 this project adds an nft allowlist), provider (the provider's security group does it), none (no restriction);
-                deployment checks strictly for managed / provider.
+                deployment checks strictly for managed / provider; --exit-bind an IPv4 already configured on the exit
+                that this chain's outbound connections leave from (for an exit with several IPs; default: not bound).
   --with-fail-closed    only after verify; briefly stops this chain and verifies that new connections fail.
   --allow-tun           deploy / up: refused by default when the route from this computer to the servers goes through a proxy
                         TUN (exit 3; SSH would be cut off during deployment); with it, only warn and continue. Not needed once
@@ -325,7 +332,7 @@ EOF
     cat <<EOF
 用法:
   $(basename "${SCRIPT_PATH}") init [--relay <ipv4>] [--exit <ipv4>] [--id <名字>] [--relay-port <n>] [--exit-port <n>] [--sni <域名>]
-                    [--exit-source-filter managed|provider|none]
+                    [--exit-source-filter managed|provider|none] [--exit-bind <ipv4>]
   $(basename "${SCRIPT_PATH}") up [--relay <ipv4>] [--exit <ipv4>] [--id <名字>] [init 的其它参数] [--allow-tun]
   $(basename "${SCRIPT_PATH}") --id <名字> <子命令>          # 等价于 --config ~/.config/ownexit/chains/<名字>.env
   $(basename "${SCRIPT_PATH}") <子命令> [参数]              # 本机只有一条链时可以省略 --id
@@ -396,7 +403,8 @@ EOF
   init 的参数：--relay / --exit 两台机器的 IPv4（不给则交互提问）；--id 配置名，默认 main；
                 --relay-port / --exit-port SSH 端口，默认 22；--sni Reality 伪装域名，默认 www.amazon.com；
                 --exit-source-filter 出口机 Reality 端口如何只放行中转：managed（默认，本项目加 nft 白名单）、
-                provider（服务商安全组负责）、none（不限制）；managed / provider 时部署严格检查。
+                provider（服务商安全组负责）、none（不限制）；managed / provider 时部署严格检查；
+                --exit-bind 出口机上已配置的一个 IPv4，这条链的出站连接从它发起（出口机有多个 IP 时用；默认不绑定）。
   --with-fail-closed    仅可跟在 verify 后；会短暂停止本 chain 并验证新连接失败。
   --allow-tun           deploy / up：本机到服务器的路由经代理 TUN 时默认拒绝（退出 3，部署途中 SSH 会被切断），
                         加它只警告继续。已按 docs/manual/clash-direct-ips.md 让这些 IP 走物理网卡时不需要。
@@ -743,6 +751,9 @@ parse_init_args() {
       --sni)
         [[ "$#" -ge 2 && "$2" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]] || die 2 "$(L '--sni 必须是 ASCII 域名' '--sni must be an ASCII domain name')"
         INIT_SNI="$2"; INIT_SNI_GIVEN=1; shift 2 ;;
+      --exit-bind)
+        [[ "$#" -ge 2 ]] && is_ipv4 "$2" || die 2 "$(L '--exit-bind 需要 IPv4（出口机上已配置的本机地址）' '--exit-bind needs an IPv4 (an address already configured on the exit)')"
+        INIT_EXIT_BIND="$2"; INIT_EXIT_BIND_GIVEN=1; shift 2 ;;
       # init 收到 --allow-tun 只置位、没有效果（init 不做 TUN 自检）；up 用它放行部署前自检。
       --allow-tun) ALLOW_TUN=1; shift ;;
       -h|--help)
@@ -896,6 +907,7 @@ set_config_value() {
     REALITY_SERVER_NAME) REALITY_SERVER_NAME="${value}" ;;
     RELAY_COHOSTS_SINGBOX) RELAY_COHOSTS_SINGBOX="${value}" ;;
     EXIT_SOURCE_FILTER) EXIT_SOURCE_FILTER="${value}" ;;
+    EXIT_BIND_IPV4) EXIT_BIND_IPV4="${value}" ;;
     *) return 1 ;;
   esac
 }
@@ -938,6 +950,8 @@ validate_config_values() {
   [[ "${REALITY_SERVER_NAME}" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$ ]] || die 2 "$(L 'REALITY_SERVER_NAME 必须是 ASCII FQDN' 'REALITY_SERVER_NAME must be an ASCII FQDN')"
   [[ "${RELAY_COHOSTS_SINGBOX}" == 'yes' || "${RELAY_COHOSTS_SINGBOX}" == 'no' || "${RELAY_COHOSTS_SINGBOX}" == 'ownexit-direct' ]] || die 2 "$(L 'RELAY_COHOSTS_SINGBOX 只能是 yes、no 或 ownexit-direct' 'RELAY_COHOSTS_SINGBOX must be yes, no or ownexit-direct')"
   [[ "${EXIT_SOURCE_FILTER}" == 'managed' || "${EXIT_SOURCE_FILTER}" == 'provider' || "${EXIT_SOURCE_FILTER}" == 'none' ]] || die 2 "$(L 'EXIT_SOURCE_FILTER 只能是 managed、provider 或 none' 'EXIT_SOURCE_FILTER must be managed, provider or none')"
+  # 可选键：这个值会被拼进出口机的 sing-box 配置与远端命令，必须先收紧成 IPv4 字面量。
+  [[ -z "${EXIT_BIND_IPV4}" ]] || is_ipv4 "${EXIT_BIND_IPV4}" || die 2 "$(L 'EXIT_BIND_IPV4 必须是 IPv4 字面量' 'EXIT_BIND_IPV4 must be an IPv4 literal')"
 }
 
 normalized_config() {
@@ -954,10 +968,12 @@ normalized_config() {
   printf 'REALITY_SERVER_NAME=%s\n' "${REALITY_SERVER_NAME}"
   printf 'RELAY_COHOSTS_SINGBOX=%s\n' "${RELAY_COHOSTS_SINGBOX}"
   printf 'EXIT_SOURCE_FILTER=%s\n' "${EXIT_SOURCE_FILTER}"
+  # 可选键只在设置时追加：没有它的配置，摘要必须与 2.0.0 逐字节相同，否则已部署的链升级后会被判成配置与 state 不一致。
+  [[ -z "${EXIT_BIND_IPV4}" ]] || printf 'EXIT_BIND_IPV4=%s\n' "${EXIT_BIND_IPV4}"
 }
 
 parse_config() {
-  local resolved line key value seen count
+  local resolved line key value seen count required
   resolved="$(resolve_regular_path "${CONFIG_PATH}")" || die 2 "$(L '配置必须是可解析的绝对 regular file，且不能是 symlink' 'The configuration must be a resolvable absolute regular file and not a symlink')"
   CONFIG_PATH="${resolved}"
   require_secure_user_file "${CONFIG_PATH}" 600 || die 2 "$(L '配置必须由当前用户拥有且 mode 精确为 600' 'The configuration must be owned by the current user with mode exactly 600')"
@@ -968,6 +984,8 @@ parse_config() {
   fi
   seen=''
   count=0
+  # 可选键先清空：up 对已有配置会解析两次，不能让上一次读到的值留到这一次。
+  EXIT_BIND_IPV4=''
   while IFS= read -r line || [[ -n "${line}" ]]; do
     [[ "${line}" != *$'\r'* ]] || die 2 "$(L '配置含 CR 控制字符' 'The configuration contains CR control characters')"
     case "${line}" in
@@ -996,7 +1014,17 @@ ${key}"
       *) die 2 "$(L '配置只允许空行、井号注释和 KEY=VALUE' 'The configuration may only contain blank lines, # comments and KEY=VALUE')" ;;
     esac
   done < "${CONFIG_PATH}"
-  [[ "${count}" -eq 13 ]] || die 2 "$(L '配置必须且只能包含 chain.example.env 的 13 个键' 'The configuration must contain exactly the 13 keys of chain.example.env')"
+  # 键不重复、没有未知键已由上面的循环保证；这里只需确认 13 个必填键齐全。可选键读到了就从总数里扣掉，
+  # 不能让它顶替一个缺失的必填键。
+  required="${count}"
+  case "
+${seen}
+" in
+    *"
+EXIT_BIND_IPV4
+"*) required="$((count - 1))" ;;
+  esac
+  [[ "${required}" -eq 13 ]] || die 2 "$(L '配置必须包含 chain.example.env 的 13 个必填键，另外只允许可选的 EXIT_BIND_IPV4' 'The configuration must contain the 13 required keys of chain.example.env; the only optional key is EXIT_BIND_IPV4')"
   validate_config_values
   CONFIG_SHA256="$(normalized_config | sha256_text)"
 }
@@ -2376,13 +2404,25 @@ set -euo pipefail
 umask 077
 export LC_ALL=C
 expected="$1"
+# bind：这条链的出站绑定地址（EXIT_BIND_IPV4），- 表示不绑定。绑定时仲裁必须从同一个地址发起，
+# 否则量到的是出口机默认出站 IP，与这条链实际的出口 IP 不是一回事。
+bind="${2:--}"
+bind_opt=()
+if [[ "$bind" != - ]]; then
+  # ip 只在使用绑定地址时才需要，不进通用依赖清单（否则没装 iproute2 的已有部署会在预检新增失败）。
+  command -v ip >/dev/null 2>&1 || exit 24
+  # 绑定地址被摘掉后 sing-box 配置检查照样通过，但出站全部失败；这里先给出明确结论（23）。
+  # 用单个 awk 读完全部输入、在 END 里决定退出码：ip | grep -q 会在 pipefail 下因 SIGPIPE 误判。
+  ip -4 -o addr show | awk -v b="$bind" '{ split($4, a, "/"); if (a[1] == b) found = 1 } END { exit found ? 0 : 1 }' || exit 23
+  bind_opt=(--bind-address="$bind")
+fi
 tmp="$(mktemp -d /tmp/ownexit-chain-exit.XXXXXX)"
 cleanup() { rm -rf "$tmp"; }
 trap cleanup EXIT
 success=0
 for endpoint in https://api.ipify.org https://icanhazip.com https://ifconfig.me/ip; do
   result="$(
-    env -i HOME="$tmp" PATH=/usr/sbin:/usr/bin:/sbin:/bin wget --no-config --no-proxy --inet4-only --timeout=15 -qO- "$endpoint" 2>/dev/null | tr -d '[:space:]' || true
+    env -i HOME="$tmp" PATH=/usr/sbin:/usr/bin:/sbin:/bin wget --no-config --no-proxy --inet4-only ${bind_opt[@]+"${bind_opt[@]}"} --timeout=15 -qO- "$endpoint" 2>/dev/null | tr -d '[:space:]' || true
   )"
   if [[ "$result" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     [[ "$result" == "$expected" ]] || exit 21
@@ -2395,11 +2435,21 @@ EXIT_PROBE
   chmod 600 "${output}"
 }
 
+# 出口机直连出口的 2-of-3 仲裁。设置了 EXIT_BIND_IPV4 时从绑定地址发起，并先核该地址还在出口机网卡上。
+# 失败一律退出 3；远端 23 / 24 给出专门文案，其余（含 SSH 不可达的 255）沿用原文案。
 probe_exit_exit() {
-  local script
+  local script rc bind_note
   script="${OP_TMP}/exit-probe.sh"
   write_exit_probe_script "${script}"
-  ssh_exit_stdin bash -s -- "${EXPECTED_EXIT_IPV4}" < "${script}" >/dev/null || die 3 "$(L '出口机直连出口未通过 2-of-3 严格仲裁' 'The exit'\''s direct outbound did not pass the strict 2-of-3 arbitration')"
+  if ssh_exit_stdin bash -s -- "${EXPECTED_EXIT_IPV4}" "${EXIT_BIND_IPV4:--}" < "${script}" >/dev/null; then rc=0; else rc="$?"; fi
+  [[ "${rc}" -ne 0 ]] || return 0
+  bind_note=''
+  [[ -z "${EXIT_BIND_IPV4}" ]] || bind_note=" bind=${EXIT_BIND_IPV4}"
+  case "${rc}" in
+    23) die 3 "$(L "EXIT_BIND_IPV4=${EXIT_BIND_IPV4} 不在出口机网卡上；把该地址加回出口机，或 rollback 后用新的 --exit-bind 重新 init / deploy" "EXIT_BIND_IPV4=${EXIT_BIND_IPV4} is not configured on the exit; add the address back on the exit, or rollback and run init / deploy again with a new --exit-bind")" ;;
+    24) die 3 "$(L "出口机没有 ip 命令，无法核对 EXIT_BIND_IPV4=${EXIT_BIND_IPV4}（安装 iproute2）" "The exit has no ip command, so EXIT_BIND_IPV4=${EXIT_BIND_IPV4} cannot be checked (install iproute2)")" ;;
+    *) die 3 "$(L "出口机直连出口未通过 2-of-3 严格仲裁${bind_note}" "The exit's direct outbound did not pass the strict 2-of-3 arbitration${bind_note}")" ;;
+  esac
 }
 
 # 返回 0=远端确无该路径；1=远端存在（碰撞）；2=SSH 不可达（rc 255），没核成。
@@ -3765,6 +3815,13 @@ relay_source="${10}"
 # reuse：migrate-exit 已把旧出口机的 exit.json 搬进暂存，跳过生成密钥与渲染配置，只渲染 owner 与 unit；
 # deploy 传 -，行为不变。
 reuse="${11:--}"
+# bind：EXIT_BIND_IPV4，- 表示不绑定（出站行与 2.0.0 逐字节相同）。绑定时 sing-box 的 IPv4 出站连接从该地址发起。
+bind="${12:--}"
+bind_field=''
+if [[ "$bind" != - ]]; then
+  [[ "$bind" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 89
+  bind_field=", \"inet4_bind_address\": \"$bind\""
+fi
 [[ -d "$stage" && ! -L "$stage" && "$(stat -c %u:%g:%a "$stage")" == 0:0:700 ]] || exit 81
 [[ "$(sha256sum "$stage/stage-owner.env" | awk '{print $1}')" == "$stage_owner_hash" ]] || exit 82
 [[ -f "$binary" && ! -L "$binary" && "$(stat -c %u:%g:%a "$binary")" == 0:0:755 ]] || exit 83
@@ -3806,7 +3863,7 @@ cat > "$config" <<EOF
       }
     }
   }],
-  "outbounds": [{ "type": "direct", "tag": "direct" }],
+  "outbounds": [{ "type": "direct", "tag": "direct"$bind_field }],
   "route": { "default_domain_resolver": "local-dns", "final": "direct" }
 }
 EOF
@@ -3893,9 +3950,10 @@ prepare_exit_exit() {
     [[ "${EXIT_NFT_PATH}" == /* ]] || die 1 "$(L '没有取得出口机 nft 路径，无法配置 managed 白名单' 'No nft path obtained on the exit, so the managed allow-list cannot be configured')"
     log_info "$(L "出口机白名单放行来源=${relay_source}（EXIT_SOURCE_FILTER=managed）" "Exit allow-list admits source=${relay_source} (EXIT_SOURCE_FILTER=managed)")"
   fi
+  [[ -z "${EXIT_BIND_IPV4}" ]] || log_info "[exit-bind] chain=${CHAIN_ID} bind=${EXIT_BIND_IPV4}"
   script="${OP_TMP}/prepare-exit.sh"
   write_prepare_exit_script "${script}"
-  output="$(ssh_exit_stdin bash -s -- "${EXIT_STAGE_PATH}" "${EXIT_STAGE_OWNER_SHA256}" "${REMOTE_BIN}" "${CHAIN_ID}" "${EXIT_REALITY_PORT}" "${REALITY_SERVER_NAME}" "${owner_b64}" "${EXIT_SOURCE_FILTER}" "${EXIT_NFT_PATH:--}" "${relay_source}" - < "${script}")" || die 1 "$(L '出口机 Reality config/unit staging 失败' 'Exit Reality config/unit staging failed')"
+  output="$(ssh_exit_stdin bash -s -- "${EXIT_STAGE_PATH}" "${EXIT_STAGE_OWNER_SHA256}" "${REMOTE_BIN}" "${CHAIN_ID}" "${EXIT_REALITY_PORT}" "${REALITY_SERVER_NAME}" "${owner_b64}" "${EXIT_SOURCE_FILTER}" "${EXIT_NFT_PATH:--}" "${relay_source}" - "${EXIT_BIND_IPV4:--}" < "${script}")" || die 1 "$(L '出口机 Reality config/unit staging 失败' 'Exit Reality config/unit staging failed')"
   VLESS_UUID="$(printf '%s\n' "${output}" | awk -F= '$1 == "VLESS_UUID" {print $2}')"
   REALITY_PUBLIC_KEY="$(printf '%s\n' "${output}" | awk -F= '$1 == "REALITY_PUBLIC_KEY" {print $2}')"
   REALITY_SHORT_ID="$(printf '%s\n' "${output}" | awk -F= '$1 == "REALITY_SHORT_ID" {print $2}')"
@@ -6829,9 +6887,12 @@ migrate_same_host_port_check() {
 # 不复用 negotiated_hostkey_fingerprint：它要求命令成功，而这里 curl 失败也要先拿到指纹。
 # 也不走 run_managed_external：它只接受 ssh_config / ssh_direct_config 两份受管配置。
 migrate_probe_same_host() {
-  local port conf log out fp pub_file pub_fp
+  local port conf log out fp pub_file pub_fp bind_arg
   port="${EXIT_SSH_PORT}"
   [[ "${MIGRATE_TO_PORT_GIVEN}" != 1 ]] || port="${MIGRATE_TO_PORT}"
+  # 这条链绑定了出站地址时，出口 IP 要从绑定地址量；该值已由 validate_config_values 收紧为 IPv4 字面量，可以拼进远端命令。
+  bind_arg=''
+  [[ -z "${EXIT_BIND_IPV4}" ]] || bind_arg=" --interface ${EXIT_BIND_IPV4}"
   render_ssh_config
   conf="${OP_TMP}/ssh-probe-same-host.${LOCK_OPERATION_ID}.conf"
   log="${OP_TMP}/ssh-probe-same-host.${LOCK_OPERATION_ID}.log"
@@ -6856,7 +6917,7 @@ migrate_probe_same_host() {
   chmod 600 "${conf}" || die 1 "$(L '同机探测 ssh 配置权限设置失败' 'Setting permissions on the same-machine probe ssh configuration failed')"
   # 不看退出码：远端 curl 失败也要拿到指纹与公钥；连不上时日志里没有 Server host key 行，下面按“连不上”处理。
   ssh -vv -E "${log}" -n -F "${conf}" chain-probe \
-    'cat /etc/ssh/ssh_host_ed25519_key.pub; echo ---ownexit---; curl -4 -fsS -m 15 ipinfo.io/ip || true' > "${out}" 2>/dev/null || true
+    "cat /etc/ssh/ssh_host_ed25519_key.pub; echo ---ownexit---; curl -4 -fsS -m 15${bind_arg} ipinfo.io/ip || true" > "${out}" 2>/dev/null || true
   fp="$(awk '$2 == "Server" && $3 == "host" && $4 == "key:" && $5 == "ssh-ed25519" && $6 ~ /^SHA256:/ {fingerprint=$6; count++} END {if (count != 1) exit 1; print fingerprint}' "${log}" 2>/dev/null)" || fp=''
   fp="${fp%$'\r'}"
   if [[ ! "${fp}" =~ ^SHA256:[A-Za-z0-9+/]+$ ]]; then
@@ -6908,10 +6969,13 @@ migrate_register_hostkey() {
 # 失败边界：改写配置之前失败，配置与 state 都没动（known_hosts 可能已追加正确条目，无害）；之后失败，重跑同一条
 # migrate-exit --to 走续跑分支（配置已改、state 未改）。
 migrate_rehost_same_host() {
-  local answer backup tmp key count
+  local answer backup tmp key count bind_hint
+  # 绑定地址被摘掉时，同机探测里带 --interface 的 curl 取不到 IP，会落到下面的退出 3；报错里点明先核对它。
+  bind_hint=''
+  [[ -z "${EXIT_BIND_IPV4}" ]] || bind_hint="$(L "；这条链绑定了出站地址，请确认 EXIT_BIND_IPV4=${EXIT_BIND_IPV4} 还在出口机网卡上" "; this chain binds its outbound address, so check that EXIT_BIND_IPV4=${EXIT_BIND_IPV4} is still configured on the exit")"
   log_info "$(L "[migrate] 新地址 ${MIGRATE_TO} 与当前出口机是同一台，原地切换（不换凭据，客户端不用动）" "[migrate] The new address ${MIGRATE_TO} is the same machine as the current exit; switching in place (no credential change, clients need nothing)")"
   migrate_same_host_port_check
-  is_ipv4 "${MIGRATE_PROBE_EXIT_IP}" || die 3 "$(L "无法在出口机上取得新的公网 IPv4（需要 curl 能访问 ipinfo.io）；读到：${MIGRATE_PROBE_EXIT_IP:-空}；配置未改动" "Cannot get the new public IPv4 on the exit (curl must reach ipinfo.io); read: ${MIGRATE_PROBE_EXIT_IP:-empty}; the configuration was not changed")"
+  is_ipv4 "${MIGRATE_PROBE_EXIT_IP}" || die 3 "$(L "无法在出口机上取得新的公网 IPv4（需要 curl 能访问 ipinfo.io）；读到：${MIGRATE_PROBE_EXIT_IP:-空}；配置未改动${bind_hint}" "Cannot get the new public IPv4 on the exit (curl must reach ipinfo.io); read: ${MIGRATE_PROBE_EXIT_IP:-empty}; the configuration was not changed${bind_hint}")"
   log_info "$(L "[migrate] 出口机经新地址测到的公网 IP：${MIGRATE_PROBE_EXIT_IP}" "[migrate] Public IP measured on the exit through the new address: ${MIGRATE_PROBE_EXIT_IP}")"
   if [[ -t 0 ]]; then
     read -r -p "$(L "确认切换后客户端经这条链出去的 IP 应当是 ${MIGRATE_PROBE_EXIT_IP}？[y/N] " "After the switch, should clients leave through this chain with IP ${MIGRATE_PROBE_EXIT_IP}? [y/N] ")" answer
@@ -8163,6 +8227,10 @@ migrate_prepare() {
     12) die 2 "$(L '配置与 state 不一致；migrate-exit 要求配置未改动（出口机参数由本命令自己改写）' 'Configuration and state disagree; migrate-exit requires an unchanged configuration (it rewrites the exit parameters itself)')" ;;
     *) die 5 "$(L "state.env 校验失败：${STATE_PROBE_REASON}" "state.env verification failed: ${STATE_PROBE_REASON}")" ;;
   esac
+  # 绑定地址是旧出口机网卡上的地址，搬到另一台机器后 sing-box 的出站会全部失败，所以跨机迁移直接拒绝；
+  # 同一台机器换 SSH 地址不经过这里（migrate_exit_chain 的同机分支）。放在 state 校验之后，
+  # 让 state 损坏、配置与 state 不一致继续按上面的文案报错。此时还没有写迁移记录，也没有动任何一台机器。
+  [[ -z "${EXIT_BIND_IPV4}" ]] || die 2 "$(L "链 ${CHAIN_ID} 设置了 EXIT_BIND_IPV4=${EXIT_BIND_IPV4}，不能迁到另一台出口机（新地址经中转连不上时也会按另一台机器处理）；先 rollback，再在新机器上用 --exit-bind 重新 init / deploy" "Chain ${CHAIN_ID} sets EXIT_BIND_IPV4=${EXIT_BIND_IPV4} and cannot be moved to another exit (a new address that is unreachable through the relay is also treated as another machine); rollback first, then run init / deploy on the new machine with --exit-bind")"
   # --to 的 IPv4 / 不是中转机两项校验已在 migrate_exit_chain 里先做；--to 等于当前出口机的情形也在那里按同机处理。
   # 旧链健康核验，顺序与 rollback 前置一致；同时让 remote_platform_preflight 给 SOCKET_PROXYD_PATH 赋值。
   render_ssh_config
@@ -8932,7 +9000,7 @@ qr_chain() {
 #     （deploy 后不可改，改了会和 state 对不上）。
 # 然后与 main 相同的初始化，再 deploy（已部署时 deploy 本身就是幂等 no-op + 完整 verify）。
 up_chain() {
-  local rc dir config_file mismatch
+  local rc dir config_file mismatch bind_note
   UP_MODE=1
   if [[ "${INIT_ID_GIVEN}" == 0 && "${INIT_RELAY_GIVEN}" == 0 && "${INIT_EXIT_GIVEN}" == 0 ]]; then
     if resolve_single_chain_config; then rc=0; else rc="$?"; fi
@@ -8956,7 +9024,12 @@ up_chain() {
     [[ "${INIT_RELAY_PORT_GIVEN}" == 0 || "${INIT_RELAY_PORT}" == "${RELAY_SSH_PORT}" ]] || mismatch=1
     [[ "${INIT_EXIT_GIVEN}" == 0 || "${INIT_EXIT}" == "${EXIT_HOST}" ]] || mismatch=1
     [[ "${INIT_EXIT_PORT_GIVEN}" == 0 || "${INIT_EXIT_PORT}" == "${EXIT_SSH_PORT}" ]] || mismatch=1
-    [[ "${mismatch}" == 0 ]] || die 2 "$(L "链 ${INIT_ID} 已有配置且地址不同（现有 中转=${RELAY_HOST}:${RELAY_SSH_PORT} 出口=${EXIT_HOST}:${EXIT_SSH_PORT}）；换一个 --id，或先 rollback 再删配置" "Chain ${INIT_ID} already has a configuration with different addresses (current relay=${RELAY_HOST}:${RELAY_SSH_PORT} exit=${EXIT_HOST}:${EXIT_SSH_PORT}); use another --id, or roll back first and delete the configuration")"
+    # 出站绑定地址决定出口 IP，与地址同等对待：显式给出且与已有配置不同（含已有配置没有绑定）就拒绝，不能悄悄忽略。
+    [[ "${INIT_EXIT_BIND_GIVEN}" == 0 || "${INIT_EXIT_BIND}" == "${EXIT_BIND_IPV4}" ]] || mismatch=1
+    # 只有本次给了 --exit-bind 或已有配置带绑定时，报错里才带上绑定地址；其余情况文案与之前相同。
+    bind_note=''
+    [[ "${INIT_EXIT_BIND_GIVEN}" == 0 && -z "${EXIT_BIND_IPV4}" ]] || bind_note="$(L " 出站绑定=${EXIT_BIND_IPV4:-无}" " exit bind=${EXIT_BIND_IPV4:-none}")"
+    [[ "${mismatch}" == 0 ]] || die 2 "$(L "链 ${INIT_ID} 已有配置且地址不同（现有 中转=${RELAY_HOST}:${RELAY_SSH_PORT} 出口=${EXIT_HOST}:${EXIT_SSH_PORT}${bind_note}）；换一个 --id，或先 rollback 再删配置" "Chain ${INIT_ID} already has a configuration with different addresses (current relay=${RELAY_HOST}:${RELAY_SSH_PORT} exit=${EXIT_HOST}:${EXIT_SSH_PORT}${bind_note}); use another --id, or roll back first and delete the configuration")"
     [[ "${INIT_SNI_GIVEN}" == 0 || "${INIT_SNI}" == "${REALITY_SERVER_NAME}" ]] || log_warn "$(L "已有配置的 REALITY_SERVER_NAME=${REALITY_SERVER_NAME}，忽略本次给的 ${INIT_SNI}（deploy 后不可改）" "The existing configuration has REALITY_SERVER_NAME=${REALITY_SERVER_NAME}; ignoring the ${INIT_SNI} given now (cannot be changed after deploy)")"
     [[ "${INIT_FILTER_GIVEN}" == 0 || "${INIT_EXIT_SOURCE_FILTER}" == "${EXIT_SOURCE_FILTER}" ]] || log_warn "$(L "已有配置的 EXIT_SOURCE_FILTER=${EXIT_SOURCE_FILTER}，忽略本次给的 ${INIT_EXIT_SOURCE_FILTER}（deploy 后不可改）" "The existing configuration has EXIT_SOURCE_FILTER=${EXIT_SOURCE_FILTER}; ignoring the ${INIT_EXIT_SOURCE_FILTER} given now (cannot be changed after deploy)")"
     tun_precheck "${RELAY_HOST}" "${EXIT_HOST}"
@@ -9308,13 +9381,14 @@ relay_cohost_kind_via() {
 
 init_chain() {
   local relay exit_host chain_id relay_port exit_port sni relay_key exit_key exit_ip answer cohost
-  local config_file tmp_file
+  local config_file tmp_file exit_bind exit_addrs
   relay="${INIT_RELAY}"
   exit_host="${INIT_EXIT}"
   chain_id="${INIT_ID}"
   relay_port="${INIT_RELAY_PORT}"
   exit_port="${INIT_EXIT_PORT}"
   sni="${INIT_SNI}"
+  exit_bind="${INIT_EXIT_BIND}"
 
   [[ "${chain_id}" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || die 2 "$(L "--id 只允许 [a-z0-9][a-z0-9-]{0,31}：${chain_id}" "--id only accepts [a-z0-9][a-z0-9-]{0,31}: ${chain_id}")"
   [[ -n "${relay}" ]] || relay="$(init_prompt_ipv4 "$(L 中转机 relay)" --relay)"
@@ -9343,9 +9417,26 @@ init_chain() {
   exit_key="$(init_key_path "${exit_host}" "${exit_port}")"
 
   # 出口 IP：在出口机上直接问 ipinfo.io；它是 verify 的唯一允许值，所以终端里要人确认。
-  exit_ip="$(ssh -n -i "${exit_key}" -p "${exit_port}" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=12 \
-    root@"${exit_host}" 'curl -fsS -m 15 ipinfo.io/ip' 2>/dev/null | tr -d '[:space:]' || true)"
-  is_ipv4 "${exit_ip}" || die 3 "$(L "无法在出口机上取得公网 IPv4（需要 curl 能访问 ipinfo.io）；读到：${exit_ip:-空}" "Cannot get a public IPv4 on the exit (curl must reach ipinfo.io); read: ${exit_ip:-empty}")"
+  if [[ -z "${exit_bind}" ]]; then
+    exit_ip="$(ssh -n -i "${exit_key}" -p "${exit_port}" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=12 \
+      root@"${exit_host}" 'curl -fsS -m 15 ipinfo.io/ip' 2>/dev/null | tr -d '[:space:]' || true)"
+    is_ipv4 "${exit_ip}" || die 3 "$(L "无法在出口机上取得公网 IPv4（需要 curl 能访问 ipinfo.io）；读到：${exit_ip:-空}" "Cannot get a public IPv4 on the exit (curl must reach ipinfo.io); read: ${exit_ip:-empty}")"
+  else
+    # --exit-bind：先确认这个地址确实配在出口机网卡上（sing-box 的配置检查查不出“地址不在本机”，部署后才会全部出站失败），
+    # 再从它出去量公网 IP——绑定地址可能是 NAT 后的私网地址，登记值必须是探测到的公网 IP，不能直接用绑定地址。
+    # 两条 ssh 都带 -n（不吃掉下面确认提问要用的标准输入）与 || true（失败留给后面的判断报错，不让 set -e 无提示退出）；
+    # exit_bind 已在参数解析时收紧为 IPv4 字面量，可以拼进远端命令。
+    exit_addrs="$(ssh -n -i "${exit_key}" -p "${exit_port}" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=12 \
+      root@"${exit_host}" 'ip -4 -o addr show' 2>/dev/null | awk '{ split($4, a, "/"); printf "%s%s", (n++ ? " " : ""), a[1] }' || true)"
+    case " ${exit_addrs} " in
+      *" ${exit_bind} "*) ;;
+      *) die 3 "$(L "出口机网卡上没有 ${exit_bind}（读到的地址：${exit_addrs:-空}）；未生成配置文件" "The exit has no interface address ${exit_bind} (addresses read: ${exit_addrs:-none}); no configuration file was written")" ;;
+    esac
+    exit_ip="$(ssh -n -i "${exit_key}" -p "${exit_port}" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=12 \
+      root@"${exit_host}" "curl -4 -fsS -m 15 --interface ${exit_bind} ipinfo.io/ip" 2>/dev/null | tr -d '[:space:]' || true)"
+    is_ipv4 "${exit_ip}" || die 3 "$(L "无法从出口机的 ${exit_bind} 取得公网 IPv4（需要 curl 能从该地址访问 ipinfo.io）；读到：${exit_ip:-空}；未生成配置文件" "Cannot get a public IPv4 from ${exit_bind} on the exit (curl must reach ipinfo.io from that address); read: ${exit_ip:-empty}; no configuration file was written")"
+    log_info "[exit-bind] chain=${chain_id} bind=${exit_bind} exit_ip=${exit_ip}"
+  fi
   log_info "$(L "出口机公网 IP：${exit_ip}" "Public IP of the exit: ${exit_ip}")"
   if [[ -t 0 ]]; then
     read -r -p "$(L "确认客户端经这条链出去的 IP 应当是 ${exit_ip}？[y/N] " "Should clients leave through this chain with IP ${exit_ip}? [y/N] ")" answer
@@ -9373,6 +9464,7 @@ init_chain() {
     printf 'REALITY_SERVER_NAME=%s\n' "${sni}"
     printf 'RELAY_COHOSTS_SINGBOX=%s\n' "${cohost}"
     printf 'EXIT_SOURCE_FILTER=%s\n' "${INIT_EXIT_SOURCE_FILTER}"
+    [[ -z "${exit_bind}" ]] || printf 'EXIT_BIND_IPV4=%s\n' "${exit_bind}"
   } > "${tmp_file}"
   # 读回校验在子 shell 里跑：parse_config 失败会 die 退出，必须先删掉临时文件，不能留下一份坏配置。
   if ! ( CONFIG_PATH="${tmp_file}"; parse_config ) >/dev/null; then

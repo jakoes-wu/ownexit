@@ -127,6 +127,7 @@
 | `--exit-port` | init | 出口机 SSH 端口，默认 22 |
 | `--sni` | init | Reality 伪装域名，默认 www.amazon.com |
 | `--exit-source-filter` | init | managed（默认）/ provider / none |
+| `--exit-bind` | init / up | 出口机上已配置的一个 IPv4：这条链的出站连接从它发起（出口机有多个 IP 时用），写入配置键 `EXIT_BIND_IPV4`；默认不绑定 |
 | `--with-fail-closed` | verify | 额外验证中转停止时出口不泄露 |
 | `--allow-tun` | deploy / up（init 接受但无效） | 本机到服务器的路由经代理 TUN 时默认拒绝（退出 3），加它只警告继续 |
 | `--device` | qr | 显示该设备的节点二维码；不带时显示 default |
@@ -157,7 +158,7 @@
 | `add-device` | 新增一台设备（跟设备名） |
 | `remove-device` | 吊销一台设备（跟设备名） |
 | `list-devices` | 只读列出设备 |
-| `migrate-exit` | 出口机换了 IP 或换了机器，凭据与客户端不变（跟 `--to` / `--abort` / `--abandon-cleanup`）；新地址是同一台机器时自动原地切换（SSH 端口须不变，否则退出 2），旧 IP 不必可达 |
+| `migrate-exit` | 出口机换了 IP 或换了机器，凭据与客户端不变（跟 `--to` / `--abort` / `--abandon-cleanup`）；新地址是同一台机器时自动原地切换（SSH 端口须不变，否则退出 2），旧 IP 不必可达；设置了 `EXIT_BIND_IPV4` 的链只支持同一台机器换地址（绑定地址须仍在网卡上），迁到另一台机器退出 2 |
 
 ### 退出码
 
@@ -165,8 +166,8 @@
 | ---- | ---- |
 | 0 | 成功，或 `status` 为 deployed / not_deployed |
 | 1 | 运行时失败（远端操作、本地提交等） |
-| 2 | 参数错误（含调用 2.0 已移除的 `rehost-exit`，提示改用 `migrate-exit --to <新 IP>`）、配置与 state 不一致、设备操作被拒；省略 `--id` 时没有配置或有多条；`up` 已有配置但地址不同；`qr` 没有这台设备 |
-| 3 | 预检 / 检查失败、远端不可达或主机指纹不符（`preflight` 的失败一律为 3；`init` / `up` 配免密或探测失败也是 3）；`deploy` / `up` 部署前自检发现路由经 TUN 且未加 `--allow-tun` |
+| 2 | 参数错误（含调用 2.0 已移除的 `rehost-exit`，提示改用 `migrate-exit --to <新 IP>`）、配置与 state 不一致、设备操作被拒；省略 `--id` 时没有配置或有多条；`up` 已有配置但地址或 `--exit-bind` 不同；`qr` 没有这台设备；设置了 `EXIT_BIND_IPV4` 的链迁到另一台出口机 |
+| 3 | 预检 / 检查失败、远端不可达或主机指纹不符（`preflight` 的失败一律为 3；`init` / `up` 配免密或探测失败也是 3）；`deploy` / `up` 部署前自检发现路由经 TUN 且未加 `--allow-tun`；`preflight` / `deploy` / `up` / `migrate-exit` 发现 `EXIT_BIND_IPV4` 不在出口机网卡上，或出口机没有 `ip` 命令无法核对（`verify` 发现时按下一行为 5） |
 | 4 | `deploy` / `up` 的部署阶段失败（远端不可达仍为 3；迁移进行中被拒也是 4）；`migrate-exit` 发现新出口机上已有本链文件 |
 | 5 | `status` 不健康（busy / stale_lock / incomplete / unreachable / orphaned / drifted）、`verify` 失败；`qr` 链未部署、锁忙 / 陈旧、节点文件与 state 不一致；其它命令的锁、state 损坏、未完成事务或收尾 verify 失败；出口机迁移进行中时 rebaseline / rotate-keys / add-device / remove-device 被拒 |
 | 6 | `rollback` 预校验或执行失败（含出口机迁移进行中被拒） |
@@ -268,7 +269,8 @@ stdout 上的下列行冻结；stderr 上 `[chain][<子命令>] INFO / WARN / ER
 | ---- | ---- | ---- |
 | `--chains` | | 逗号分隔的链名，顺序即自动组优先级（必需） |
 | `--name` | | 产物目录名，默认 all |
-| `--group` | | 自动组类型：fallback（默认）/ url-test |
+| `--group` | | 组类型：fallback（默认）/ url-test / select（手动选择组，不做健康检查，不能与 `--test-url` / `--interval` 同用） |
+| `--mixed-exits` | | 允许各链出口 IP 不同：逐链按自己的出口 IP 核验，render 只生成 select 组（与 `--group fallback` / `url-test` 同用退出 2） |
 | `--test-url` | | 自动组健康检查地址，默认 https://www.gstatic.com/generate_204 |
 | `--interval` | | 自动组健康检查间隔（秒），默认 300 |
 | `--qr-out` | | 二维码输出目录（必须不存在）；默认在 `${TMPDIR:-/tmp}` 下新建 |
@@ -288,7 +290,7 @@ stdout 上的下列行冻结；stderr 上 `[chain][<子命令>] INFO / WARN / ER
 | ---- | ---- |
 | 0 | 成功 |
 | 1 | 运行时失败（本机依赖缺失、渲染） |
-| 2 | 参数 / 配置 / node.txt 校验错误，或各链 EXPECTED_EXIT_IPV4 不一致 |
+| 2 | 参数 / 配置 / node.txt 校验错误，或没有 `--mixed-exits` 时各链 EXPECTED_EXIT_IPV4 不一致 |
 | 5 | verify 有链不健康，或全部 skipped |
 
 ### 输出
@@ -297,7 +299,7 @@ stdout 上带 `[multi-chain-client]` 前缀的下列行冻结（其余为日志�
 
 | 行 | 说明 |
 | ---- | ---- |
-| `[multi-chain-client] verify chain=<链> addr=<中转地址> result=<结果> endpoints=<n>/3 elapsed=<秒>s` | result ∈ ok / skipped / timeout / blocked / mismatch / error |
+| `[multi-chain-client] verify chain=<链> addr=<中转地址> result=<结果> endpoints=<n>/3 elapsed=<秒>s` | result ∈ ok / skipped / timeout / blocked / mismatch / error；`--mixed-exits` 时行末多一个 `exit=<该链出口 IP>` |
 | `[multi-chain-client] render nodes=<路径>` | 节点列表文件 |
 | `[multi-chain-client] render clash_snippet=<路径>` | Clash 片段文件 |
 | `[multi-chain-client] render qr_dir=<路径>` | 二维码目录（生成二维码时） |
@@ -314,7 +316,7 @@ stdout 上带 `[multi-chain-client]` 前缀的下列行冻结（其余为日志�
 | `--port` | | 配合 `--host`：SSH 端口，默认 22 |
 | `--user` | | 配合 `--host`：SSH 用户，默认 root |
 | `--chain` | | 只检查这一条链（可与 `--host` 同用） |
-| `--ip-check` | | 另在出口服务器上做出口 IP 体检 |
+| `--ip-check` | | 另在出口服务器上做出口 IP 体检；设置了 `EXIT_BIND_IPV4` 的链从绑定地址发起 |
 | `--scan-sni` | | 另在出口服务器上扫描伪装域名 |
 | `--sni-candidates` | | 配合 `--scan-sni`：逗号分隔的候选域名（最多 30 个） |
 | `--local-only` | | 只检查本机（不能与 `--host` / `--chain` / `--ip-check` / `--scan-sni` 同用） |

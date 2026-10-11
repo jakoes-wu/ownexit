@@ -203,7 +203,12 @@ doc_h4 "${CMDS}" "ownexit connect" "reason 取值" | sed -E 's/^reason=//' > "${
 compare "connect reason 取值" "${TMP}/a" "${TMP}/b"
 
 # 10. 链配置键（example.env 与 set_config_value 必须先相等）
-grep -vE '^[[:space:]]*(#|$)' chain/chain.example.env | cut -d= -f1 > "${TMP}/a"
+# 可选键在示例文件里写成注释行（# KEY=…），同样计入：否则可选键会漏出三方比对。示例文件里的说明性注释
+# 都不以“大写键名 =”开头，不会被误取。
+{
+  grep -vE '^[[:space:]]*(#|$)' chain/chain.example.env | cut -d= -f1
+  grep -E '^#[[:space:]]*[A-Z][A-Z0-9_]*=' chain/chain.example.env | sed -E 's/^#[[:space:]]*//' | cut -d= -f1
+} > "${TMP}/a"
 func_body chain/setup_chain.sh set_config_value | grep -oE '^[[:space:]]+[A-Z][A-Z0-9_]+\)' | tr -d ' )' > "${TMP}/c"
 compare "链配置键（example.env 对照 set_config_value）" "${TMP}/a" "${TMP}/c"
 doc_h3 "${FILES}" "链配置键" > "${TMP}/b"

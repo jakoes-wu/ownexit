@@ -60,8 +60,9 @@ Internal files (not part of the public interface, but 2.x must be able to read w
 | `REALITY_SERVER_NAME` | Reality camouflage domain (ASCII FQDN) |
 | `RELAY_COHOSTS_SINGBOX` | Existing sing-box on the relay: `yes` (233boy install) / `ownexit-direct` (ownexit direct) / `no` (none) |
 | `EXIT_SOURCE_FILTER` | How the exit's Reality port admits only the relay: `managed` (this project adds an nft allow-list) / `provider` (the provider's security group handles it) / `none` |
+| `EXIT_BIND_IPV4` | Optional (since 2.1.0). An IPv4 already configured on the exit: this chain's IPv4 outbound connections on the exit leave from it, and `EXPECTED_EXIT_IPV4` is the public IP seen when leaving from it. Without this key nothing is bound, and behaviour and the configuration digest are the same as before. Written by `--exit-bind` of `init` / `up`; do not change it after deploy |
 
-The configuration must contain exactly these 13 keys; keys added within 2.x must be optional (behaving as before when absent).
+The configuration must contain the first 13 required keys; the only other keys allowed are those marked optional above. Keys added within 2.x must be optional (behaving as before when absent).
 
 ### Chain state.env keys (reference)
 
@@ -183,3 +184,4 @@ Internal (not part of the public interface): the binary layout under `/opt/ownex
 | `Exit-via-Relay-<id>_<name>` | Chain extra device |
 | `PROXY` | The selector group in direct clash.yaml |
 | `Exit-Relay-auto` | The auto group from `ownexit multi render` |
+| `Exit-Relay-select` | The manual group from `ownexit multi render --group select` (including `--mixed-exits`) |

@@ -55,7 +55,7 @@
 - 链式 `state.env` 带 `SCHEMA_VERSION`。2.x 内若要新增 state 键，必须提升 SCHEMA_VERSION，且新版本继续能读旧 schema；旧版本读到新 schema 时按现有逻辑拒绝（降级不保证）。
 - sing-box 版本：链式 state 记录了部署时的 sing-box 版本，服务器上的二进制路径也带版本号。2.x 内升级 sing-box 只有在同一版本提供已有部署的原地迁移（不换凭据、不需要 rollback）时才发布；做不到就放到 3.0。
 - 升级前先收敛未完成的操作：链式有 `transaction.env`（`status=incomplete`）时先重跑 deploy / rollback；出口机有未清理的辅助文件（`status=drifted reason=exit-op-pending`）时先重跑中断的 rotate-keys / add-device / remove-device。有出口机迁移记录（`status=drifted reason=exit-migration-pending`）时先重跑 migrate-exit 完成（或 `--abort` / `--abandon-cleanup`）。1.x 里中断的 `rehost-exit`（配置已改成新 IP、state 还是旧 IP）：升级前用 1.x 重跑它，或升级后运行 `migrate-exit --to <配置中的 EXIT_HOST>` 续上。
-- 不保证降级。特别是：直连 VPS 加过设备后，不要用 0.7.0 之前的版本操作它（旧版本改参数时只渲染 default，会丢掉设备）。
+- 不保证降级。特别是：直连 VPS 加过设备后，不要用 0.7.0 之前的版本操作它（旧版本改参数时只渲染 default，会丢掉设备）。带 `EXIT_BIND_IPV4`（2.1.0 新增的可选键）的链配置，2.1.0 之前的版本会以“未知配置键”拒绝读取，不会误操作；没有这个键的配置不受影响。
 
 ## 6. 如何守住这些承诺
 
