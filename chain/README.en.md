@@ -67,7 +67,7 @@ The configuration from `init` is written to `~/.config/ownexit/chains/<name>.env
 
 ## Configuration (editing by hand is advanced use)
 
-The file from `init` has the same format as `chain/chain.example.env`. The parser executes no shell and accepts only blank lines, `#` comments and strict `KEY=VALUE` lines, and it must contain exactly these 13 keys:
+The file from `init` has the same format as `chain/chain.example.env`. The parser executes no shell and accepts only blank lines, `#` comments and strict `KEY=VALUE` lines, and it must contain the 13 required keys below; the only other key allowed is the optional `EXIT_BIND_IPV4` described after the table:
 
 | Key | Description | Where `init` gets it |
 | ---- | ---- | ---- |
@@ -82,6 +82,8 @@ The file from `init` has the same format as `chain/chain.example.env`. The parse
 | `REALITY_SERVER_NAME` | Reality camouflage domain (ASCII FQDN); there is no automatic fallback | `--sni`, default `www.amazon.com` |
 | `RELAY_COHOSTS_SINGBOX` | `yes` protects 233boy's `sing-box.service`; `ownexit-direct` protects ownexit direct's `ownexit-direct.service`; `no` requires no sing-box at all on the relay | Detected by logging in to the relay; maintained by `rebaseline` afterwards — do not edit by hand |
 | `EXIT_SOURCE_FILTER` | `managed`: this project adds an nft allow-list on the exit; `provider`: the provider's security group admits only the relay; with either, deploy / verify fail if your computer can reach the exit's Reality port directly. `none`: no restriction; direct reachability only logs a WARN | `--exit-source-filter`, default `managed` |
+
+Optional key `EXIT_BIND_IPV4` (since 2.1.0): an IPv4 already configured on the exit that this chain's IPv4 outbound connections on the exit leave from, written by `--exit-bind` of `init` / `up`; without it nothing is bound and behaviour is the same as before. See "Several exit IPs on one exit" below.
 
 The configuration file must be owned by the current user, mode 600, not a symlink, and outside any git work tree; private keys must grant no permissions to group / other.
 
@@ -267,6 +269,8 @@ It connects to the new IP through the relay with the current exit's private key:
 
 If it is interrupted after rewriting the configuration, rerun the same command to continue (when the configuration already points at the new IP while the state still has the old one, it only confirms that those two keys are the ones that differ, registers known_hosts if needed and carries on); once the switch is complete it prints `rehost=noop`. The old spelling `rehost-exit` (edit the two keys above and add the known_hosts entry by hand, then run it) was removed in 2.0: it exits 2 and suggests `migrate-exit`; a rehost-exit interrupted under 1.x after the configuration was rewritten is finished after upgrading with `migrate-exit --to <EXIT_HOST from the configuration>`. Order of the switch: the exit's owner → the relay's owner and the relay service's `ExecStart` target (followed by `daemon-reload`; if the running relay still points at the old target it is restarted once, dropping connections in flight, and clients reconnect automatically) → the local state (the old state is archived to `audit/rehosted.<deployment ID>.<operation ID>/state.env`) → an automatic full check identical to `verify`. The UUID, Reality key, ports and `client/node.txt` stay the same, so clients need not import again.
 
+A chain that sets `EXIT_BIND_IPV4` can be switched in place too, provided the bound address is still configured on the exit: the new exit IP is measured from the bound address and the bound address in the configuration stays as it is; when the bound address is gone the command exits 3 without changing the configuration, and you rerun it after adding the address back.
+
 The in-place switch is not transactional: every remote step uses "whole-file hash guard + single-line replacement" and accepts both the old and the migrated form, so after a failure you simply rerun the same command to converge; when the state is already bound to the new configuration it prints `rehost=noop` and returns 0. Exit codes: 0 success or noop; 2 argument errors, other configuration keys differ, the same machine with a different SSH port, or the exit IP was not confirmed; 3 the new IP is unreachable, known_hosts already has a mismatching entry, or it is not the same machine; 5 lock, corrupted state, an unfinished transaction or a failed final verify; 1 the remote migration or local commit failed (the message includes remote codes 171–177 and their meaning).
 
 ## Moving the exit to another machine
@@ -285,7 +289,9 @@ The process: set up key login to the new machine (asks for its root password the
 
 If interrupted, rerun the same command (with the same `--to`): progress is judged from the live situation (configuration, state, which exit the relay points at), and completed steps are not redone. Before the relay is switched you can `--abort`: the half-built pieces on the new machine are removed, the original configuration is restored and the chain is back on the old exit, printing `migrate=aborted`; once the relay has been switched, the migration can only be completed. While a migration is in progress, `status` prints `status=drifted reason=exit-migration-pending next=rerun-interrupted-command`, and deploy, rollback, rebaseline, rotate-keys, add-device and remove-device refuse to run. If SSH to the old machine fails during cleanup, it prints `old_exit_cleanup=pending` and keeps the record; rerun once the old machine is back to finish. If it is gone for good, use `--abandon-cleanup` (this chain's configuration, including the private key, remains on the old machine — destroy that machine yourself).
 
-When several chains share this exit, migrate them one by one; multi-chain aggregation requires the same exit IP across chains, so `multi_chain_client.sh … render` again only after all of them are migrated. Exit codes: 0 success; 2 argument errors, `--to` is the current exit / the relay / the same machine, a different `--to` on rerun, or `--abort` after the relay was switched; 3 the new or old machine is unreachable, key setup failed, or a host fingerprint does not match; 4 the new machine already has this chain's files; 5 lock, corrupted state, an unhealthy old chain or an unfinished operation; 1 a remote operation, check or local commit failed.
+A chain that sets `EXIT_BIND_IPV4` cannot be moved to another machine (the bound address belongs to the old machine's interface): the command refuses with exit 2 and changes nothing; rollback first, then run init / deploy on the new machine with `--exit-bind`.
+
+When several chains share this exit, migrate them one by one; multi-chain aggregation (without `--mixed-exits`) requires the same exit IP across chains, so `multi_chain_client.sh … render` again only after all of them are migrated. Exit codes: 0 success; 2 argument errors, `--to` is the current exit / the relay / the same machine, a different `--to` on rerun, or `--abort` after the relay was switched; 3 the new or old machine is unreachable, key setup failed, or a host fingerprint does not match; 4 the new machine already has this chain's files; 5 lock, corrupted state, an unhealthy old chain or an unfinished operation; 1 a remote operation, check or local commit failed.
 
 `status`, `verify` without `--with-fail-closed`, `conns` and `banlist` are read-only: when SSH returns 255 (a connection-level failure) and it is not the control machine's 600-second timeout, they retry up to 3 times (3 / 6 seconds apart) and print `[ssh-retry] role=… attempt=n/3` on stderr; the relay smoke inside verify is not retried. Other commands do not retry.
 
@@ -305,5 +311,26 @@ chain/multi_chain_client.sh --chains main,backup render --group url-test --no-qr
 ```
 
 The order of `--chains` is the auto group's priority; `--name` sets the output directory `${XDG_STATE_HOME:-~/.local/state}/ownexit/multi-chain-client/<name>/` (default `all`). Node names are each chain's own `Exit-via-Relay-<id>` (delete the old single node of the same name before merging into Clash Verge), and the auto group is named `Exit-Relay-auto`. Every chain's `EXPECTED_EXIT_IPV4` must be the same. Exit codes: 0 success; 2 argument / configuration / `node.txt` validation errors, or exit IPs differing across chains; 5 a chain is unhealthy in `verify`, or all are skipped; 1 runtime failure.
+
+### Several exit IPs on one exit
+
+When the exit has several public IPv4 addresses, each chain can leave from one of them, giving you nodes with different exit IPs. They can all share one relay. First make sure the addresses are configured on the exit's interface (`ip -4 addr`) and that each of them can reach the internet (`curl --interface <address> ipinfo.io/ip` returns a different IP for each).
+
+```bash
+# one --id per chain; --exit is always the exit's SSH address, --exit-bind the outbound address for that chain
+chain/setup_chain.sh up --id ip1 --relay 203.0.113.10 --exit 198.51.100.20 --exit-bind 198.51.100.20
+chain/setup_chain.sh up --id ip2 --relay 203.0.113.10 --exit 198.51.100.20 --exit-bind 198.51.100.21
+chain/setup_chain.sh up --id ip3 --relay 203.0.113.10 --exit 198.51.100.20 --exit-bind 198.51.100.22
+# verify each chain against its own exit IP, and render a Clash snippet with the manual group Exit-Relay-select
+chain/multi_chain_client.sh --chains ip1,ip2,ip3 --mixed-exits verify
+chain/multi_chain_client.sh --chains ip1,ip2,ip3 --mixed-exits render
+```
+
+- `--exit-bind` is written to the configuration key `EXIT_BIND_IPV4`. `init` checks that the address is configured on the exit and records the public IP measured when leaving from it as `EXPECTED_EXIT_IPV4` (the bound address may be a private address behind NAT, so the recorded value is the measured one).
+- The exit checks of `preflight` / `deploy` / `verify` and `ownexit doctor --ip-check` all start from the bound address. When the bound address is not configured on the exit they say so and exit (3 for `preflight` / `deploy` / `up`; 5 for `verify`, like its other failures); the exit needs the `ip` command (iproute2).
+- Binding only affects IPv4 outbound connections. The inbound still listens on every address, and the relay connects to the `--exit` address.
+- `--mixed-exits` only builds a manual group: putting nodes with different exit IPs into a `fallback` / `url-test` group would change the exit IP without you noticing, so those combinations are refused with exit 2.
+- A deployed chain cannot gain, lose or change its bound address in place: rollback, then run init / deploy again with the new `--exit-bind` (new credentials are generated). When the provider takes the bound address away, the chain's IPv4 outbound traffic fails; handle it the same way, or add the address back.
+- Migration: a new SSH address on the same exit works with `migrate-exit` as usual; moving to another machine is not supported. To stay manageable after an address change, make sure at least one of `--exit` and `--exit-bind` is an address you do not plan to replace.
 
 After a relay changes IP or is blocked: deploy a new chain with a new `--id`, add it to `--chains`, roll back the old chain and remove it from the list, then `render` again and import.

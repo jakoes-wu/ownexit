@@ -373,9 +373,18 @@ PROBE
 
 # 在出口服务器上执行的 IP 体检（docs/feature/feature-doctor-ipcheck.md §5.1.3）：只读，全部请求强制 IPv4、带超时，
 # 输出 KEY=VALUE，由本机渲染。原始结果只取判定需要的片段，不回传整页内容。
+# 可选的第 1 个参数：链配置的 EXIT_BIND_IPV4（没有就不传，等同 -）。带绑定地址的链实际从该地址出站，
+# 体检必须从同一个地址发起，否则查到的是出口机默认出站 IP 的归属与可用性。探针里所有请求都经 c()。
 read -r -d '' IPCHECK_PROBE <<'PROBE' || true
 UA='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
-c() { curl -4 -sS -m 12 -A "$UA" "$@" < /dev/null 2>/dev/null; }
+bind="${1:--}"
+c() {
+  if [ "$bind" = - ]; then
+    curl -4 -sS -m 12 -A "$UA" "$@" < /dev/null 2>/dev/null
+  else
+    curl -4 -sS -m 12 --interface "$bind" -A "$UA" "$@" < /dev/null 2>/dev/null
+  fi
+}
 # ip-api 把 & 转义成 \u0026，还原后再取字段。
 body="$(c 'http://ip-api.com/json/?fields=status,country,countryCode,city,isp,org,as,hosting,proxy,mobile,query' | sed 's/\\u0026/\&/g' || true)"
 for k in status country countryCode city isp as query; do
@@ -625,7 +634,7 @@ check_direct() {
 }
 
 check_chain() {
-  local id="$1" file out_file err_file rc last err_line relay rport rkey exit_host eport ekey out proxy
+  local id="$1" file out_file err_file rc last err_line relay rport rkey exit_host eport ekey out proxy ebind
   file="${CHAIN_CONFIG_DIR}/${id}.env"
   echo "$(L "== 链 ${id} ==" "== Chain ${id} ==")"
   if [[ ! -f "${file}" ]]; then
@@ -649,8 +658,16 @@ check_chain() {
     exit_host="$(kv_get "${file}" EXIT_HOST)"; eport="$(kv_get "${file}" EXIT_SSH_PORT)"; ekey="$(kv_get "${file}" EXIT_SSH_KEY)"
     # 经中转登录出口机，known_hosts 查找键与链式一致（出口机按 EXIT_HOST 记录）。
     proxy="ssh -F /dev/null -i ${rkey} -p ${rport:-22} -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o ConnectTimeout=8 -W %h:%p root@${relay}"
-    out="$(printf '%s\n' "${IPCHECK_PROBE}" | ssh "${SSH_SAFE_OPTS[@]}" -i "${ekey}" -p "${eport:-22}" -o ProxyCommand="${proxy}" "root@${exit_host}" 'bash -s' 2>/dev/null)" || out=''
-    render_ipcheck "$(L "链 ${id} 出口机 ${exit_host}" "Chain ${id}: exit ${exit_host}")" "${out}"
+    # 这条链绑定了出站地址时按绑定地址体检。值先按 IPv4 形态收紧再拼进远端命令；不符合形态的当作没有绑定。
+    ebind="$(kv_get "${file}" EXIT_BIND_IPV4)"
+    [[ "${ebind}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || ebind=''
+    if [[ -n "${ebind}" ]]; then
+      out="$(printf '%s\n' "${IPCHECK_PROBE}" | ssh "${SSH_SAFE_OPTS[@]}" -i "${ekey}" -p "${eport:-22}" -o ProxyCommand="${proxy}" "root@${exit_host}" "bash -s -- ${ebind}" 2>/dev/null)" || out=''
+      render_ipcheck "$(L "链 ${id} 出口机 ${exit_host}（出站绑定 ${ebind}）" "Chain ${id}: exit ${exit_host} (outbound bound to ${ebind})")" "${out}"
+    else
+      out="$(printf '%s\n' "${IPCHECK_PROBE}" | ssh "${SSH_SAFE_OPTS[@]}" -i "${ekey}" -p "${eport:-22}" -o ProxyCommand="${proxy}" "root@${exit_host}" 'bash -s' 2>/dev/null)" || out=''
+      render_ipcheck "$(L "链 ${id} 出口机 ${exit_host}" "Chain ${id}: exit ${exit_host}")" "${out}"
+    fi
   fi
   if [[ "${SCAN_SNI}" == 1 ]]; then
     relay="$(kv_get "${file}" RELAY_HOST)"; rport="$(kv_get "${file}" RELAY_SSH_PORT)"; rkey="$(kv_get "${file}" RELAY_SSH_KEY)"

@@ -65,7 +65,7 @@ chain/setup_chain.sh qr
 
 ## 配置（手工编辑属于进阶用法）
 
-`init` 生成的文件格式与 `chain/chain.example.env` 相同。解析器不执行 shell，只接受空行、井号注释和严格的 `KEY=VALUE`，必须且只能包含下面 13 个键：
+`init` 生成的文件格式与 `chain/chain.example.env` 相同。解析器不执行 shell，只接受空行、井号注释和严格的 `KEY=VALUE`，必须包含下面 13 个必填键，另外只允许表后说明的可选键 `EXIT_BIND_IPV4`：
 
 | 键 | 说明 | `init` 怎么得到 |
 | ---- | ---- | ---- |
@@ -80,6 +80,8 @@ chain/setup_chain.sh qr
 | `REALITY_SERVER_NAME` | Reality 伪装域名（ASCII FQDN），没有自动 fallback | `--sni`，默认 `www.amazon.com` |
 | `RELAY_COHOSTS_SINGBOX` | `yes` 保护 233boy 的 `sing-box.service`；`ownexit-direct` 保护 ownexit 直连的 `ownexit-direct.service`；`no` 要求中转机上没有任何 sing-box | 登录中转机自动识别；之后由 `rebaseline` 维护，不要手工改 |
 | `EXIT_SOURCE_FILTER` | `managed`：本项目在出口机加 nft 白名单；`provider`：服务商安全组只放行中转来源；两者部署 / verify 时本机能直连出口机 Reality 端口即失败。`none`：不限制，能直连只记 WARN | `--exit-source-filter`，默认 `managed` |
+
+可选键 `EXIT_BIND_IPV4`（2.1.0 起）：出口机上已配置的一个 IPv4，这条链在出口机上的 IPv4 出站连接从它发起，由 `init` / `up` 的 `--exit-bind` 写入；没有这个键时不绑定，行为与之前相同。用法见下文“一台出口机多个出口 IP”。
 
 配置文件必须由当前用户拥有、权限 600、不是符号链接，并且位于 git 工作区之外；私钥要求 group / other 没有任何权限。
 
@@ -265,6 +267,8 @@ chain/setup_chain.sh --id main migrate-exit --to <新IP>
 
 改写配置之后中断的，重跑同一条命令即可续上（配置已指向新 IP、状态还是旧 IP 时，它只核实这两个键不同，补登记 known_hosts 后继续）；已经切换完成时输出 `rehost=noop`。旧写法 `rehost-exit`（先手改上面两个键并补 known_hosts，再运行它）已在 2.0 移除，调用时退出 2 并提示改用 `migrate-exit`；1.x 里中断在改写配置之后的 rehost-exit，升级后运行 `migrate-exit --to <配置中的 EXIT_HOST>` 续上。迁移顺序：出口机 owner → 中转机 owner 与 relay service 的 `ExecStart` 目标（改完 `daemon-reload`；正在运行的 relay 若仍指向旧目标就重启一次，在途连接会断开，客户端自动重连）→ 本地状态（旧状态归档到 `audit/rehosted.<部署ID>.<操作ID>/state.env`）→ 自动跑与 `verify` 相同的完整核验。UUID、Reality 密钥、端口和 `client/node.txt` 都不变，客户端不用重新导入。
 
+设置了 `EXIT_BIND_IPV4` 的链同样可以原地切换，前提是绑定地址还在出口机网卡上：新的出口 IP 从绑定地址探测，配置里的绑定地址保持不变；绑定地址已经不在时以退出 3 结束且不改配置，把地址加回网卡后重跑。
+
 原地切换不走事务：每个远端步骤都用“整文件哈希守门 + 单行替换”，同时接受旧形态和已迁移形态，中途失败直接重跑同一条命令即可收敛；状态已经绑定新配置时输出 `rehost=noop` 并返回 0。退出码：0 成功或 noop；2 参数错误、其它配置键不一致、同一台机器却换了 SSH 端口、未确认出口 IP；3 新 IP 不可达、known_hosts 里已有不符的条目或不是同一台机器；5 锁、状态损坏、有未完成事务或收尾 verify 失败；1 远端迁移或本地提交失败（信息里带远端码 171–177 及含义）。
 
 ## 出口机换一台机器
@@ -283,7 +287,9 @@ chain/setup_chain.sh --id main migrate-exit --abandon-cleanup              # 迁
 
 中途断开时重跑同一条命令（`--to` 必须相同）：实际进度按现场判断（配置、状态、中转指向哪台出口机），已完成的步骤不会重做。中转切换之前可以 `--abort`：拆掉新机器上的半成品、恢复原配置，链回到旧出口机，输出 `migrate=aborted`；中转已经切换后只能继续完成。迁移进行中 `status` 输出 `status=drifted reason=exit-migration-pending next=rerun-interrupted-command`，deploy、rollback、rebaseline、rotate-keys、add-device、remove-device 拒绝执行。清理旧机器时 SSH 不通，输出 `old_exit_cleanup=pending` 并保留记录，旧机器恢复后重跑补做；永久失联用 `--abandon-cleanup`（旧机器上本链的配置含私钥会留下，需自行销毁该机器）。
 
-多条链共用这台出口机时逐条迁移；多链聚合要求各链出口 IP 相同，全部迁完后再 `multi_chain_client.sh … render`。退出码：0 成功；2 参数错误、`--to` 是当前出口机 / 中转机 / 同一台机器、重跑时 `--to` 不一致、中转已切换后 `--abort`；3 新旧机器不可达、配免密失败或主机指纹不符；4 新机器上已有本链的文件；5 锁、状态损坏、旧链不健康或有未完成操作；1 远端操作、核验或本地提交失败。
+设置了 `EXIT_BIND_IPV4` 的链不能迁到另一台机器（绑定地址是旧机器网卡上的地址），命令以退出 2 拒绝且不做任何改动；先 rollback，再在新机器上用 `--exit-bind` 重新 init / deploy。
+
+多条链共用这台出口机时逐条迁移；多链聚合（不带 `--mixed-exits` 时）要求各链出口 IP 相同，全部迁完后再 `multi_chain_client.sh … render`。退出码：0 成功；2 参数错误、`--to` 是当前出口机 / 中转机 / 同一台机器、重跑时 `--to` 不一致、中转已切换后 `--abort`；3 新旧机器不可达、配免密失败或主机指纹不符；4 新机器上已有本链的文件；5 锁、状态损坏、旧链不健康或有未完成操作；1 远端操作、核验或本地提交失败。
 
 `status`、不带 `--with-fail-closed` 的 `verify`、`conns`、`banlist` 是只读命令：SSH 返回 255（连接层失败）且不是控制端 600 秒超时时，自动重试最多 3 次（间隔 3 / 6 秒），stderr 输出 `[ssh-retry] role=… attempt=n/3`；verify 里的中转 smoke 不重试。其它命令不重试。
 
@@ -303,5 +309,26 @@ chain/multi_chain_client.sh --chains main,backup render --group url-test --no-qr
 ```
 
 `--chains` 的顺序就是自动组的优先级；`--name` 决定产物目录 `${XDG_STATE_HOME:-~/.local/state}/ownexit/multi-chain-client/<name>/`（默认 `all`）。节点名是各链自己的 `Exit-via-Relay-<id>`（合并进 Clash Verge 前先删掉同名的旧单节点），自动组名是 `Exit-Relay-auto`。各链的 `EXPECTED_EXIT_IPV4` 必须相同。退出码：0 成功；2 参数 / 配置 / `node.txt` 校验错误或出口 IP 跨链不一致；5 `verify` 有链不健康或全部 skipped；1 运行时失败。
+
+### 一台出口机多个出口 IP
+
+出口机配有多个公网 IPv4 时，可以让每条链从其中一个地址出站，得到出口 IP 各不相同的节点。中转机可以共用一台。先确认这些地址都已经配在出口机网卡上（`ip -4 addr`），并且各自能出站（`curl --interface <地址> ipinfo.io/ip` 返回的 IP 各不相同）。
+
+```bash
+# 每条链一个 --id，--exit 都填出口机的 SSH 地址，--exit-bind 填这条链要用的出站地址
+chain/setup_chain.sh up --id ip1 --relay 203.0.113.10 --exit 198.51.100.20 --exit-bind 198.51.100.20
+chain/setup_chain.sh up --id ip2 --relay 203.0.113.10 --exit 198.51.100.20 --exit-bind 198.51.100.21
+chain/setup_chain.sh up --id ip3 --relay 203.0.113.10 --exit 198.51.100.20 --exit-bind 198.51.100.22
+# 逐链按各自的出口 IP 核验，并生成带手动选择组 Exit-Relay-select 的 Clash 片段
+chain/multi_chain_client.sh --chains ip1,ip2,ip3 --mixed-exits verify
+chain/multi_chain_client.sh --chains ip1,ip2,ip3 --mixed-exits render
+```
+
+- `--exit-bind` 写入配置键 `EXIT_BIND_IPV4`。`init` 会确认该地址在出口机网卡上，并把从它出去时探测到的公网 IP 登记为 `EXPECTED_EXIT_IPV4`（绑定地址可以是 NAT 后的私网地址，所以登记值以探测结果为准）。
+- `preflight` / `deploy` / `verify` 的出口仲裁、`ownexit doctor --ip-check` 都从绑定地址发起。绑定地址不在网卡上时指出原因并退出（`preflight` / `deploy` / `up` 为 3，`verify` 与其它失败一样为 5）；出口机需要有 `ip` 命令（iproute2）。
+- 绑定只约束 IPv4 出站。入站仍监听全部地址，中转连的是 `--exit` 那个地址。
+- `--mixed-exits` 只生成手动选择组：出口 IP 不同的节点放进 `fallback` / `url-test` 自动组，会在不知情时换掉出口 IP，所以这两种组合以退出 2 拒绝。
+- 已部署的链不能原地加上、去掉或更换绑定地址：rollback 后用新的 `--exit-bind` 重新 init / deploy（凭据会重新生成）。绑定地址被服务商收回后，该链的 IPv4 出站失败，处理方式相同，或把地址加回网卡。
+- 迁移：同一台出口机换 SSH 地址照常用 `migrate-exit`；迁到另一台机器不支持。为了在换地址后还能管理，让 `--exit` 与 `--exit-bind` 中至少有一个是不打算更换的地址。
 
 某台中转机换 IP 或被墙后：用新 `--id` 部署一条新链，把它加进 `--chains`，旧链 rollback 后从列表去掉，重新 `render` 并导入。

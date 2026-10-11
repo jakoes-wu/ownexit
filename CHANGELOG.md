@@ -6,6 +6,25 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-10-11
+
+### Added / 新增
+
+- Several exit IPs on one exit: `ownexit chain init` / `up` take `--exit-bind <IPv4>` (configuration key `EXIT_BIND_IPV4`, optional), so that a chain's outbound connections on the exit leave from one of the exit's own addresses. Deploy one chain per address to get nodes with different exit IPs; they can share a relay. The exit checks of `preflight` / `deploy` / `verify` and `ownexit doctor --ip-check` start from the bound address, and a bound address that is no longer configured on the exit is reported explicitly (exit 3 from `preflight` / `deploy` / `up`, exit 5 from `verify`).
+- 一台出口机多个出口 IP：`ownexit chain init` / `up` 新增 `--exit-bind <IPv4>`（配置键 `EXIT_BIND_IPV4`，可选），让一条链在出口机上的出站连接从出口机自己的某个地址发起。每个地址部署一条链，就得到出口 IP 不同的节点，中转机可以共用。`preflight` / `deploy` / `verify` 的出口仲裁与 `ownexit doctor --ip-check` 都从绑定地址发起；绑定地址不在出口机网卡上时明确指出（`preflight` / `deploy` / `up` 退出 3，`verify` 退出 5）。
+- `ownexit multi`: `--mixed-exits` combines chains with different exit IPs (each verified against its own exit IP; verify lines end with `exit=<IP>`), and `--group select` renders a manual group named `Exit-Relay-select`. With `--mixed-exits` only the manual group is allowed, because an automatic group would change the exit IP without you noticing.
+- `ownexit multi`：`--mixed-exits` 聚合出口 IP 不同的链（逐链按自己的出口 IP 核验，verify 行末多 `exit=<IP>`）；`--group select` 生成手动选择组 `Exit-Relay-select`。`--mixed-exits` 时只允许手动选择组，自动组会在不知情时换掉出口 IP。
+
+### Changed / 变更
+
+- `ownexit chain migrate-exit`: a chain that sets `EXIT_BIND_IPV4` can still be switched in place when the same exit gets a new SSH address (the bound address must still be configured there); moving such a chain to another machine is refused with exit 2.
+- `ownexit chain migrate-exit`：设置了 `EXIT_BIND_IPV4` 的链，同一台出口机换 SSH 地址时照常原地切换（绑定地址须仍在网卡上）；迁到另一台机器以退出 2 拒绝。
+
+### Upgrading / 升级
+
+- Nothing to do. Chains without `EXIT_BIND_IPV4` behave exactly as before: the configuration digest, the exit's sing-box configuration and every command are unchanged. A configuration that has the new key cannot be read by versions before 2.1.0 (they refuse it as an unknown key).
+- 无需任何操作。没有 `EXIT_BIND_IPV4` 的链行为与之前完全相同：配置摘要、出口机的 sing-box 配置和各命令都没有变。带这个新键的配置不能被 2.1.0 之前的版本读取（会以“未知配置键”拒绝）。
+
 ## [2.0.0] - 2026-10-07
 
 ### Removed / 移除
