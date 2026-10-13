@@ -30,7 +30,7 @@ cd ~/Library/Application\ Support/io.github.clash-verge-rev.clash-verge-rev/prof
 cp Script.js Script.js.bak.$(date +%Y%m%d_%H%M%S)
 ```
 
-Linux / WSL：路径一般在 `~/.config/clash-verge-rev/profiles/Script.js`（按你的实际安装位置确认），备份命令把 `cd` 的路径换掉即可。
+Linux 上文件在 `~/.local/share/io.github.clash-verge-rev.clash-verge-rev/profiles/Script.js`（设置了 `XDG_DATA_HOME` 时在它下面）；Windows 上在 `%APPDATA%\io.github.clash-verge-rev.clash-verge-rev\profiles\Script.js`，在 WSL 里用的也是 Windows 这边的 Clash Verge。备份命令把 `cd` 的路径换掉即可。
 
 ## 3. 修改全局扩展脚本
 
@@ -94,9 +94,9 @@ route -n get 203.0.113.10 | grep interface   # 应显示 en0 一类的物理网�
 route -n get 1.1.1.1 | grep interface        # 对照：其它地址仍走 utun
 ```
 
-Linux / WSL：用 `ip route get 203.0.113.10`，看 `dev` 后面是物理网卡（如 `eth0`）而不是 tun 设备。
+Linux：用 `ip route get 203.0.113.10`，看 `dev` 后面是物理网卡（如 `eth0`）而不是 tun 设备。Windows（含 WSL，WSL 里的 `ip route` 看不到 Windows 的 TUN）：在 PowerShell 里用 `Find-NetRoute -RemoteIPAddress 203.0.113.10`，看 `InterfaceAlias` 是物理网卡而不是 Clash 的 TUN 网卡。
 
-4. 再 SSH 一次，到 Clash Verge 的“连接”页搜这个 IP：TUN 排除生效的话搜不到；如果看到一条 DIRECT 记录，那是规则模式的兜底，也算正常。只有全局模式下还走了代理节点，才算没生效。
+4. 再 SSH 一次，到 Clash Verge 的“连接”页搜这个 IP：TUN 排除生效的话搜不到；如果看到一条 DIRECT 记录，那是规则模式的兜底，也算正常。记录显示走了代理节点（不论规则模式还是全局模式），才算没生效。
 
 第 3 步如果仍显示 utun，可能是你的 Clash Verge 版本用自己的 TUN 设置覆盖了脚本里的 `route-exclude-address`。这时：
 - 规则模式下，直连规则照样生效；

@@ -30,7 +30,7 @@ cd ~/Library/Application\ Support/io.github.clash-verge-rev.clash-verge-rev/prof
 cp Script.js Script.js.bak.$(date +%Y%m%d_%H%M%S)
 ```
 
-Linux / WSL: the path is usually `~/.config/clash-verge-rev/profiles/Script.js` (confirm against your install location); same backup command with the `cd` path swapped.
+On Linux the file is `~/.local/share/io.github.clash-verge-rev.clash-verge-rev/profiles/Script.js` (under `XDG_DATA_HOME` if you set it); on Windows it is `%APPDATA%\io.github.clash-verge-rev.clash-verge-rev\profiles\Script.js`, and WSL also uses the Windows-side Clash Verge. Same backup command with the `cd` path swapped.
 
 ## 3. Edit the global extension script
 
@@ -94,9 +94,9 @@ route -n get 203.0.113.10 | grep interface   # should show a physical interface 
 route -n get 1.1.1.1 | grep interface        # for comparison: other addresses still use utun
 ```
 
-Linux / WSL: use `ip route get 203.0.113.10` and check that `dev` shows a physical interface (e.g. `eth0`), not a tun device.
+Linux: use `ip route get 203.0.113.10` and check that `dev` shows a physical interface (e.g. `eth0`), not a tun device. Windows (including WSL, whose `ip route` cannot see the Windows TUN): run `Find-NetRoute -RemoteIPAddress 203.0.113.10` in PowerShell and check that `InterfaceAlias` is a physical adapter, not Clash's TUN adapter.
 
-4. SSH once more and search for the IP on the Connections page: if the TUN exclusion took effect you won't find it; a DIRECT entry is the rule-mode fallback and also counts as fine. Only a proxy node in global mode means it didn't work.
+4. SSH once more and search for the IP on the Connections page: if the TUN exclusion took effect you won't find it; a DIRECT entry is the rule-mode fallback and also counts as fine. Only an entry that went through a proxy node (in either rule or global mode) means it didn't work.
 
 If step 3 still shows utun, your Clash Verge version may override the script's `route-exclude-address` with its own TUN settings. In that case:
 - in rule mode, the direct rules still apply;
