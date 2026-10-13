@@ -51,6 +51,8 @@ Where to order:
 - lisa: open [lisahost.com](https://lisahost.com/aff.php?aff=14727), find "美国 9929 精品网络双 ISP 住宅 IP VPS" in the product list and order the "精简版" (Lite) edition.
 - nodemach: open [nodemach.com](https://www.nodemach.com/welcome?vcd=d6521618) (it lands on the sign-up page), sign up, then find "精品线路 CN2 GIA" in the product list and order the "Lite 套餐" plan.
 
+Note: the lisa link is a referral link and the nodemach link carries tracking parameters; ordering through them costs the same as ordering directly.
+
 Prices are whatever the websites show today.
 
 ## 4. Ordering
