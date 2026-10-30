@@ -6,10 +6,17 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-10-30
+
 ### Added / 新增
 
 - `ownexit chain change-port [--port <n>]`: moves only the relay's public port of a chain to a new one (random free port in 20000-59999, or the given one). UUIDs, the Reality key, short id, devices and the exit stay the same; the local node files and state are updated and a full verify runs at the end. It prints which client nodes need the new port as soon as the state is committed. Rerun it to converge after an interruption.
 - `ownexit chain change-port [--port <n>]`：只把一条链的中转对外端口换成新端口（在 20000-59999 里随机选空闲端口，或用指定端口）。UUID、Reality 密钥、short id、设备、出口机都不变；更新本机节点文件与 state，最后跑一遍完整 verify。state 一提交就提示哪些客户端节点要改成新端口。中途断开时重跑收敛。
+
+### Upgrading / 升级
+
+- Nothing to do. Existing chains, configurations and state files are read as before; `change-port` only acts when you run it.
+- 无需任何操作。现有链、配置与 state 文件照常读取；`change-port` 只在你运行它时才起作用。
 
 ## [2.1.0] - 2026-10-11
 
