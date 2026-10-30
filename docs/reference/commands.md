@@ -133,6 +133,7 @@
 | `--device` | qr | 显示该设备的节点二维码；不带时显示 default |
 | `--to` | migrate-exit | 新出口机 IPv4；与 `--abort`、`--abandon-cleanup` 互斥 |
 | `--to-port` | migrate-exit | 新出口机 SSH 端口，默认 22；只能与 `--to` 同用 |
+| `--port` | change-port | 中转新的对外端口（1-65535，不能是当前端口，且在中转上空闲）；不带时在 20000-59999 里随机选 |
 | `--abort` | migrate-exit | 中转切换之前放弃迁移，恢复原配置 |
 | `--abandon-cleanup` | migrate-exit | 迁移已提交、旧出口机永久失联时放弃清理 |
 
@@ -155,6 +156,7 @@
 | `banlist` | 对照本地与中转的黑名单 |
 | `rebaseline` | 重新登记中转机上的既有 sing-box |
 | `rotate-keys` | 更换全部设备的 UUID 与 Reality 密钥 / short id |
+| `change-port` | 只把中转对外端口换成新端口（可跟 `--port <n>`），凭据、设备、出口机不变；客户端只改节点端口或重新导入，多链聚合需重新 render；本链现有连接断开一次；中途失败重跑收敛 |
 | `add-device` | 新增一台设备（跟设备名） |
 | `remove-device` | 吊销一台设备（跟设备名） |
 | `list-devices` | 只读列出设备 |
@@ -166,10 +168,10 @@
 | ---- | ---- |
 | 0 | 成功，或 `status` 为 deployed / not_deployed |
 | 1 | 运行时失败（远端操作、本地提交等） |
-| 2 | 参数错误（含调用 2.0 已移除的 `rehost-exit`，提示改用 `migrate-exit --to <新 IP>`）、配置与 state 不一致、设备操作被拒；省略 `--id` 时没有配置或有多条；`up` 已有配置但地址或 `--exit-bind` 不同；`qr` 没有这台设备；设置了 `EXIT_BIND_IPV4` 的链迁到另一台出口机 |
+| 2 | 参数错误（含调用 2.0 已移除的 `rehost-exit`，提示改用 `migrate-exit --to <新 IP>`）、配置与 state 不一致、设备操作被拒；省略 `--id` 时没有配置或有多条；`up` 已有配置但地址或 `--exit-bind` 不同；`qr` 没有这台设备；设置了 `EXIT_BIND_IPV4` 的链迁到另一台出口机；`change-port` 指定的端口等于当前端口，或新端口在中转上已被占用 |
 | 3 | 预检 / 检查失败、远端不可达或主机指纹不符（`preflight` 的失败一律为 3；`init` / `up` 配免密或探测失败也是 3）；`deploy` / `up` 部署前自检发现路由经 TUN 且未加 `--allow-tun`；`preflight` / `deploy` / `up` / `migrate-exit` 发现 `EXIT_BIND_IPV4` 不在出口机网卡上，或出口机没有 `ip` 命令无法核对（`verify` 发现时按下一行为 5） |
 | 4 | `deploy` / `up` 的部署阶段失败（远端不可达仍为 3；迁移进行中被拒也是 4）；`migrate-exit` 发现新出口机上已有本链文件 |
-| 5 | `status` 不健康（busy / stale_lock / incomplete / unreachable / orphaned / drifted）、`verify` 失败；`qr` 链未部署、锁忙 / 陈旧、节点文件与 state 不一致；其它命令的锁、state 损坏、未完成事务或收尾 verify 失败；出口机迁移进行中时 rebaseline / rotate-keys / add-device / remove-device 被拒 |
+| 5 | `status` 不健康（busy / stale_lock / incomplete / unreachable / orphaned / drifted）、`verify` 失败；`qr` 链未部署、锁忙 / 陈旧、节点文件与 state 不一致；其它命令的锁、state 损坏、未完成事务或收尾 verify 失败；出口机迁移进行中时 rebaseline / rotate-keys / change-port / add-device / remove-device 被拒；`change-port` 发现中转 socket drift、本机设备节点与 devices.env 不一致或远端健康预检失败（远端未改动） |
 | 6 | `rollback` 预校验或执行失败（含出口机迁移进行中被拒） |
 
 ### 输出
@@ -232,6 +234,7 @@ stdout 上的下列行冻结；stderr 上 `[chain][<子命令>] INFO / WARN / ER
 | 行首 | 整行格式 | 命令 |
 | ---- | ---- | ---- |
 | `rotate=done` | `rotate=done chain=<链> result=<fresh / resumed / already / resumed-after-commit>` | rotate-keys |
+| `port=changed` | `port=changed chain=<链> old=<旧端口> new=<新端口> result=<fresh / resumed>` | change-port（收尾 verify 通过后） |
 | `device=added` | `device=added chain=<链> name=<名字> node=<路径> result=<…>` | add-device |
 | `device=removed` | `device=removed chain=<链> name=<名字> result=<…>` | remove-device |
 | `rehost=noop` | `rehost=noop chain=<链> next=run-verify` | migrate-exit（同机切换已完成、无需再迁时） |

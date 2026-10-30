@@ -144,7 +144,7 @@ git clone https://github.com/jakoes-wu/ownexit && cd ownexit
 
 2. **导入**：结束时终端直接打印节点二维码和 `vless://` 链接（随时再看：`ownexit chain qr`）；在设备上打开 `https://ipinfo.io`，应显示出口机的 IP。
 
-日常操作（只有一条链时不用带 `--id`）：`ownexit chain status | verify | conns | rollback`。`ownexit chain rotate-keys` 原地更换出口机全部设备的 UUID、Reality 密钥和 short id（中转、端口、部署不变，之后重新导入）。`add-device <名字>` / `remove-device <名字>` / `list-devices` 管理每台设备的 UUID，`qr --device <名字>` 看某台设备的二维码。有多条链时加 `--id <名字>`。中转机上同时跑着直连、并且你迁移、改参数或卸载了这台的直连时，之后运行一次 `ownexit chain rebaseline`，让链重新登记它要保护的服务（直连脚本会提醒你）。中转机被墙了？用 `init --id backup …` 再部署一台中转，再用 `multi_chain_client.sh` 把两条链合在一起，客户端会自动切换。完整参考见 [chain/README.md](chain/README.md)，逐步说明见 [docs/manual/chain.md](docs/manual/chain.md)。
+日常操作（只有一条链时不用带 `--id`）：`ownexit chain status | verify | conns | rollback`。`ownexit chain rotate-keys` 原地更换出口机全部设备的 UUID、Reality 密钥和 short id（中转、端口、部署不变，之后重新导入）。某个网络下连不上、而同一中转的其它端口能通时，`ownexit chain change-port` 只把中转对外端口换成新端口，凭据不变，客户端只改节点端口。`add-device <名字>` / `remove-device <名字>` / `list-devices` 管理每台设备的 UUID，`qr --device <名字>` 看某台设备的二维码。有多条链时加 `--id <名字>`。中转机上同时跑着直连、并且你迁移、改参数或卸载了这台的直连时，之后运行一次 `ownexit chain rebaseline`，让链重新登记它要保护的服务（直连脚本会提醒你）。中转机被墙了？用 `init --id backup …` 再部署一台中转，再用 `multi_chain_client.sh` 把两条链合在一起，客户端会自动切换。完整参考见 [chain/README.md](chain/README.md)，逐步说明见 [docs/manual/chain.md](docs/manual/chain.md)。
 
 ## 支持的平台
 

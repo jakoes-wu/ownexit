@@ -71,6 +71,7 @@ chain/setup_chain.sh --id main verify     # full check of the exit
 chain/setup_chain.sh --id main conns      # which source IPs are connected to the relay
 chain/setup_chain.sh --id main ban 203.0.113.7    # block an unknown source
 chain/setup_chain.sh --id main rotate-keys   # replace the UUID and Reality key / short id of every device
+chain/setup_chain.sh --id main change-port   # change only the relay's public port (optionally --port <n>); credentials stay
 chain/setup_chain.sh --id main add-device phone      # add a device (its node is devices/node-phone.txt in the state directory)
 chain/setup_chain.sh --id main remove-device phone   # revoke a device
 chain/setup_chain.sh --id main rollback   # tear down this chain and restore both machines to their pre-deploy state
@@ -81,7 +82,11 @@ The relay port has no authentication: when `conns` shows a source IP you do not 
 
 `rotate-keys` only replaces the credentials on the exit and restarts the exit's sing-box (1–3 seconds of downtime); the relay, ports and deployment stay the same. Afterwards every client must import again, and combined multi-chain output must be `render`ed again. `add-device` / `remove-device` give each device its own UUID, and revoking one does not affect the others; the credentials from deployment are the `default` device. If interrupted, rerun the same command to converge.
 
+`change-port` moves only the relay's public port to a new one; credentials, devices and the exit stay the same, and existing connections of this chain drop once. Afterwards, as the reminder says, set the port of the client node `Exit-via-Relay-<chain>` (and the device nodes) to the new value or import the node files again; combined multi-chain output must be `render`ed again. If interrupted, rerun `change-port` to converge.
+
 ## 6. The relay got blocked
+
+If only some networks cannot connect while other ports on the same relay work, first try `change-port` to move to another port (see the previous section) instead of deploying another relay. When the whole relay is unreachable:
 
 Prepare another relay and deploy a second chain (sharing the same exit):
 
@@ -133,5 +138,6 @@ It first works out whether the new address is the same machine, then:
 | SSH drops in the middle of an operation and `verify` reports drift | Local TUN may have taken over SSH to the relay; turn TUN off (or route the relay's and exit's IPs directly as in [clash-direct-ips.en.md](clash-direct-ips.en.md)) and rerun |
 | "The configuration directory's ownership or permissions are unsafe" | Some parent of the configuration / state directory is writable by the group or others (for example mode 775); move to a directory tree with modes 755 / 700 |
 | "The relay and the exit must have the same CPU architecture" | One machine is amd64 and the other arm64, which is not supported yet |
+| After an interrupted `change-port`, `status` reports `drifted` and `rollback` refuses to run | The relay already uses the new port while the local state still has the old one; rerun `change-port` to converge (add `--port <n>` if the new port cannot be bound) |
 | `status` prints `reason=exit-op-pending`, or `verify` / `rollback` report "… unfinished credential or device operation …" | The last `rotate-keys` / `add-device` / `remove-device` did not finish and left helper files on the exit; rerun the interrupted command |
 | `verify` / `status` / `rollback` report "The relay's dependency, firewall or role declaration preflight failed" or "The zero-regression baseline of the relay's existing sing-box changed", and the relay also runs direct | Direct was just migrated, reconfigured, freshly installed or uninstalled; run `chain/setup_chain.sh --id <name> rebaseline` to register it again (see [`chain/README.en.md`](../../chain/README.en.md#re-registering-an-existing-sing-box-on-the-relay-rebaseline)) |
