@@ -116,6 +116,9 @@ chain/setup_chain.sh --id main rebaseline
 # 更换出口机的 UUID / Reality 密钥 / short id（所有客户端需重新导入）
 chain/setup_chain.sh --id main rotate-keys
 
+# 只换中转对外端口（凭据不变，客户端只改节点端口）
+chain/setup_chain.sh --id main change-port
+
 # 多设备：每台设备一个 UUID，可单独吊销
 chain/setup_chain.sh --id main add-device phone
 chain/setup_chain.sh --id main remove-device phone
@@ -254,6 +257,21 @@ chain/setup_chain.sh --id main list-devices          # 只读：出口机上的�
 
 退出码：0 成功；2 参数错误、配置与 state 不一致，或设备操作被拒（远端码 201 已存在、202 超过上限、203 没有这台设备、204 default 不能吊销）；3 出口机不可达或主机指纹不符；5 锁、状态损坏、有未完成事务或收尾 verify 失败；1 远端操作或本地提交失败（远端码 191 配置文件身份异常、192 配置不是 deploy 生成的形态、193 配置被外部改动、194 新配置校验失败、195 新配置起不来且已恢复旧配置、196 恢复后仍起不来、197 清理时线上不是新配置、198 出口机 sing-box 二进制缺失、199 另一个操作未完成）。
 
+## 只换中转端口（`change-port`）
+
+```bash
+chain/setup_chain.sh --id main change-port               # 在 20000-59999 里随机选一个中转上空闲的端口
+chain/setup_chain.sh --id main change-port --port 31234  # 指定新端口
+```
+
+某个网络下这条链连不上、而中转机本身没被整体封掉（同一中转的其它端口能通）时，先试这个命令，不用 rollback 加 deploy。它只改中转 socket unit 的 `ListenStream=0.0.0.0:<端口>` 一行，然后停本链 service、重启本链 socket、确认新端口在听而旧端口已放开、再把 service 拉起；UUID、Reality 密钥、short id、设备、出口机、service 与 owner 都不变。本链现有连接会断开一次。接着用新端口重写本机 `client/node.txt` 与 `devices/node-*.txt`，提交 state（旧 state 归档在 `audit/port-changed.<部署ID>.<操作ID>/`），最后跑一遍完整 `verify`，成功时输出 `port=changed chain=<链> old=<旧端口> new=<新端口> result=<fresh / resumed>`。
+
+state 一提交就会打出提示（即使之后的核验失败）：把客户端节点 `Exit-via-Relay-<链>` 和各设备节点 `Exit-via-Relay-<链>_<名字>` 的端口改成新值，或重新导入节点文件；用了 `multi_chain_client.sh` 的要重新 `render`。换了之后在你的网络下仍然不通，就再跑一次换一个端口。
+
+改远端之前会先核对：本机设备节点与 `devices/devices.env` 一致、中转 socket 与 state 一致、中转与出口机的完整健康检查通过，任何一项不过都以退出 5 结束、远端不动。中途断开时直接重跑 `change-port`：新端口以中转上的 socket 文件为准（`result=resumed`），不用记住上次选了哪个；旧端口在中断期间不再可用，中断状态下 `status` 报 `drifted`、`rollback` 拒绝执行，先重跑 change-port。上次选的端口绑不上时重跑会再失败，这时加 `--port <n>` 换一个。
+
+退出码：0 成功；2 参数错误、`--port` 等于当前端口或已被占用、配置与 state 不一致；3 SSH 不可达、选不出端口或平台预检失败；5 锁、迁移进行中、未完成事务、中转 socket drift、设备节点不一致、远端健康预检失败或收尾 verify 失败；1 中转新端口未能生效（远端码 235 重启失败或拉不起来、236 新端口未监听、237 旧端口仍在监听），或收尾核验里的本机冒烟失败。远端码 231–233（socket 文件身份异常 / 端口行不是恰好 1 行 / 与 state 不符）为 5，234（新端口被占）为 2。
+
 ## 出口机换 IP（同一台机器）
 
 服务商给出口机换了公网 IP、机器本身没换（ed25519 主机指纹不变）时，直接运行 `migrate-exit --to <新 IP>`，不要 rollback 加 deploy：rollback 要连旧 IP，deploy 会重新生成凭据，所有客户端都得重新导入。
@@ -285,7 +303,7 @@ chain/setup_chain.sh --id main migrate-exit --abandon-cleanup              # 迁
 
 过程：给新机器配免密（第一次问一次 root 密码，非终端时用 `OWNEXIT_SSH_PASSWORD`；输入密码期间持有全局锁，其它链的 deploy 会等待）→ 在新机器上问 ipinfo.io 得到新的出口 IP（终端里要确认）→ 写迁移记录 `<状态目录>/chains/<id>/migrate-exit.env`，备份配置为 `<id>.env.bak.<时间>` 后改写其中 `EXIT_HOST` / `EXIT_SSH_PORT` / `EXIT_SSH_KEY` / `EXPECTED_EXIT_IPV4` 四行 → 新机器装固定版本 sing-box，把旧机器的配置经本机内存搬过去（不落本机磁盘），沿用原端口（被占用时另选），启动服务 → 切换前探针（出口 IP、经中转直连新机器的 Reality 握手、非中转来源被拒）→ 中转转发目标切到新机器（relay 重启一次，在途连接断开，客户端自动重连）→ 核验后提交本地状态（旧状态归档到 `audit/migrated.<部署ID>.<操作ID>/`）→ 停止并删除旧出口机上本链的服务、配置、单元与白名单 → 自动完整 verify。成功时 stdout 输出 `migrate=done chain=<id> exit=<新 IP>:<端口> old_exit_cleanup=done`。
 
-中途断开时重跑同一条命令（`--to` 必须相同）：实际进度按现场判断（配置、状态、中转指向哪台出口机），已完成的步骤不会重做。中转切换之前可以 `--abort`：拆掉新机器上的半成品、恢复原配置，链回到旧出口机，输出 `migrate=aborted`；中转已经切换后只能继续完成。迁移进行中 `status` 输出 `status=drifted reason=exit-migration-pending next=rerun-interrupted-command`，deploy、rollback、rebaseline、rotate-keys、add-device、remove-device 拒绝执行。清理旧机器时 SSH 不通，输出 `old_exit_cleanup=pending` 并保留记录，旧机器恢复后重跑补做；永久失联用 `--abandon-cleanup`（旧机器上本链的配置含私钥会留下，需自行销毁该机器）。
+中途断开时重跑同一条命令（`--to` 必须相同）：实际进度按现场判断（配置、状态、中转指向哪台出口机），已完成的步骤不会重做。中转切换之前可以 `--abort`：拆掉新机器上的半成品、恢复原配置，链回到旧出口机，输出 `migrate=aborted`；中转已经切换后只能继续完成。迁移进行中 `status` 输出 `status=drifted reason=exit-migration-pending next=rerun-interrupted-command`，deploy、rollback、rebaseline、rotate-keys、change-port、add-device、remove-device 拒绝执行。清理旧机器时 SSH 不通，输出 `old_exit_cleanup=pending` 并保留记录，旧机器恢复后重跑补做；永久失联用 `--abandon-cleanup`（旧机器上本链的配置含私钥会留下，需自行销毁该机器）。
 
 设置了 `EXIT_BIND_IPV4` 的链不能迁到另一台机器（绑定地址是旧机器网卡上的地址），命令以退出 2 拒绝且不做任何改动；先 rollback，再在新机器上用 `--exit-bind` 重新 init / deploy。
 

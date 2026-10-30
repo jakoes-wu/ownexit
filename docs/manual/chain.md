@@ -69,6 +69,7 @@ chain/setup_chain.sh --id main verify     # 完整验证出口
 chain/setup_chain.sh --id main conns      # 中转机上有哪些来源 IP 在连
 chain/setup_chain.sh --id main ban 203.0.113.7    # 拉黑陌生来源
 chain/setup_chain.sh --id main rotate-keys   # 更换全部设备的 UUID 与 Reality 密钥 / short id
+chain/setup_chain.sh --id main change-port   # 只换中转对外端口（可加 --port <n>），凭据不变
 chain/setup_chain.sh --id main add-device phone      # 新增一台设备（节点在状态目录 devices/node-phone.txt）
 chain/setup_chain.sh --id main remove-device phone   # 吊销一台设备
 chain/setup_chain.sh --id main rollback   # 拆除这条链，两台机器恢复到部署前
@@ -79,7 +80,11 @@ ownexit doctor --chain main --ip-check    # 诊断本机与这条链，并在出
 
 `rotate-keys` 只换出口机上的凭据并重启出口机的 sing-box（中断 1-3 秒），中转、端口和部署都不变；换完所有客户端要重新导入，用了多链聚合的要重新 `render`。`add-device` / `remove-device` 给每台设备单独一个 UUID，吊销一台不影响其它设备；部署时的那套凭据就是 `default`。中途断开时重跑同一条命令收敛。
 
+`change-port` 只把中转对外端口换成新端口，凭据、设备、出口机都不变；本链现有连接断开一次。换完按提示把客户端节点 `Exit-via-Relay-<链>`（及设备节点）的端口改成新值，或重新导入节点文件，用了多链聚合的要重新 `render`。中途断开时重跑 `change-port` 收敛。
+
 ## 6. 中转机被墙了怎么办
+
+只有个别网络下连不上、同一中转机的其它端口能通时，先试 `change-port` 换个端口（见上一节），不用另部署中转。整台中转机都不通时：
 
 再准备一台中转机，部署第二条链（共用同一台出口机）：
 
@@ -131,5 +136,6 @@ chain/setup_chain.sh migrate-exit --to <新 IP>
 | 操作中途 SSH 断开、`verify` 报 drift | 本机 TUN 可能接管了到中转机的 SSH；关闭 TUN（或按 [clash-direct-ips.md](clash-direct-ips.md) 让中转机、出口机的 IP 走直连）后重跑 |
 | 报“配置目录身份或权限不安全” | 配置 / 状态目录的某一级上级目录可被同组或其他用户写入（如权限 775）；换到权限为 755 / 700 的目录下 |
 | 报“中转机与出口机的 CPU 架构必须相同” | 两台机器一台 amd64、一台 arm64，暂不支持 |
+| `change-port` 中途断开后 `status` 报 `drifted`、`rollback` 拒绝执行 | 中转已改到新端口、本机 state 还是旧端口；重跑 `change-port` 收敛（新端口绑不上时加 `--port <n>` 换一个） |
 | `status` 输出 `reason=exit-op-pending`，或 `verify` / `rollback` 报“有未完成的凭据或设备操作” | 上一次 `rotate-keys` / `add-device` / `remove-device` 没跑完，出口机上留着辅助文件；重跑中断的那条命令 |
 | `verify` / `status` / `rollback` 报“角色声明预检失败”或“既有 sing-box 零回归基线发生变化”，且中转机上也跑着直连 | 直连刚迁移、改参数、新装或卸载过，运行 `chain/setup_chain.sh --id <名字> rebaseline` 重新登记（见 [`chain/README.md`](../../chain/README.md#中转机既有-sing-box-重新登记rebaseline)） |

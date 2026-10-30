@@ -95,6 +95,11 @@ MIGRATE_TO_PORT_GIVEN=0
 ALLOW_TUN=0
 # qr 子命令要显示的设备名；空 = default（client/node.txt）。
 QR_DEVICE=''
+# change-port 的 --port 值；空 = 随机选。
+CHPORT_REQUESTED=''
+# change-port 的中转 socket 现状（fresh / already）与文件里当前的端口，由 chport_inspect 填写。
+CHPORT_INSPECT=''
+CHPORT_FILE_PORT=''
 # up 子命令进行中：init_chain 不打印“next=deploy”提示并在配免密前做 TUN 自检，deploy_chain 不再重复自检。
 UP_MODE=0
 # init / up 的参数是否显式给出：up 对已有配置只比较显式给出的项，未给的以配置为准（否则只敲 chain up 就会被判“地址不同”）。
@@ -205,6 +210,7 @@ Usage:
   $(basename "${SCRIPT_PATH}") --config <absolute path> banlist
   $(basename "${SCRIPT_PATH}") --config <absolute path> rebaseline
   $(basename "${SCRIPT_PATH}") --config <absolute path> rotate-keys
+  $(basename "${SCRIPT_PATH}") --config <absolute path> change-port [--port <n>]
   $(basename "${SCRIPT_PATH}") --config <absolute path> add-device <name>
   $(basename "${SCRIPT_PATH}") --config <absolute path> remove-device <name>
   $(basename "${SCRIPT_PATH}") --config <absolute path> list-devices
@@ -243,6 +249,10 @@ What each does (grouped by how often it is used):
                updates node files and state, and finishes with a full verify; relay, ports and deployment ID stay the same.
                Every client must re-import (multi-chain bundles need a new render). If it fails midway, rerun the same
                command to converge.
+  change-port  moves the relay's public port to a new one (random, or --port <n>); UUID, keys, devices and the exit stay
+               the same. Updates node files and state, then runs a full verify. Clients only change the port of node
+               Exit-via-Relay-<chain> (and its device nodes), or re-import; multi-chain bundles need a new render.
+               Existing connections of this chain drop once. If it fails midway, rerun change-port to converge.
   migrate-exit use it whenever the exit changed (new IP or new machine); clients do not need to re-import:
                - same machine at a new address (the provider changed the IP): detected automatically; registers the host key
                  of the new IP, rewrites the configuration, switches the relay's forwarding target and local state in place,
@@ -281,6 +291,8 @@ Arguments:
                         these IPs go through the physical interface as in docs/manual/clash-direct-ips.en.md.
   --device <name>       qr: show that device's node QR code; without it show default.
   --to <ipv4>           new exit address for migrate-exit; --to-port the new exit's SSH port, default 22.
+  --port <n>            change-port: the new public relay port (1-65535, not the current one, free on the relay);
+                        without it a free port in 20000-59999 is picked at random.
   --abort               migrate-exit gives up before the relay switch: removes the half-built service on the new machine
                         and restores the original configuration.
   --abandon-cleanup     skip the cleanup when the old exit is gone for good after migrate-exit committed (this chain's
@@ -320,6 +332,8 @@ Typical use:
   $(basename "${SCRIPT_PATH}") --id main migrate-exit --to 203.0.113.30
   $(basename "${SCRIPT_PATH}") --id main migrate-exit --to 203.0.113.30 --to-port 2222
   $(basename "${SCRIPT_PATH}") --id main migrate-exit --abort
+  $(basename "${SCRIPT_PATH}") --id main change-port
+  $(basename "${SCRIPT_PATH}") --id main change-port --port 31234
 
 Safety boundary:
   the script does not change firewalls, cloud security groups, or existing sing-box configurations.
@@ -350,6 +364,7 @@ EOF
   $(basename "${SCRIPT_PATH}") --config <绝对路径> banlist
   $(basename "${SCRIPT_PATH}") --config <绝对路径> rebaseline
   $(basename "${SCRIPT_PATH}") --config <绝对路径> rotate-keys
+  $(basename "${SCRIPT_PATH}") --config <绝对路径> change-port [--port <n>]
   $(basename "${SCRIPT_PATH}") --config <绝对路径> add-device <名字>
   $(basename "${SCRIPT_PATH}") --config <绝对路径> remove-device <名字>
   $(basename "${SCRIPT_PATH}") --config <绝对路径> list-devices
@@ -380,6 +395,9 @@ EOF
   rotate-keys  在出口机上重新生成全部设备的 UUID 与 Reality 密钥 / short id，重启出口机 sing-box，更新节点文件
                与 state，最后自动完整 verify；中转、端口、部署 ID 不变。所有客户端都要重新导入
                （多链聚合需重新 render）。中途失败直接重跑同一条命令收敛。
+  change-port  把中转对外端口换成新端口（随机，或 --port <n> 指定）；UUID、密钥、设备、出口机都不变。更新节点
+               文件与 state，最后自动完整 verify。客户端只需把节点 Exit-via-Relay-<链>（及其设备节点）的端口改成
+               新值，或重新导入；多链聚合需重新 render。本链现有连接会断开一次。中途失败重跑 change-port 收敛。
   migrate-exit 出口机变了（换了 IP 或换了机器）都用它，客户端不用重新导入：
                - 新地址还是同一台机器（只是服务商换了 IP）：自动识别，登记新 IP 的主机密钥、改写配置，原地切换
                  中转转发目标与本地 state，最后完整 verify。旧 IP 连不上也行；SSH 端口要保持不变。
@@ -410,6 +428,8 @@ EOF
                         加它只警告继续。已按 docs/manual/clash-direct-ips.md 让这些 IP 走物理网卡时不需要。
   --device <名字>       qr：显示该设备的节点二维码；不带时显示 default。
   --to <ipv4>           migrate-exit 的新出口机地址；--to-port 新出口机 SSH 端口，默认 22。
+  --port <n>            change-port：中转新的对外端口（1-65535，不能是当前端口，且中转上空闲）；不带时在
+                        20000-59999 里随机选一个空闲端口。
   --abort               migrate-exit 在中转切换之前放弃迁移：拆掉新机器上的半成品，恢复原配置。
   --abandon-cleanup     migrate-exit 提交后旧出口机永久失联时放弃清理（本链配置含私钥会留在旧机器上）。
   <ipv4>                kick 只接受点分 IPv4；ban/unban 另接受 CIDR，且主机位必须为 0（如 198.51.100.0/24）。
@@ -445,6 +465,8 @@ EOF
   $(basename "${SCRIPT_PATH}") --id main migrate-exit --to 203.0.113.30
   $(basename "${SCRIPT_PATH}") --id main migrate-exit --to 203.0.113.30 --to-port 2222
   $(basename "${SCRIPT_PATH}") --id main migrate-exit --abort
+  $(basename "${SCRIPT_PATH}") --id main change-port
+  $(basename "${SCRIPT_PATH}") --id main change-port --port 31234
 
 安全边界:
   脚本不修改防火墙、云厂商安全组、现有 sing-box 配置。
@@ -770,7 +792,7 @@ parse_init_args() {
 # scripts/check_interface.sh 会比对这里的词与 parse_args 主 case 的分支词一致；加子命令时两处都要改。
 is_chain_subcommand() {
   case "${1:-}" in
-    preflight|deploy|status|rollback|conns|banlist|rebaseline|rotate-keys|list-devices|add-device|remove-device|verify|migrate-exit|kick|ban|unban|qr) return 0 ;;
+    preflight|deploy|status|rollback|conns|banlist|rebaseline|rotate-keys|change-port|list-devices|add-device|remove-device|verify|migrate-exit|kick|ban|unban|qr) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -845,6 +867,16 @@ parse_args() {
             [[ "$2" != default ]] || die 2 "$(L 'default 就是不带 --device 时显示的节点' 'default is the node shown without --device')"
             QR_DEVICE="$2"; shift 2 ;;
           *) die 2 "$(L 'qr 只接受可选的 --device <名字>' 'qr only accepts the optional --device <name>')" ;;
+        esac
+      done
+      ;;
+    change-port)
+      while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+          --port)
+            [[ -z "${CHPORT_REQUESTED}" && "$#" -ge 2 && "$2" =~ ^[1-9][0-9]{0,4}$ ]] && (( $2 <= 65535 )) || die 2 "$(L '--port 必须是 1-65535，且只能给一次' '--port must be 1-65535 and given only once')"
+            CHPORT_REQUESTED="$2"; shift 2 ;;
+          *) die 2 "$(L 'change-port 只接受可选的 --port <n>' 'change-port only accepts the optional --port <n>')" ;;
         esac
       done
       ;;
@@ -7858,6 +7890,327 @@ list_devices_chain() {
   done <<< "${names}"
 }
 
+# ---------- 只换中转对外端口：change-port（docs/feature/feature-chain-relay-port.md） ----------
+#
+# 用途：某些网络下中转的个别端口回程被拦时，只把中转 socket 的 ListenStream 换到新端口；UUID、Reality 密钥、
+# short id、设备、出口机、service 都不动，客户端只改节点端口。
+# 关键约束：
+#   - 不写本机意图文件：中断后新端口从中转 socket 文件反推（把唯一的 ListenStream 行换回 state 端口后，哈希必须
+#     等于 RELAY_SOCKET_SHA256），所以远端文件改动必须只限这一行。
+#   - state 最后提交；提交之前任何一步失败，重跑 change-port 都能收敛（inspect=already 续跑）。
+
+# 中转上执行的 socket 改端口脚本。mode=inspect 只读；mode=apply 改文件并让新端口生效。
+# 退出码：231 文件身份异常，232 ListenStream 不是恰好 1 行，233 与 state 不符（drift），234 新端口被占，
+# 235 socket / service 拉不起来，236 新端口未监听，237 旧端口仍在监听，99 测试钩子。
+write_chport_remote_script() {
+  local output
+  output="$1"
+  cat > "${output}" <<'CHPORT_REMOTE'
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+export LC_ALL=C
+mode="$1"
+chain_id="$2"
+state_hash="$3"
+state_port="$4"
+cur_port="${5:-}"
+new_port="${6:-}"
+test_stop="${7:--}"
+socket="/etc/systemd/system/ownexit-chain-relay-$chain_id.socket"
+socket_name="ownexit-chain-relay-$chain_id.socket"
+service_name="ownexit-chain-relay-$chain_id.service"
+tmp_in_flight=''
+scratch="$(mktemp /tmp/ownexit-chport.XXXXXX)"
+# 半写的 temp 会被 verify 的残留检查判 drift，任何退出路径都必须清掉。
+trap '[[ -z "$tmp_in_flight" ]] || rm -f "$tmp_in_flight"; rm -f "$scratch"' EXIT
+
+# 端口行按整行字符串比较（不用 sed 正则，点号会匹配任意字符）。
+count_line() { awk -v line="ListenStream=0.0.0.0:$2" '$0 == line {n++} END {print n + 0}' "$1"; }
+replace_line() { awk -v from="ListenStream=0.0.0.0:$2" -v to="ListenStream=0.0.0.0:$3" '{ if ($0 == from) print to; else print }' "$1"; }
+# ss 本身失败时直接退出 1，不能当成“没在监听”放行占用检查和旧端口释放检查。
+listening() { local out; out="$(ss -H -ltn)" || exit 1; awk -v suffix=":$1" 'substr($4, length($4)-length(suffix)+1) == suffix {found=1} END {exit found ? 0 : 1}' <<< "$out"; }
+file_hash() { sha256sum "$1" | awk '{print $1}'; }
+
+[[ -f "$socket" && ! -L "$socket" && "$(stat -c %u:%g:%a "$socket")" == 0:0:644 ]] || exit 231
+
+if [[ "$mode" == inspect ]]; then
+  if [[ "$(file_hash "$socket")" == "$state_hash" ]]; then
+    printf 'STATE=fresh\n'
+    exit 0
+  fi
+  # 哈希不等时只接受“上次已把唯一的端口行改到 P、其余逐字节不变”这一种形态。
+  # grep 无匹配返回 1，set -e 下用 || true 兜住，计数为 0 由下一行判定。
+  [[ "$(grep -cE '^ListenStream=0\.0\.0\.0:[1-9][0-9]{0,4}$' "$socket" || true)" == 1 ]] || exit 232
+  port="$(grep -E '^ListenStream=0\.0\.0\.0:[1-9][0-9]{0,4}$' "$socket")"
+  port="${port##*:}"
+  [[ "$port" != "$state_port" ]] || exit 233
+  replace_line "$socket" "$port" "$state_port" > "$scratch"
+  [[ "$(file_hash "$scratch")" == "$state_hash" ]] || exit 233
+  printf 'STATE=already\nPORT=%s\n' "$port"
+  exit 0
+fi
+
+[[ "$(count_line "$socket" "$cur_port")" == 1 ]] || exit 232
+# 守门：把 cur_port 那一行换回 state 端口后必须正好是 state 记录的文件，保证只动过这一行。
+replace_line "$socket" "$cur_port" "$state_port" > "$scratch"
+[[ "$(file_hash "$scratch")" == "$state_hash" ]] || exit 233
+if [[ "$cur_port" != "$new_port" ]]; then
+  ! listening "$new_port" || exit 234
+  tmp="$(dirname "$socket")/.$(basename "$socket").chport.$$.tmp"
+  tmp_in_flight="$tmp"
+  replace_line "$socket" "$cur_port" "$new_port" > "$tmp"
+  chown root:root "$tmp"
+  chmod 644 "$tmp"
+  # 同目录 mv 是原子替换：读者只会看到完整的旧文件或完整的新文件。
+  mv -f "$tmp" "$socket"
+  tmp_in_flight=''
+  result=changed
+  [[ "$test_stop" != file ]] || exit 99
+else
+  result=already
+fi
+systemctl daemon-reload
+# Accept=no 时监听 fd 由 proxyd 持有：不先停 service，旧端口会被它继续监听。本链现有连接在这里断开一次。
+systemctl stop "$service_name" || exit 235
+systemctl restart "$socket_name" || exit 235
+[[ "$(systemctl is-active "$socket_name" || true)" == active ]] || exit 235
+listening "$new_port" || exit 236
+! listening "$state_port" || exit 237
+# 上面为放开旧端口停了 service，这里拉回来；否则收尾核验早退时 service 一直停着，rollback 预检会判 drift。
+systemctl start "$service_name" || exit 235
+[[ "$(systemctl is-active "$service_name" || true)" == active ]] || exit 235
+printf 'SOCKET=%s\n' "$result"
+printf 'SOCKET_SHA256=%s\n' "$(file_hash "$socket")"
+CHPORT_REMOTE
+  chmod 600 "${output}"
+}
+
+chport_remote_reason() {
+  case "$1" in
+    231) printf "$(L '231 中转 socket 文件身份或权限异常（要求 root:root 644、非链接）' '231 relay socket file identity or permissions abnormal (root:root 644, not a link, required)')" ;;
+    232) printf "$(L '232 中转 socket 文件里 ListenStream=0.0.0.0:<端口> 不是恰好 1 行' '232 ListenStream=0.0.0.0:<port> in the relay socket file is not exactly 1 line')" ;;
+    233) printf "$(L '233 中转 socket 文件与 state 记录的哈希不符，且不是只改了端口的形态（drift）' '233 the relay socket file does not match the hash recorded in the state and is not in the port-only-changed form (drift)')" ;;
+    234) printf "$(L '234 新端口已被别的程序监听' '234 the new port is already listened on by another program')" ;;
+    235) printf "$(L '235 socket 重启失败、socket 未进入 active，或 service 拉不起来' '235 restarting the socket failed, the socket did not become active, or the service could not be started')" ;;
+    236) printf "$(L '236 新端口未在监听' '236 the new port is not being listened on')" ;;
+    237) printf "$(L '237 旧端口仍在监听' '237 the old port is still being listened on')" ;;
+    255) printf "$(L '255 SSH 不可达或会话中断' '255 SSH unreachable or session dropped')" ;;
+    *) printf "$(L '%s 远端脚本异常退出' '%s the remote script exited abnormally')" "$1" ;;
+  esac
+}
+
+chport_test_stop() {
+  if [[ "${OWNEXIT_TEST_CHPORT_STOP_AFTER:-}" == "$1" ]]; then
+    log_warn "$(L "测试钩子：${COMMAND} 在 $1 之后停止" "Test hook: ${COMMAND} stops after $1")"
+    exit 99
+  fi
+}
+
+# 本机设备节点核对（改远端之前）：以 devices/devices.env（name=uuid）为准，节点文件集合必须与它一致，
+# 每个文件要么与按 state 端口渲染的结果逐字节相同，要么只有 @<中转>:<端口> 的端口不同（上次在发布节点时中断）。
+# 换端口只重渲染端口，不能把手改过或缺失的设备节点带过去，所以不一致就停。
+chport_check_devices() {
+  local devices_dir env names name uuid file expected port saved_port bad
+  devices_dir="${CHAIN_STATE_DIR}/devices"
+  [[ -d "${devices_dir}" || -L "${devices_dir}" ]] || return 0
+  bad="$(L "本机设备节点文件与 devices.env 不一致，远端未改动；对该设备重跑 add-device / remove-device，或检查文件是否被手动改过" "The local device node files disagree with devices.env; nothing was changed on the remote; rerun add-device / remove-device for that device, or check whether the files were edited by hand")"
+  private_dir_is_safe "${devices_dir}" || die 5 "$(L 'devices 目录身份异常' 'The devices directory has an unexpected identity')"
+  env="${devices_dir}/devices.env"
+  names=''
+  if [[ -e "${env}" || -L "${env}" ]]; then
+    require_secure_user_file "${env}" 600 || die 5 "$(L 'devices.env 身份异常' 'devices.env has an unexpected identity')"
+    names="$(awk -F= 'NF {print $1}' "${env}")"
+  fi
+  for file in "${devices_dir}"/node-*.txt; do
+    [[ -e "${file}" || -L "${file}" ]] || continue
+    name="$(basename "${file}" .txt)"
+    name="${name#node-}"
+    printf '%s\n' "${names}" | awk -v n="${name}" '$0 == n {f=1} END {exit f ? 0 : 1}' || die 5 "${bad}: ${name}"
+  done
+  expected="${OP_TMP}/chport-device-node"
+  saved_port="${RELAY_PORT}"
+  while IFS='=' read -r name uuid; do
+    [[ -n "${name}" ]] || continue
+    file="${devices_dir}/node-${name}.txt"
+    require_secure_user_file "${file}" 600 || die 5 "${bad}: ${name}"
+    render_device_node "${expected}" "${name}" "${uuid}"
+    cmp -s "${file}" "${expected}" && continue
+    # @<中转>: 只能出现一次，端口为纯数字；以该端口重渲染后必须逐字节相同。
+    port="$(awk -v needle="@${RELAY_HOST}:" '{
+      s = $0
+      while ((i = index(s, needle)) > 0) {
+        n++; s = substr(s, i + length(needle))
+        if (n == 1) { j = index(s, "?"); p = j ? substr(s, 1, j - 1) : "" }
+      }
+    } END { if (n == 1 && p ~ /^[1-9][0-9]*$/ && length(p) <= 5) print p; else exit 1 }' "${file}")" || die 5 "${bad}: ${name}"
+    RELAY_PORT="${port}"
+    render_device_node "${expected}" "${name}" "${uuid}"
+    RELAY_PORT="${saved_port}"
+    cmp -s "${file}" "${expected}" || die 5 "${bad}: ${name}"
+  done <<< "$(cat "${env}" 2>/dev/null || true)"
+  rm -f "${expected}"
+}
+
+# 只读判定中转 socket 现状：CHPORT_INSPECT=fresh（与 state 一致）/ already（上次已改到 CHPORT_FILE_PORT）。
+chport_inspect() {
+  local script output rc state port
+  script="${OP_TMP}/chport-remote.sh"
+  write_chport_remote_script "${script}"
+  if output="$(ssh_relay_stdin bash -s -- inspect "${CHAIN_ID}" "${RELAY_SOCKET_SHA256}" "${RELAY_PORT}" < "${script}")"; then rc=0; else rc="$?"; fi
+  case "${rc}" in
+    0) ;;
+    255) die 3 "$(L "读取中转 socket 失败：$(chport_remote_reason 255)" "Reading the relay socket failed: $(chport_remote_reason 255)")" ;;
+    231|232|233) die 5 "$(L "中转 socket 与 state 不一致：$(chport_remote_reason "${rc}")；远端未改动" "The relay socket disagrees with the state: $(chport_remote_reason "${rc}"); nothing was changed on the remote")" ;;
+    *) die 1 "$(L "读取中转 socket 失败：$(chport_remote_reason "${rc}")" "Reading the relay socket failed: $(chport_remote_reason "${rc}")")" ;;
+  esac
+  state="$(rehost_output_value "${output}" STATE)"
+  port="$(rehost_output_value "${output}" PORT)"
+  case "${state}" in
+    fresh) CHPORT_INSPECT=fresh; CHPORT_FILE_PORT="${RELAY_PORT}" ;;
+    already)
+      [[ "${port}" =~ ^[1-9][0-9]{0,4}$ ]] && (( port <= 65535 )) || die 1 "$(L '中转 socket 检查输出格式异常（PORT）' 'Unexpected output format from the relay socket check (PORT)')"
+      CHPORT_INSPECT=already; CHPORT_FILE_PORT="${port}" ;;
+    *) die 1 "$(L '中转 socket 检查输出格式异常（STATE）' 'Unexpected output format from the relay socket check (STATE)')" ;;
+  esac
+  log_info "[chport] inspect=${CHPORT_INSPECT} port=${CHPORT_FILE_PORT}"
+}
+
+# 让新端口在中转上生效；成功后 RELAY_PORT / RELAY_SOCKET_SHA256 是新值（尚未提交 state）。
+chport_apply() {
+  local new_port script output rc test_stop result hash
+  new_port="$1"
+  script="${OP_TMP}/chport-remote.sh"
+  write_chport_remote_script "${script}"
+  test_stop='-'
+  [[ "${OWNEXIT_TEST_CHPORT_STOP_AFTER:-}" != file ]] || test_stop='file'
+  if output="$(ssh_relay_stdin bash -s -- apply "${CHAIN_ID}" "${RELAY_SOCKET_SHA256}" "${RELAY_PORT}" "${CHPORT_FILE_PORT}" "${new_port}" "${test_stop}" < "${script}")"; then rc=0; else rc="$?"; fi
+  if [[ "${rc}" -eq 99 && "${test_stop}" != - ]]; then
+    log_warn "$(L "测试钩子：${COMMAND} 在远端 ${test_stop} 之后停止" "Test hook: ${COMMAND} stops after remote ${test_stop}")"
+    exit 99
+  fi
+  case "${rc}" in
+    0) ;;
+    255) die 3 "$(L "中转改端口失败：$(chport_remote_reason 255)；重跑 change-port 收敛" "Changing the relay port failed: $(chport_remote_reason 255); rerun change-port to converge")" ;;
+    231|232|233) die 5 "$(L "中转 socket 与 state 不一致：$(chport_remote_reason "${rc}")" "The relay socket disagrees with the state: $(chport_remote_reason "${rc}")")" ;;
+    234)
+      if [[ -n "${CHPORT_REQUESTED}" ]]; then
+        die 2 "$(L "端口 ${new_port} 已被中转上别的程序占用；换一个 --port 重跑，远端未改动" "Port ${new_port} is already used by another program on the relay; rerun with a different --port; nothing was changed on the remote")"
+      fi
+      die 2 "$(L "随机选的端口 ${new_port} 刚被别的程序占用；直接重跑会重新随机选，远端未改动" "The randomly chosen port ${new_port} was just taken by another program; rerunning picks a new one; nothing was changed on the remote")"
+      ;;
+    235|236|237) die 1 "$(L "中转新端口未能生效：$(chport_remote_reason "${rc}")；重跑 change-port，仍不行就加 --port <n> 换一个端口" "The new relay port did not take effect: $(chport_remote_reason "${rc}"); rerun change-port, and if it still fails add --port <n> to pick another port")" ;;
+    *) die 1 "$(L "中转改端口失败：$(chport_remote_reason "${rc}")；重跑 change-port 收敛" "Changing the relay port failed: $(chport_remote_reason "${rc}"); rerun change-port to converge")" ;;
+  esac
+  result="$(rehost_output_value "${output}" SOCKET)"
+  hash="$(rehost_output_value "${output}" SOCKET_SHA256)"
+  [[ "${result}" =~ ^(changed|already)$ && "${hash}" =~ ^[0-9a-f]{64}$ ]] || die 1 "$(L '中转改端口输出格式异常' 'Unexpected output format from the relay port change')"
+  RELAY_PORT="${new_port}"
+  RELAY_SOCKET_SHA256="${hash}"
+  log_info "[chport] socket=${result} new=${new_port}"
+}
+
+# 以新端口重写 client/node.txt 与各设备节点（UUID 取自 devices.env），临时文件命名与 rotate-keys 相同，
+# 这样 verify 的残留检查、rollback 与下次 change-port 开头的清理都能覆盖。
+chport_publish_nodes() {
+  local tmp devices_dir name uuid
+  tmp="${CHAIN_STATE_DIR}/.node.txt.rotate.${OPERATION_ID}.tmp"
+  render_node_artifact "${tmp}"
+  NODE_SHA256="$(sha256_file "${tmp}")"
+  mv -f "${tmp}" "${CHAIN_STATE_DIR}/client/node.txt" || die 1 "$(L 'node.txt 替换失败' 'Replacing node.txt failed')"
+  require_secure_user_file "${CHAIN_STATE_DIR}/client/node.txt" 600 || die 1 "$(L 'node.txt 替换后身份异常' 'node.txt has an unexpected identity after replacement')"
+  [[ "$(sha256_file "${CHAIN_STATE_DIR}/client/node.txt")" == "${NODE_SHA256}" ]] || die 1 "$(L 'node.txt 替换后 hash 不符' 'node.txt hash mismatch after replacement')"
+  devices_dir="${CHAIN_STATE_DIR}/devices"
+  if [[ -f "${devices_dir}/devices.env" ]]; then
+    # 末行缺换行时也要处理最后一个设备，与 chport_check_devices 的读法保持一致。
+    while IFS='=' read -r name uuid || [[ -n "${name}" ]]; do
+      [[ -n "${name}" ]] || continue
+      tmp="${devices_dir}/.node-${name}.txt.${OPERATION_ID}.tmp"
+      render_device_node "${tmp}" "${name}" "${uuid}"
+      mv -f "${tmp}" "${devices_dir}/node-${name}.txt" || die 1 "$(L "设备 ${name} 节点文件替换失败" "Replacing the node file of device ${name} failed")"
+      require_secure_user_file "${devices_dir}/node-${name}.txt" 600 || die 1 "$(L "设备 ${name} 节点文件替换后身份异常" "The node file of device ${name} has an unexpected identity after replacement")"
+    done < "${devices_dir}/devices.env"
+  fi
+  log_info '[chport] node files published'
+}
+
+# 提交新 state（结构同 commit_rehost_state）：此时全局变量里 RELAY_PORT、RELAY_SOCKET_SHA256、NODE_SHA256 是新值，
+# 其余字段原样沿用 state。不用 commit_exit_op_state：它会用 ROTATE_NEW_EXIT_SHA256 覆盖 EXIT_EXIT_SHA256。
+commit_chport_state() {
+  local audit payload
+  ensure_private_dir "${CHAIN_STATE_DIR}/audit" || die 1 "$(L 'audit 父目录不安全' 'The audit parent directory is unsafe')"
+  audit="${CHAIN_STATE_DIR}/audit/port-changed.${DEPLOYMENT_ID}.${OPERATION_ID}"
+  [[ ! -e "${audit}" && ! -L "${audit}" ]] || die 1 "$(L "audit 目录碰撞：${audit}" "Audit directory collision: ${audit}")"
+  mkdir "${audit}" || die 1 "$(L 'audit 目录创建失败' 'Creating the audit directory failed')"
+  chmod 700 "${audit}" || die 1 "$(L 'audit 目录权限设置失败' 'Setting the audit directory'\''s permissions failed')"
+  # 直接写最终文件名：audit 下以 . 开头的 *.tmp 会被残留检查判 drift。
+  cp "${STATE_FILE}" "${audit}/state.env" || die 1 "$(L '旧 state 归档失败' 'Archiving the old state failed')"
+  chmod 600 "${audit}/state.env" || die 1 "$(L '旧 state 归档权限设置失败' 'Setting permissions on the archived old state failed')"
+  [[ "$(sha256_file "${audit}/state.env")" == "$(sha256_file "${STATE_FILE}")" ]] || die 1 "$(L '旧 state 归档复核失败' 'Re-checking the archived old state failed')"
+  payload="${OP_TMP}/state-payload"
+  render_state_payload "${payload}" || die 1 "$(L 'state payload 生成失败' 'Generating the state payload failed')"
+  write_checksummed_file "${STATE_FILE}" replace "${payload}"
+  if probe_state_file "${STATE_FILE}"; then :; else die 1 "$(L "提交后 state 校验失败：${STATE_PROBE_REASON}" "State verification after the commit failed: ${STATE_PROBE_REASON}")"; fi
+  log_info "[chport] state committed audit=${audit}"
+}
+
+change_port_chain() {
+  local leftover old_port new_port result script state rc devices_note
+  exit_op_prepare
+  # 上次中断留下的本机临时文件：与 rotate-keys / rollback 同一口径，身份正常才删。
+  for leftover in "${CHAIN_STATE_DIR}"/.node.txt.rotate.*.tmp "${CHAIN_STATE_DIR}"/devices/.*.tmp; do
+    [[ -e "${leftover}" || -L "${leftover}" ]] || continue
+    require_secure_user_file "${leftover}" 600 || die 5 "$(L "${COMMAND} 本机残留身份异常：${leftover}" "${COMMAND} local leftover has an unexpected identity: ${leftover}")"
+    rm -f "${leftover}" || die 5 "$(L "${COMMAND} 本机残留删除失败：${leftover}" "Deleting the ${COMMAND} local leftover failed: ${leftover}")"
+  done
+  old_port="${RELAY_PORT}"
+  log_info "[chport] start chain=${CHAIN_ID} old=${old_port} requested=${CHPORT_REQUESTED:--}"
+  chport_check_devices
+  chport_inspect
+  if [[ "${CHPORT_INSPECT}" == fresh ]]; then
+    result=fresh
+    # 改远端之前先确认远端健康，失败时远端零改动；顺序同 full_verify（平台预检给 SOCKET_PROXYD_PATH 赋值）。
+    remote_platform_preflight
+    if probe_remote_resources yes; then rc=0; else rc="$?"; fi
+    [[ "${rc}" -ne 33 ]] || die 5 "$(L '出口机上有未完成的凭据或设备操作（辅助文件未清理）；重跑中断的那条命令（rotate-keys / add-device / remove-device）收敛' 'The exit has an unfinished credential or device operation (helper files not cleaned up); rerun the interrupted command (rotate-keys / add-device / remove-device) to converge')"
+    [[ "${rc}" -eq 0 ]] || die 5 "$(L '远端文件、unit、进程、listener 或 binary 发生 drift；远端未改动' 'Remote files, units, processes, listeners or binaries drifted; nothing was changed on the remote')"
+  else
+    result=resumed
+  fi
+  if [[ -n "${CHPORT_REQUESTED}" ]]; then
+    new_port="${CHPORT_REQUESTED}"
+    [[ "${new_port}" != "${old_port}" ]] || die 2 "$(L "--port ${new_port} 就是当前端口；换一个端口" "--port ${new_port} is the current port; pick another one")"
+    if [[ "${new_port}" != "${CHPORT_FILE_PORT}" ]]; then
+      script="${OP_TMP}/port-check.sh"
+      write_port_check_script "${script}"
+      if state="$(ssh_relay_stdin bash -s -- "${new_port}" < "${script}")"; then rc=0; else rc="$?"; fi
+      [[ "${rc}" -ne 255 ]] || die 3 "$(L '检查中转端口时 SSH 不可达' 'SSH unreachable while checking the relay port')"
+      case "${state}" in
+        free) ;;
+        used) die 2 "$(L "端口 ${new_port} 已被中转上别的程序占用；换一个 --port，远端未改动" "Port ${new_port} is already used by another program on the relay; pick a different --port; nothing was changed on the remote")" ;;
+        *) die 3 "$(L '检查中转端口失败' 'Checking the relay port failed')" ;;
+      esac
+    fi
+  elif [[ "${CHPORT_INSPECT}" == already ]]; then
+    new_port="${CHPORT_FILE_PORT}"
+  else
+    new_port="$(choose_remote_port relay)" || die 3 "$(L '中转上选不出空闲端口' 'No free port could be chosen on the relay')"
+  fi
+  chport_apply "${new_port}"
+  chport_test_stop remote
+  chport_publish_nodes
+  chport_test_stop nodes
+  commit_chport_state
+  # state 已是新端口：先把客户端要改的东西告诉用户，下面的核验即使失败退出非 0，新端口也已经生效。
+  devices_note=''
+  [[ ! -f "${CHAIN_STATE_DIR}/devices/devices.env" ]] || devices_note="$(awk -F= -v c="${CHAIN_ID}" 'NF {printf " Exit-via-Relay-%s_%s", c, $1}' "${CHAIN_STATE_DIR}/devices/devices.env")"
+  log_warn "$(L "chain=${CHAIN_ID} 中转端口已从 ${old_port} 换成 ${new_port}：把客户端节点 Exit-via-Relay-${CHAIN_ID}${devices_note} 的端口改成 ${new_port}，或重新导入 ${CHAIN_STATE_DIR}/client/node.txt 与 devices/ 下的设备节点；用了多链聚合的要重新 render" "chain=${CHAIN_ID} relay port changed from ${old_port} to ${new_port}: set the port of client node(s) Exit-via-Relay-${CHAIN_ID}${devices_note} to ${new_port}, or import ${CHAIN_STATE_DIR}/client/node.txt and the device nodes under devices/ again; multi-chain output must be rendered again")"
+  ensure_local_assets_match_state
+  full_verify
+  printf 'port=changed chain=%s old=%s new=%s result=%s\n' "${CHAIN_ID}" "${old_port}" "${new_port}" "${result}"
+  log_info "$(L "change-port 通过；chain=${CHAIN_ID} old=${old_port} new=${new_port} result=${result} elapsed=$(elapsed_seconds)s" "change-port passed; chain=${CHAIN_ID} old=${old_port} new=${new_port} result=${result} elapsed=$(elapsed_seconds)s")"
+}
+
 # ---------- 出口机跨机迁移：migrate-exit（docs/feature/feature-exit-migration.md） ----------
 #
 # 用途：把链的出口机换成另一台机器，UUID、Reality 密钥、short id、全部设备、中转地址与端口不变，客户端不重新导入。
@@ -9552,6 +9905,9 @@ main() {
       ;;
     rotate-keys)
       rotate_keys_chain
+      ;;
+    change-port)
+      change_port_chain
       ;;
     add-device|remove-device)
       device_op_chain
