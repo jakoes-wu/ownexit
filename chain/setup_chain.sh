@@ -97,6 +97,12 @@ ALLOW_TUN=0
 QR_DEVICE=''
 # change-port 的 --port 值；空 = 随机选。
 CHPORT_REQUESTED=''
+# change-port 的 --no-probe：1 = 换端口前不做本机回程探测。
+CHPORT_NO_PROBE=0
+# chport_probe_ports 的出参：ok / skipped、能连上的候选（按候选顺序）、其中第一个。
+PROBE_STATUS=''
+PROBE_REACHABLE=''
+PROBE_PORT=''
 # change-port 的中转 socket 现状（fresh / already）与文件里当前的端口，由 chport_inspect 填写。
 CHPORT_INSPECT=''
 CHPORT_FILE_PORT=''
@@ -210,7 +216,7 @@ Usage:
   $(basename "${SCRIPT_PATH}") --config <absolute path> banlist
   $(basename "${SCRIPT_PATH}") --config <absolute path> rebaseline
   $(basename "${SCRIPT_PATH}") --config <absolute path> rotate-keys
-  $(basename "${SCRIPT_PATH}") --config <absolute path> change-port [--port <n>]
+  $(basename "${SCRIPT_PATH}") --config <absolute path> change-port [--port <n>] [--no-probe]
   $(basename "${SCRIPT_PATH}") --config <absolute path> add-device <name>
   $(basename "${SCRIPT_PATH}") --config <absolute path> remove-device <name>
   $(basename "${SCRIPT_PATH}") --config <absolute path> list-devices
@@ -253,6 +259,8 @@ What each does (grouped by how often it is used):
                the same. Updates node files and state, then runs a full verify. Clients only change the port of node
                Exit-via-Relay-<chain> (and its device nodes), or re-import; multi-chain bundles need a new render.
                Existing connections of this chain drop once. If it fails midway, rerun change-port to converge.
+               Before switching it briefly listens on the candidate ports on the relay and only uses a port this
+               machine can reach (skipped when this machine reaches the relay through a TUN; --no-probe turns it off).
   migrate-exit use it whenever the exit changed (new IP or new machine); clients do not need to re-import:
                - same machine at a new address (the provider changed the IP): detected automatically; registers the host key
                  of the new IP, rewrites the configuration, switches the relay's forwarding target and local state in place,
@@ -293,6 +301,7 @@ Arguments:
   --to <ipv4>           new exit address for migrate-exit; --to-port the new exit's SSH port, default 22.
   --port <n>            change-port: the new public relay port (1-65535, not the current one, free on the relay);
                         without it a free port in 20000-59999 is picked at random.
+  --no-probe            change-port: do not test from this machine whether the new port is reachable first.
   --abort               migrate-exit gives up before the relay switch: removes the half-built service on the new machine
                         and restores the original configuration.
   --abandon-cleanup     skip the cleanup when the old exit is gone for good after migrate-exit committed (this chain's
@@ -334,6 +343,7 @@ Typical use:
   $(basename "${SCRIPT_PATH}") --id main migrate-exit --abort
   $(basename "${SCRIPT_PATH}") --id main change-port
   $(basename "${SCRIPT_PATH}") --id main change-port --port 31234
+  $(basename "${SCRIPT_PATH}") --id main change-port --no-probe
 
 Safety boundary:
   the script does not change firewalls, cloud security groups, or existing sing-box configurations.
@@ -364,7 +374,7 @@ EOF
   $(basename "${SCRIPT_PATH}") --config <绝对路径> banlist
   $(basename "${SCRIPT_PATH}") --config <绝对路径> rebaseline
   $(basename "${SCRIPT_PATH}") --config <绝对路径> rotate-keys
-  $(basename "${SCRIPT_PATH}") --config <绝对路径> change-port [--port <n>]
+  $(basename "${SCRIPT_PATH}") --config <绝对路径> change-port [--port <n>] [--no-probe]
   $(basename "${SCRIPT_PATH}") --config <绝对路径> add-device <名字>
   $(basename "${SCRIPT_PATH}") --config <绝对路径> remove-device <名字>
   $(basename "${SCRIPT_PATH}") --config <绝对路径> list-devices
@@ -398,6 +408,7 @@ EOF
   change-port  把中转对外端口换成新端口（随机，或 --port <n> 指定）；UUID、密钥、设备、出口机都不变。更新节点
                文件与 state，最后自动完整 verify。客户端只需把节点 Exit-via-Relay-<链>（及其设备节点）的端口改成
                新值，或重新导入；多链聚合需重新 render。本链现有连接会断开一次。中途失败重跑 change-port 收敛。
+               换之前先在中转上临时监听候选端口，只用本机能连上的端口（本机经 TUN 到中转时跳过；--no-probe 关闭）。
   migrate-exit 出口机变了（换了 IP 或换了机器）都用它，客户端不用重新导入：
                - 新地址还是同一台机器（只是服务商换了 IP）：自动识别，登记新 IP 的主机密钥、改写配置，原地切换
                  中转转发目标与本地 state，最后完整 verify。旧 IP 连不上也行；SSH 端口要保持不变。
@@ -430,6 +441,7 @@ EOF
   --to <ipv4>           migrate-exit 的新出口机地址；--to-port 新出口机 SSH 端口，默认 22。
   --port <n>            change-port：中转新的对外端口（1-65535，不能是当前端口，且中转上空闲）；不带时在
                         20000-59999 里随机选一个空闲端口。
+  --no-probe            change-port：换之前不先从本机测新端口能否连上。
   --abort               migrate-exit 在中转切换之前放弃迁移：拆掉新机器上的半成品，恢复原配置。
   --abandon-cleanup     migrate-exit 提交后旧出口机永久失联时放弃清理（本链配置含私钥会留在旧机器上）。
   <ipv4>                kick 只接受点分 IPv4；ban/unban 另接受 CIDR，且主机位必须为 0（如 198.51.100.0/24）。
@@ -467,6 +479,7 @@ EOF
   $(basename "${SCRIPT_PATH}") --id main migrate-exit --abort
   $(basename "${SCRIPT_PATH}") --id main change-port
   $(basename "${SCRIPT_PATH}") --id main change-port --port 31234
+  $(basename "${SCRIPT_PATH}") --id main change-port --no-probe
 
 安全边界:
   脚本不修改防火墙、云厂商安全组、现有 sing-box 配置。
@@ -876,7 +889,10 @@ parse_args() {
           --port)
             [[ -z "${CHPORT_REQUESTED}" && "$#" -ge 2 && "$2" =~ ^[1-9][0-9]{0,4}$ ]] && (( $2 <= 65535 )) || die 2 "$(L '--port 必须是 1-65535，且只能给一次' '--port must be 1-65535 and given only once')"
             CHPORT_REQUESTED="$2"; shift 2 ;;
-          *) die 2 "$(L 'change-port 只接受可选的 --port <n>' 'change-port only accepts the optional --port <n>')" ;;
+          --no-probe)
+            [[ "${CHPORT_NO_PROBE}" == 0 ]] || die 2 "$(L '--no-probe 只能给一次' '--no-probe can be given only once')"
+            CHPORT_NO_PROBE=1; shift ;;
+          *) die 2 "$(L 'change-port 只接受可选的 --port <n> 与 --no-probe' 'change-port only accepts the optional --port <n> and --no-probe')" ;;
         esac
       done
       ;;
@@ -3510,6 +3526,222 @@ choose_remote_port() {
     attempt="$((attempt + 1))"
   done
   return 1
+}
+
+# change-port 换端口前的远端临时监听（docs/feature/feature-port-reachability-probe.md §5.1.1）。
+# start：用 systemd-run 起一个最长活 90 秒的临时 service，用 python3 监听候选端口，只回报属于该 service 进程的监听；
+# stop：停掉它。SSH 断开或本机被打断时靠 RuntimeMaxSec 兜底，--collect 让它退出后不留单元。
+# 监听代码经 ExecStart 传给 systemd，systemd 会展开其中的 $ 和 %，所以代码里不能出现这两个字符。
+write_port_probe_script() {
+  local output
+  output="$1"
+  cat > "${output}" <<'PORT_PROBE'
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+mode="$1"
+unit="$2"
+shift 2
+case "${mode}" in
+  start)
+    py="$(command -v python3 || true)"
+    if [[ -z "${py}" ]]; then
+      printf 'PROBE=nopython\n'
+      exit 0
+    fi
+    code='import select, socket, sys
+socks = []
+for arg in sys.argv[1:]:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("0.0.0.0", int(arg)))
+        s.listen(16)
+    except OSError:
+        s.close()
+        continue
+    socks.append(s)
+if not socks:
+    sys.exit(3)
+while True:
+    ready = select.select(socks, [], [])[0]
+    for s in ready:
+        try:
+            s.accept()[0].close()
+        except OSError:
+            pass'
+    if ! systemd-run --quiet --collect --unit="${unit}" --property=RuntimeMaxSec=90 "${py}" -c "${code}" "$@" >/dev/null 2>&1; then
+      printf 'PROBE=startfail\n'
+      exit 0
+    fi
+    want="$#"
+    tries=0
+    listen=''
+    state=''
+    while (( tries < 20 )); do
+      state="$(systemctl show -p ActiveState --value "${unit}" 2>/dev/null || true)"
+      [[ "${state}" == active || "${state}" == activating ]] || break
+      pid="$(systemctl show -p MainPID --value "${unit}" 2>/dev/null || true)"
+      if [[ -n "${pid}" && "${pid}" != 0 ]]; then
+        # 只认这个 service 进程名下的监听，别的程序占着的端口不算。
+        listen="$(ss -H -ltnp 2>/dev/null | awk -v pid="${pid}" 'index($0, "pid=" pid ",") {n = split($4, a, ":"); print a[n]}' | sort -un || true)"
+        [[ "$(printf '%s\n' "${listen}" | awk 'NF {n++} END {print n + 0}')" -lt "${want}" ]] || break
+      fi
+      sleep 0.5
+      tries="$((tries + 1))"
+    done
+    if [[ "${state}" != active && "${state}" != activating ]]; then
+      printf 'PROBE=exited\n'
+      exit 0
+    fi
+    printf 'PROBE=ready\n'
+    printf '%s\n' "${listen}" | awk 'NF {print "LISTEN=" $1}'
+    ;;
+  stop)
+    # 单元可能已被 RuntimeMaxSec 回收，stop / reset-failed 返回非 0 不算失败，以最后的状态为准。
+    systemctl stop "${unit}" >/dev/null 2>&1 || true
+    systemctl reset-failed "${unit}" >/dev/null 2>&1 || true
+    state="$(systemctl show -p ActiveState --value "${unit}" 2>/dev/null || true)"
+    case "${state}" in
+      active|activating) printf 'PROBE=stopfail\n' ;;
+      *) printf 'PROBE=stopped\n' ;;
+    esac
+    ;;
+  *)
+    printf 'PROBE=badmode\n'
+    exit 2
+    ;;
+esac
+PORT_PROBE
+  chmod 600 "${output}"
+}
+
+# 探测候选端口：测试用 OWNEXIT_TEST_PROBE_CANDIDATES 固定；否则 20000-59999 内随机 8 个、互不相同，跳过参数里给的端口。
+probe_random_candidates() {
+  local list attempt hex candidate x skip
+  if [[ -n "${OWNEXIT_TEST_PROBE_CANDIDATES:-}" ]]; then
+    printf '%s\n' "${OWNEXIT_TEST_PROBE_CANDIDATES}"
+    return 0
+  fi
+  list=''
+  attempt=0
+  while (( attempt < 200 )) && [[ "$(wc -w <<< "${list}" | tr -d ' ')" -lt 8 ]]; do
+    attempt="$((attempt + 1))"
+    hex="$(openssl rand -hex 2)"
+    candidate="$((20000 + (16#${hex} % 40000)))"
+    skip=0
+    for x in "$@" ${list}; do
+      [[ "${x}" != "${candidate}" ]] || skip=1
+    done
+    [[ "${skip}" == 1 ]] || list="${list:+${list} }${candidate}"
+  done
+  printf '%s\n' "${list}"
+}
+
+# change-port 换端口前的本机回程探测（docs/feature/feature-port-reachability-probe.md §5.1.2）：
+# 在中转上临时监听候选端口，从本机测 TCP 握手，只把能连上的交给调用方。出参写全局 PROBE_STATUS / PROBE_REACHABLE /
+# PROBE_PORT，必须在主 shell 里直接调用：放进 $(...) 的话 die 只结束子 shell，换端口会在“都连不上”时照样继续。
+# 用法：chport_probe_ports <中转 IP> <对照端口，可为空> <候选端口…>
+chport_probe_ports() {
+  local host current iface unit script out rc kind listen p current_ok k n
+  host="$1"
+  current="$2"
+  shift 2
+  PROBE_STATUS=skipped
+  PROBE_REACHABLE=''
+  PROBE_PORT=''
+  if [[ "${CHPORT_NO_PROBE}" == 1 ]]; then
+    log_info "[portprobe] skipped reason=no-probe"
+    return 0
+  fi
+  if ! is_ipv4 "${host}"; then
+    log_warn "$(L "[portprobe] skipped reason=not-ipv4：${host} 不是 IPv4 地址，跳过探测" "[portprobe] skipped reason=not-ipv4: ${host} is not an IPv4 address; probe skipped")"
+    return 0
+  fi
+  iface="$(route_interface "${host}" || true)"
+  if [[ -z "${iface}" ]]; then
+    log_warn "$(L "[portprobe] skipped reason=no-route：查不到本机到 ${host} 的出接口，跳过探测" "[portprobe] skipped reason=no-route: cannot find this machine's outgoing interface to ${host}; probe skipped")"
+    return 0
+  fi
+  if interface_is_tunnel "${iface}"; then
+    log_warn "$(L "[portprobe] skipped reason=tun：本机到 ${host} 经 TUN（${iface}），本机测出的结果不代表真实网络，跳过探测" "[portprobe] skipped reason=tun: this machine reaches ${host} through a TUN (${iface}); a local test would not reflect the real network; probe skipped")"
+    return 0
+  fi
+  unit="ownexit-portprobe-$(openssl rand -hex 4)"
+  script="${OP_TMP}/port-probe.sh"
+  write_port_probe_script "${script}"
+  log_info "[portprobe] start host=${host} unit=${unit} candidates=$(tr ' ' ',' <<< "$*")"
+  if out="$(ssh_relay_stdin bash -s -- start "${unit}" "$@" < "${script}")"; then rc=0; else rc="$?"; fi
+  [[ "${rc}" -ne 255 ]] || die 3 "$(L "探测端口时 SSH 不可达；中转未改端口，中转上的临时监听最多 90 秒后自动退出，稍后重跑" "SSH became unreachable while probing ports; the relay port was not changed; the temporary listener on the relay exits by itself within 90 seconds; rerun later")"
+  kind="$(awk -F= '$1 == "PROBE" {print $2; exit}' <<< "${out}")"
+  [[ "${rc}" -eq 0 && -n "${kind}" ]] || die 3 "$(L "探测结果无法识别（rc=${rc}），中转未改端口；中转上的临时监听最多 90 秒后自动退出；可加 --no-probe 跳过" "The probe result could not be understood (rc=${rc}); the relay port was not changed; the temporary listener on the relay exits by itself within 90 seconds; add --no-probe to skip it")"
+  if [[ "${OWNEXIT_TEST_PROBE_STOP_AFTER:-}" == start ]]; then
+    log_warn "$(L "测试钩子：${COMMAND} 在探测 start 之后停止" "Test hook: ${COMMAND} stops after the probe start")"
+    exit 99
+  fi
+  listen="$(awk -F= '$1 == "LISTEN" {print $2}' <<< "${out}" | tr '\n' ' ')"
+  case "${kind}" in
+    nopython)
+      log_warn "$(L "[portprobe] skipped reason=nopython：中转上没有 python3，跳过探测，按原方式选端口" "[portprobe] skipped reason=nopython: the relay has no python3; probe skipped, choosing the port as before")"
+      return 0 ;;
+    startfail)
+      chport_probe_stop "${unit}"
+      log_warn "$(L "[portprobe] skipped reason=startfail：中转上的临时监听没起来，跳过探测，按原方式选端口" "[portprobe] skipped reason=startfail: the temporary listener on the relay did not start; probe skipped, choosing the port as before")"
+      return 0 ;;
+    ready) ;;
+    exited) listen='' ;;
+    *) die 3 "$(L "探测结果无法识别（PROBE=${kind}），中转未改端口；中转上的临时监听最多 90 秒后自动退出；可加 --no-probe 跳过" "The probe result could not be understood (PROBE=${kind}); the relay port was not changed; the temporary listener on the relay exits by itself within 90 seconds; add --no-probe to skip it")" ;;
+  esac
+  if [[ -z "${listen// /}" ]]; then
+    chport_probe_stop "${unit}"
+    log_warn "$(L "[portprobe] skipped reason=nolisten：中转上的临时监听没有监听到任何候选端口，跳过探测，按原方式选端口" "[portprobe] skipped reason=nolisten: the temporary listener on the relay is not listening on any candidate port; probe skipped, choosing the port as before")"
+    return 0
+  fi
+  log_info "[portprobe] listen=$(tr ' ' ',' <<< "${listen% }")"
+  current_ok=''
+  if [[ -n "${current}" ]]; then
+    if tcp_probe "${host}" "${current}" 3; then current_ok=yes; else current_ok=no; fi
+    log_info "[portprobe] current=${current} reachable=${current_ok}"
+  fi
+  n=0
+  k=0
+  # 按候选顺序测，指定端口时只有一个候选；没出现在 LISTEN 里的候选（bind 失败、被占用）不算。
+  for p in "$@"; do
+    [[ " ${listen} " == *" ${p} "* ]] || continue
+    n="$((n + 1))"
+    if tcp_probe "${host}" "${p}" 3; then
+      k="$((k + 1))"
+      PROBE_REACHABLE="${PROBE_REACHABLE:+${PROBE_REACHABLE} }${p}"
+    fi
+  done
+  chport_probe_stop "${unit}"
+  PROBE_PORT="${PROBE_REACHABLE%% *}"
+  log_info "[portprobe] result reachable=${k}/${n} chosen=${PROBE_PORT:--}"
+  if [[ -n "${PROBE_PORT}" ]]; then
+    PROBE_STATUS=ok
+    [[ "${current_ok}" != yes ]] || log_warn "$(L "当前端口 ${current} 本机就能连上，换端口不一定能解决问题" "This machine can already reach the current port ${current}; changing the port may not fix the problem")"
+    return 0
+  fi
+  if [[ -n "${CHPORT_REQUESTED}" ]]; then
+    die 3 "$(L "本机连不上 ${host}:${CHPORT_REQUESTED}，中转未改端口；换一个 --port，或加 --no-probe 跳过" "This machine cannot reach ${host}:${CHPORT_REQUESTED}; the relay port was not changed; pick another --port, or add --no-probe to skip the probe")"
+  elif [[ "${current_ok}" == yes ]]; then
+    die 3 "$(L "本机能连上当前端口 ${current}，但候选端口都连不上，中转未改端口；可能是中转本机防火墙只放行了当前端口，也可能是这批候选被拦；重跑会换一批候选" "This machine can reach the current port ${current} but none of the candidate ports; the relay port was not changed; the relay's own firewall may only allow the current port, or this batch of candidates is blocked; a rerun tries a new batch")"
+  else
+    die 3 "$(L "本机到 ${host} 的这些端口都连不上，中转未改端口；可能是本机网络或中转的云防火墙 / 安全组拦截；换个网络再试，或确认安全组后加 --no-probe" "This machine cannot reach any of these ports on ${host}; the relay port was not changed; the local network or the relay's cloud firewall / security group may be blocking them; try another network, or check the security group and add --no-probe")"
+  fi
+}
+
+# 停掉 chport_probe_ports 起的临时监听；停不掉就退出 3（此时中转还没改端口）。
+chport_probe_stop() {
+  local unit script out rc
+  unit="$1"
+  script="${OP_TMP}/port-probe.sh"
+  if out="$(ssh_relay_stdin bash -s -- stop "${unit}" < "${script}")"; then rc=0; else rc="$?"; fi
+  if [[ "${rc}" -eq 0 && "${out}" == *PROBE=stopped* ]]; then
+    log_info "[portprobe] stopped unit=${unit}"
+    return 0
+  fi
+  die 3 "$(L "停止中转上的临时监听 ${unit} 失败（rc=${rc}），中转未改端口；它最多 90 秒后自动退出，稍后重跑" "Stopping the temporary listener ${unit} on the relay failed (rc=${rc}); the relay port was not changed; it exits by itself within 90 seconds; rerun later")"
 }
 
 create_local_stage() {
@@ -8155,7 +8387,7 @@ commit_chport_state() {
 }
 
 change_port_chain() {
-  local leftover old_port new_port result script state rc devices_note
+  local leftover old_port new_port result script state rc devices_note probe_ref probe_candidates
   exit_op_prepare
   # 上次中断留下的本机临时文件：与 rotate-keys / rollback 同一口径，身份正常才删。
   for leftover in "${CHAIN_STATE_DIR}"/.node.txt.rotate.*.tmp "${CHAIN_STATE_DIR}"/devices/.*.tmp; do
@@ -8187,14 +8419,35 @@ change_port_chain() {
       [[ "${rc}" -ne 255 ]] || die 3 "$(L '检查中转端口时 SSH 不可达' 'SSH unreachable while checking the relay port')"
       case "${state}" in
         free) ;;
-        used) die 2 "$(L "端口 ${new_port} 已被中转上别的程序占用；换一个 --port，远端未改动" "Port ${new_port} is already used by another program on the relay; pick a different --port; nothing was changed on the remote")" ;;
+        used) die 2 "$(L "端口 ${new_port} 已被中转上别的程序占用；换一个 --port，远端未改动；刚中断过 change-port 的，约 90 秒后再试" "Port ${new_port} is already used by another program on the relay; pick a different --port; nothing was changed on the remote; if change-port was just interrupted, try again in about 90 seconds")" ;;
         *) die 3 "$(L '检查中转端口失败' 'Checking the relay port failed')" ;;
       esac
+      # 续跑时中转 socket 已在文件里的端口上，旧端口通常不再监听，对照改用文件里的端口。
+      if [[ "${CHPORT_INSPECT}" == fresh ]]; then probe_ref="${old_port}"; else probe_ref="${CHPORT_FILE_PORT}"; fi
+      # 连不上时在这里退出 3，中转零改动；探测做不了（skipped）时照旧用指定端口。
+      chport_probe_ports "${RELAY_HOST}" "${probe_ref}" "${new_port}"
     fi
   elif [[ "${CHPORT_INSPECT}" == already ]]; then
     new_port="${CHPORT_FILE_PORT}"
   else
-    new_port="$(choose_remote_port relay)" || die 3 "$(L '中转上选不出空闲端口' 'No free port could be chosen on the relay')"
+    new_port=''
+    read -r -a probe_candidates <<< "$(probe_random_candidates "${old_port}")"
+    chport_probe_ports "${RELAY_HOST}" "${old_port}" ${probe_candidates[@]+"${probe_candidates[@]}"}
+    if [[ "${PROBE_STATUS}" == ok ]]; then
+      # python 绑 0.0.0.0 成功不等于 ss 口径空闲（例如只有 IPv6 监听），按 choose_remote_port 的口径再查一次。
+      script="${OP_TMP}/port-check.sh"
+      write_port_check_script "${script}"
+      for probe_ref in ${PROBE_REACHABLE}; do
+        if state="$(ssh_relay_stdin bash -s -- "${probe_ref}" < "${script}")"; then rc=0; else rc="$?"; fi
+        [[ "${rc}" -ne 255 ]] || die 3 "$(L '检查中转端口时 SSH 不可达' 'SSH unreachable while checking the relay port')"
+        if [[ "${state}" == free ]]; then
+          new_port="${probe_ref}"
+          break
+        fi
+      done
+      [[ -n "${new_port}" ]] || log_warn "$(L "[portprobe] 能连上的候选在中转上都被占用，改为随机选空闲端口（未经探测）" "[portprobe] every reachable candidate is in use on the relay; picking a random free port instead (not probed)")"
+    fi
+    [[ -n "${new_port}" ]] || new_port="$(choose_remote_port relay)" || die 3 "$(L '中转上选不出空闲端口' 'No free port could be chosen on the relay')"
   fi
   chport_apply "${new_port}"
   chport_test_stop remote

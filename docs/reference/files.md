@@ -135,7 +135,7 @@
 
 订阅地址：`http://<VPS 地址>:<SUB_PORT>/<TOKEN>/<文件名>`。default 设备用 `state.env` 的 TOKEN，额外设备各用自己的 TOKEN。1.3.0 起另有自适应地址 `http://<VPS 地址>:<SUB_PORT>/<TOKEN>/sub`（不是文件）：User-Agent 含 clash / mihomo / stash / verge 返回 `clash.yaml`，含 sing-box / singbox 或以 sfa/、sfi/、sfm/ 开头返回 `sing-box.json`，其余返回 `shadowrocket.txt`。其它路径一律 404。
 
-内部（不属于公开接口）：`/opt/ownexit-direct/bin/` 下的二进制布局、`/var/lib/ownexit-direct/` 下的操作工作目录。
+内部（不属于公开接口）：`/opt/ownexit-direct/bin/` 下的二进制布局、`/var/lib/ownexit-direct/` 下的操作工作目录、`ownexit-portprobe-<随机>.service`（change-port 探测用的瞬时单元，`systemd-run` 创建、不落盘，最长约 90 秒）。
 
 ### 直连 client.env 键
 
@@ -172,7 +172,7 @@
 | 中转机 | `ownexit-chain-relay-<id>.socket` / `ownexit-chain-relay-<id>.service` | systemd-socket-proxyd 透传 |
 | 中转机 | `<上述 unit>.d/50-ownexit-chain-blacklist.conf` | 黑名单 drop-in（`IPAddressDeny=`） |
 
-内部（不属于公开接口）：`/opt/ownexit-chain/bin/` 下的二进制布局、`/etc/ownexit-chain/` 下以 `<id>.rotate.` 开头的辅助文件与 `.stage-*` 暂存目录。
+内部（不属于公开接口）：`/opt/ownexit-chain/bin/` 下的二进制布局、`/etc/ownexit-chain/` 下以 `<id>.rotate.` 开头的辅助文件与 `.stage-*` 暂存目录、`ownexit-portprobe-<随机>.service`（change-port 探测用的瞬时单元，`systemd-run` 创建、不落盘，最长约 90 秒）。
 
 ## 节点名与组名
 

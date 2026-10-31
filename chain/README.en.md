@@ -264,7 +264,10 @@ Exit codes: 0 success; 2 argument errors, configuration not matching state, or a
 ```bash
 chain/setup_chain.sh --id main change-port               # pick a free port on the relay in 20000-59999 at random
 chain/setup_chain.sh --id main change-port --port 31234  # choose the new port
+chain/setup_chain.sh --id main change-port --no-probe     # do not test the new port from this machine first
 ```
+
+Before switching it tests from this machine: it briefly listens on 8 candidate ports on the relay (the listener exits by itself after at most 90 seconds), tries a TCP handshake to each from this machine, and only uses a port it can reach; with `--port` only that one is tested. If none can be reached it exits 3 with the relay untouched, and the message says whether the current port is reachable from this machine, which helps tell the local network, a cloud firewall and a bad batch of ports apart. When this machine reaches the relay through a proxy TUN (a local test would not reflect the real network) or the relay has no python3, this step is skipped with a warning and the port is chosen as before.
 
 When this chain cannot be reached from some network while the relay itself is not blocked as a whole (other ports on the same relay work), try this before rollback + deploy. It changes only the `ListenStream=0.0.0.0:<port>` line of the relay socket unit, then stops this chain's service, restarts this chain's socket, checks that the new port is listening and the old one is released, and starts the service again; UUIDs, the Reality key, short id, devices, the exit, the service and the owner stay the same. Existing connections of this chain drop once. It then rewrites the local `client/node.txt` and `devices/node-*.txt` with the new port, commits the state (the old state is archived in `audit/port-changed.<deployment ID>.<operation ID>/`) and finally runs a full `verify`, printing `port=changed chain=<chain> old=<old port> new=<new port> result=<fresh / resumed>` on success.
 

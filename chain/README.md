@@ -262,7 +262,10 @@ chain/setup_chain.sh --id main list-devices          # 只读：出口机上的�
 ```bash
 chain/setup_chain.sh --id main change-port               # 在 20000-59999 里随机选一个中转上空闲的端口
 chain/setup_chain.sh --id main change-port --port 31234  # 指定新端口
+chain/setup_chain.sh --id main change-port --no-probe     # 不先从本机测新端口能否连上
 ```
+
+换之前先从本机试连：在中转上临时监听 8 个候选端口（最长 90 秒后自动退出），从本机逐个测 TCP 握手，只用能连上的端口；指定 `--port` 时只测这一个。都连不上就以退出 3 结束、中转不动，提示里会说明当前端口本机能不能连上，便于判断是本机网络、云防火墙还是这批端口的问题。本机到中转经代理 TUN（测出来不代表真实网络）或中转没有 python3 时跳过这一步，打一行警告后按原方式选端口。
 
 某个网络下这条链连不上、而中转机本身没被整体封掉（同一中转的其它端口能通）时，先试这个命令，不用 rollback 加 deploy。它只改中转 socket unit 的 `ListenStream=0.0.0.0:<端口>` 一行，然后停本链 service、重启本链 socket、确认新端口在听而旧端口已放开、再把 service 拉起；UUID、Reality 密钥、short id、设备、出口机、service 与 owner 都不变。本链现有连接会断开一次。接着用新端口重写本机 `client/node.txt` 与 `devices/node-*.txt`，提交 state（旧 state 归档在 `audit/port-changed.<部署ID>.<操作ID>/`），最后跑一遍完整 `verify`，成功时输出 `port=changed chain=<链> old=<旧端口> new=<新端口> result=<fresh / resumed>`。
 

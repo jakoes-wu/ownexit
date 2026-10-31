@@ -6,6 +6,13 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+### Added / 新增
+
+- `ownexit direct change-port [--proxy-port <n>] [--no-probe]`: changes only the proxy port of the direct exit (random when no port is given); the UUID, keys and subscription URL stay the same. It changes the port the same way as `direct up --proxy-port` (which keeps working as before, without the reachability test below), and adds the random choice and that test.
+- `ownexit direct change-port [--proxy-port <n>] [--no-probe]`：只换直连的代理端口（不给端口时随机选），UUID、密钥与订阅地址不变。改端口的方式与 `direct up --proxy-port` 相同，另外多了随机选端口和下面的试连；`direct up --proxy-port` 照旧可用，不做试连。
+- `chain change-port` and `direct change-port` first test the new port from this machine: they listen briefly on candidate ports on the server (a transient `ownexit-portprobe-*` unit that exits within 90 seconds), try a TCP handshake from this machine and only use a reachable port. If none is reachable they stop with the server untouched (chain exit 3, direct exit 1). The step is skipped with a warning when this machine reaches the server through a TUN, the server has no python3, or (direct) ufw is enabled; `--no-probe` turns it off.
+- `chain change-port` 与 `direct change-port` 换之前先从本机试连新端口：在服务器上临时监听候选端口（瞬时单元 `ownexit-portprobe-*`，90 秒内自动退出），从本机测 TCP 握手，只用能连上的端口；都连不上时停下、服务器不动（链式退出 3，直连退出 1）。本机经 TUN、服务器没有 python3、（直连）ufw 已启用时打一行警告并跳过这一步；`--no-probe` 关闭。
+
 ## [2.2.0] - 2026-10-30
 
 ### Added / 新增
