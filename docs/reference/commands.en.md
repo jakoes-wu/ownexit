@@ -220,6 +220,7 @@ The following lines on stdout are frozen; `[chain][<subcommand>] INFO / WARN / E
 | `reason=exit-op-pending` | The exit has an unfinished credential or device operation |
 | `reason=exit-migration-pending` | An exit migration is in progress (there is a local migration record) |
 | `reason=remote-resource-unit-process-or-listener` | Remote files, units, processes or listeners do not match |
+| `reason=relay-process-stale` | A system update replaced the relay's forwarding program and the old process is still running (also prints `role=relay`) |
 | `next=run-mutating-command` | Run a modifying command (deploy / rollback) to converge the transaction or archive the old lock |
 | `next=inspect-transaction` | Inspect the transaction file by hand |
 | `next=check-config` | Check the configuration |
@@ -233,6 +234,7 @@ The following lines on stdout are frozen; `[chain][<subcommand>] INFO / WARN / E
 | `next=inspect-residue` | Inspect the leftovers by hand |
 | `next=rerun-interrupted-command` | Rerun the interrupted rotate-keys / add-device / remove-device / migrate-exit (a migration can also use `--abort` / `--abandon-cleanup`) |
 | `next=run-verify` | Run verify for details |
+| `next=restart-relay-service` | Run `systemctl restart ownexit-chain-relay-<chain>.service` on the relay, then retry |
 
 #### Other command output
 

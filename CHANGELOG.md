@@ -6,6 +6,24 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+## [2.3.1] - 2026-10-30
+
+### Fixed / 修复
+
+- Chains whose relay also runs an existing sing-box or a direct install no longer report a false "existing sing-box baseline changed" (deploy finishing with exit 4, `status` showing `reason=baseline`). The baseline used to include the service's start time and process id, which change after a restart or `systemctl daemon-reload`, and `ss` padding that changes when another program with a longer name starts listening. Only the command line and the listeners themselves are compared now.
+- 中转上同时有既有 sing-box 或同机直连的链，不再误报“中转既有 sing-box 零回归基线发生变化”（部署收尾退出 4、`status` 报 `reason=baseline`）。原来的基线带上了服务的启动时间和进程号（重启或 `systemctl daemon-reload` 后会变），以及 `ss` 为对齐补的空格（别的长名字程序开始监听时会变）；现在只比较启动命令和监听本身。
+- The Reality smoke test on the relay (run by deploy, verify, change-port and migrate-exit) no longer fails at random under load: it now waits up to 5 seconds for the test client to start instead of checking once right after launching it.
+- 中转上的 Reality smoke 测试（deploy、verify、change-port、migrate-exit 都会跑）不再在负载下偶发失败：改为最多等 5 秒让测试客户端起来，而不是刚启动就只看一次。
+- When a system update replaced `systemd-socket-proxyd` on the relay while the relay service kept running the old copy, `status` reported a vague `reason=remote-resource-unit-process-or-listener`. It now reports `status=drifted role=relay reason=relay-process-stale next=restart-relay-service`, and status / verify print which service to restart.
+- 系统更新替换了中转上的 `systemd-socket-proxyd`、relay service 还在跑旧进程时，`status` 原来只报笼统的 `reason=remote-resource-unit-process-or-listener`；现在报 `status=drifted role=relay reason=relay-process-stale next=restart-relay-service`，status / verify 会提示要重启哪个服务。
+- CI: the package job runs on `ubuntu-24.04`, because `ubuntu-latest` (26.04) has no Python 3.8 build.
+- CI：package 任务改在 `ubuntu-24.04` 上跑，因为 `ubuntu-latest`（26.04）没有 Python 3.8 的构建。
+
+### Upgrading / 升级
+
+- Nothing to do. Baselines saved by earlier versions are still compared correctly, except that their ExecStart line is skipped. Running `ownexit chain --id <name> rebaseline` once rewrites them in the new format, which compares the ExecStart command line again; after that, going back to 2.3.0 needs another `rebaseline` with 2.3.0.
+- 无需任何操作。旧版本保存的基线照常正确比对，只是不比 ExecStart 这一行。运行一次 `ownexit chain --id <名> rebaseline` 会改存为新格式，重新比对 ExecStart 的启动命令；之后如果降级回 2.3.0，要用 2.3.0 再 `rebaseline` 一次。
+
 ## [2.3.0] - 2026-10-30
 
 ### Added / 新增

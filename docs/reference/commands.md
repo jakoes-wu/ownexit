@@ -218,6 +218,7 @@ stdout 上的下列行冻结；stderr 上 `[chain][<子命令>] INFO / WARN / ER
 | `reason=exit-op-pending` | 出口机有未完成的凭据或设备操作 |
 | `reason=exit-migration-pending` | 出口机迁移进行中（本机有迁移记录） |
 | `reason=remote-resource-unit-process-or-listener` | 远端文件、unit、进程或监听不一致 |
+| `reason=relay-process-stale` | 中转转发程序已被系统更新替换，正在运行的还是旧进程（同时输出 `role=relay`） |
 | `next=run-mutating-command` | 运行修改类命令（deploy / rollback）让事务收敛或归档旧锁 |
 | `next=inspect-transaction` | 人工检查事务文件 |
 | `next=check-config` | 检查配置 |
@@ -231,6 +232,7 @@ stdout 上的下列行冻结；stderr 上 `[chain][<子命令>] INFO / WARN / ER
 | `next=inspect-residue` | 人工检查残留 |
 | `next=rerun-interrupted-command` | 重跑中断的 rotate-keys / add-device / remove-device / migrate-exit（迁移也可 `--abort` / `--abandon-cleanup`） |
 | `next=run-verify` | 运行 verify 查看详情 |
+| `next=restart-relay-service` | 在中转上 `systemctl restart ownexit-chain-relay-<链>.service` 后重试 |
 
 #### 其它命令输出
 

@@ -69,7 +69,9 @@ jobs:
 
   package:
     # 构建 sdist / wheel，在全新虚拟环境里安装 wheel，确认 ownexit 入口和每个子命令都能转发到包内脚本。
-    runs-on: ubuntu-latest
+    # 固定 24.04：ubuntu-latest 已切到 26.04，actions/python-versions 没有 26.04 的 Python 3.8 构建；
+    # 3.8 是 pyproject 承诺的最低版本，不能为了换 runner 提高。
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
