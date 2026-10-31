@@ -1,6 +1,6 @@
 # 链式误报三处与 CI 打包检查（v2.3.1）
 
-> **2026-10-30 注记**：已落地（v2.3.1）。Docker 测试床 T1–T10 通过：未 reload 部署 rc=0；2.3.0 部署的旧格式链 b 在 2.3.0 下报 `reason=baseline`、新代码 healthy；改启动参数、多监听端口仍报 baseline；负载下旧启动检查误判 13/200、新检查 0/200；替换 proxyd 后报 `reason=relay-process-stale`，重启后恢复；校验脚本换成 `/usr/bin/sleep` 仍退出 171。T11（CI）与 T12（真实线路只读）随发版执行。
+> **2026-10-30 注记**：已落地（v2.3.1）。Docker 测试床 T1–T10 通过：未 reload 部署 rc=0；2.3.0 部署的旧格式链 b 在 2.3.0 下报 `reason=baseline`、新代码 healthy；改启动参数、多监听端口仍报 baseline；负载下旧启动检查误判 13/200、新检查 0/200；替换 proxyd 后报 `reason=relay-process-stale`，重启后恢复；校验脚本换成 `/usr/bin/sleep` 仍退出 171。T11：PR #27 的 lint / bash32 / package 全部通过，package 日志显示 Python 3.8.18。T12：7 条真实链在 2.3.0 与 2.3.1 下的 `status` 结果相同——1 条 healthy，另 6 条报 `reason=hostkey-probe`；这 6 台中转从本机直连时 ssh 握手中途被本机进程强杀（退出 137），经另一台机器跳转能正常登录，属本机网络环境问题，与本次改动无关。经跳转在全部 7 台中转只读执行 A-1 的 sed 管道，输出均为一行、以 ` }` 结尾、不含 `start_time` 与 `pid=`；原始输出含 `pid=0`、`start_time=[n/a]`。
 > 源码位置：采集 `chain/setup_chain.sh:2808-2810`、`:2832`；兼容比对 `baseline_file_matches`（`:5016-5046`）；smoke 等待 `:4551-4571`；178 分支 `:5240-5245`；34 映射 `:5284-5289`；status `:9833-9834`。
 
 本方案修四个互不依赖的小问题，合在一个补丁版里发布：
