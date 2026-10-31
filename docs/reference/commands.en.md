@@ -32,6 +32,7 @@ Subcommands may appear before or after options. No subcommand means `up`.
 | Subcommand | Effect |
 | ---- | ---- |
 | `up` | Deploy / reuse (accepts `--host` `--sni` `--proxy-port` `--sub-ttl` `--allow-tun`); cannot be combined with the maintenance subcommands below |
+| `change-port` | Changes only the proxy port (optionally `--proxy-port`, random without it); the UUID, keys and subscription URL stay the same. Before switching it briefly listens on candidate ports on the VPS and tests from this computer which ones it can reach, and only uses a reachable one; this step is skipped when this computer reaches the VPS through a TUN, the VPS has no python3 or ufw is enabled on the VPS, and `--no-probe` turns it off |
 | `rotate-keys` | Regenerates the UUID and Reality key / short id of every device |
 | `rotate-token` | Regenerates the subscription TOKEN and port |
 | `add-device` | Adds a device, followed by its name (`[a-z0-9][a-z0-9-]{0,31}`, not default) |
@@ -56,6 +57,7 @@ Subcommands may appear before or after options. No subcommand means `up`.
 | `--port` | `-P` | SSH port, default 22 |
 | `--sni` | | Reality camouflage domain (default for new installs: www.amazon.com) |
 | `--proxy-port` | | Proxy port (default for new installs: random in 20000-59999) |
+| `--no-probe` | | Only for `change-port`: do not test from this computer whether the new port is reachable first |
 | `--sub-ttl` | | How long after starting the subscription service turns itself off (`<positive integer>[s/m/h]`, minutes when no unit is given, 1 minute to 24 hours); without it the service is not turned off automatically |
 | `--migrate` | | Removed in 2.0: exits 2 and suggests the `migrate` subcommand |
 | `--uninstall` | | Removed in 2.0: exits 2 and suggests the `uninstall` subcommand |
@@ -65,15 +67,15 @@ Subcommands may appear before or after options. No subcommand means `up`.
 | `--remove-device` | | Removed in 2.0: exits 2 and suggests the `remove-device` subcommand |
 | `--allow-tun` | | When the route from this computer to the VPS goes through a proxy TUN, deployment is refused by default (exit 1); this option only warns and continues |
 
-Mutual exclusions: `migrate`, `uninstall` and `rotate-token` exclude each other; `rotate-keys` cannot be combined with `migrate` / `uninstall`; `add-device` and `remove-device` exclude each other and cannot be combined with `migrate` / `uninstall`; `--sni` / `--proxy-port` / `--sub-ttl` cannot be combined with `uninstall`; `up` cannot be combined with the maintenance subcommands.
+Mutual exclusions: `migrate`, `uninstall` and `rotate-token` exclude each other; `rotate-keys` cannot be combined with `migrate` / `uninstall`; `add-device` and `remove-device` exclude each other and cannot be combined with `migrate` / `uninstall`; `--sni` / `--proxy-port` / `--sub-ttl` cannot be combined with `uninstall`; `up` cannot be combined with the maintenance subcommands; `change-port` cannot be combined with `up`, the other maintenance subcommands, `--sni` or `--sub-ttl`; `--no-probe` only goes with `change-port`.
 
 ### Exit codes
 
 | Code | Meaning |
 | ---- | ---- |
 | 0 | All checks passed |
-| 1 | Deployment failed or a check did not pass; the pre-deploy check found the route to the VPS going through TUN without `--allow-tun` |
-| 2 | Argument error, missing argument (when not in a terminal), the server runs the old 233boy install and needs `migrate`, an option removed in 2.0 was used, or a refused device operation (already exists / does not exist / over the limit) |
+| 1 | Deployment failed or a check did not pass; the pre-deploy check found the route to the VPS going through TUN without `--allow-tun`; `change-port` could not reach any candidate port (or the given port) from this computer, SSH became unreachable during the probe, the probe result could not be understood or stopping the temporary listener failed (the VPS port was not changed) |
+| 2 | Argument error, missing argument (when not in a terminal), the server runs the old 233boy install and needs `migrate`, an option removed in 2.0 was used, or a refused device operation (already exists / does not exist / over the limit); `change-port` on a server with nothing deployed, or the given port is the current one or already in use |
 
 ### Output
 
@@ -136,6 +138,7 @@ Script: `chain/setup_chain.sh`. Relay + exit chain. Apart from `init` / `up`, ev
 | `--to` | migrate-exit | The new exit's IPv4; excludes `--abort` and `--abandon-cleanup` |
 | `--to-port` | migrate-exit | The new exit's SSH port, default 22; only together with `--to` |
 | `--port` | change-port | The new public relay port (1-65535, not the current one, free on the relay); without it a port in 20000-59999 is picked at random |
+| `--no-probe` | change-port | Do not test from this machine whether the new port is reachable first |
 | `--abort` | migrate-exit | Gives up the migration before the relay is switched and restores the original configuration |
 | `--abandon-cleanup` | migrate-exit | Gives up cleanup when the migration is committed and the old exit is permanently unreachable |
 
@@ -158,7 +161,7 @@ Script: `chain/setup_chain.sh`. Relay + exit chain. Apart from `init` / `up`, ev
 | `banlist` | Compares the local and relay blocklists |
 | `rebaseline` | Re-registers the existing sing-box on the relay |
 | `rotate-keys` | Replaces the UUID and Reality key / short id of every device |
-| `change-port` | Moves only the relay's public port to a new one (optionally `--port <n>`); credentials, devices and the exit stay the same; clients only change the node port or re-import, multi-chain output must be rendered again; existing connections of this chain drop once; rerun to converge after a failure |
+| `change-port` | Moves only the relay's public port to a new one (optionally `--port <n>`, `--no-probe`); credentials, devices and the exit stay the same; before switching it briefly listens on candidate ports on the relay and only uses one this machine can reach (skipped through a TUN or when the relay has no python3); clients only change the node port or re-import, multi-chain output must be rendered again; existing connections of this chain drop once; rerun to converge after a failure |
 | `add-device` | Adds a device (followed by its name) |
 | `remove-device` | Revokes a device (followed by its name) |
 | `list-devices` | Read-only list of devices |
@@ -171,7 +174,7 @@ Script: `chain/setup_chain.sh`. Relay + exit chain. Apart from `init` / `up`, ev
 | 0 | Success, or `status` is deployed / not_deployed |
 | 1 | Runtime failure (remote operation, local commit and so on) |
 | 2 | Argument error (including the `rehost-exit` removed in 2.0, which suggests `migrate-exit --to <new IP>`), configuration not matching state, refused device operation; with `--id` omitted, no configuration or several; `up` with an existing configuration but different addresses or a different `--exit-bind`; `qr` with no such device; moving a chain that sets `EXIT_BIND_IPV4` to another exit; the port given to `change-port` is the current one or already used on the relay |
-| 3 | Failed pre-check / check, unreachable server or mismatching host fingerprint (any `preflight` failure is 3; failed key setup or probes in `init` / `up` are 3 too); the pre-deploy check of `deploy` / `up` found a route through TUN without `--allow-tun`; `preflight` / `deploy` / `up` / `migrate-exit` found that `EXIT_BIND_IPV4` is not configured on the exit, or the exit has no `ip` command to check it (when `verify` finds it, the code is 5 as in the next row) |
+| 3 | Failed pre-check / check, unreachable server or mismatching host fingerprint (any `preflight` failure is 3; failed key setup or probes in `init` / `up` are 3 too); the pre-deploy check of `deploy` / `up` found a route through TUN without `--allow-tun`; `change-port` could not reach any candidate port (or the given port) from this machine, SSH became unreachable during the probe, the probe result could not be understood or stopping the temporary listener failed (the relay port was not changed); `preflight` / `deploy` / `up` / `migrate-exit` found that `EXIT_BIND_IPV4` is not configured on the exit, or the exit has no `ip` command to check it (when `verify` finds it, the code is 5 as in the next row) |
 | 4 | The deployment phase of `deploy` / `up` failed (unreachable servers are still 3; refusal during an exit migration is also 4); `migrate-exit` found this chain's files on the new exit |
 | 5 | `status` unhealthy (busy / stale_lock / incomplete / unreachable / orphaned / drifted), `verify` failed; for `qr`: chain not deployed, lock busy / stale, or node file not matching state; for other commands: lock, corrupted state, unfinished transaction or failed final verify; rebaseline / rotate-keys / change-port / add-device / remove-device refused during an exit migration; `change-port` found relay socket drift, local device nodes not matching devices.env, or a failed remote health pre-check (nothing changed on the remote) |
 | 6 | `rollback` pre-check or execution failed (including refusal during an exit migration) |

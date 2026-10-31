@@ -135,6 +135,7 @@ curl -x http://127.0.0.1:7890 https://ipinfo.io   # 另开终端验证
 - 订阅服务是明文 HTTP 的公网端口，平时保持关闭，只在导入时临时打开。
 - 旧写法（`./direct/subctl …`、`--rotate-keys` / `--rotate-token` / `--add-device` / `--remove-device` / `--migrate` / `--uninstall`）已在 2.0 移除：调用时退出 2，并提示对应的新写法。
 - 换一台 VPS：对新机器运行 `setup_direct.sh up --host <新IP>`，再到客户端更新订阅。记住了多台 VPS 时，`setup_direct.sh` 不带 `--host` 会列出可选目标并退出（日常操作也一样）。
+- 只换代理端口：`setup_direct.sh change-port`（随机选）或 `change-port --proxy-port <端口>`。换之前先在 VPS 上临时监听候选端口（最长 90 秒后自动退出；刚中断过的，约 90 秒内重跑可能报“端口被占用”，等一会再试），从本机测能否连上，只用能连上的；都连不上时退出 1、VPS 不动。本机经代理 TUN、VPS 没有 python3、VPS 上 ufw 已启用时跳过这一步，`--no-probe` 关闭。UUID、密钥和订阅地址不变，改完客户端重新拉一次订阅。中转机上同时跑着链时，先换链的端口（`ownexit chain change-port`），再换直连，最后 `ownexit chain rebaseline`。
 - 改伪装域名或代理端口：`setup_direct.sh up --sni <域名>` 或 `up --proxy-port <端口>`，UUID 和密钥不变，改完客户端要重新拉一次订阅。不是每个 HTTPS 站点都能当伪装域名：实测 `www.amazon.com`（默认）、`www.apple.com` 可用，`www.microsoft.com` 不可用（客户端握手被服务器判为无效）；换域名后先用一台设备确认能连上，连不上就换回。正在通过这条隧道上网时改握手参数会把自己锁在外面：先切到别的网络，再改。
 - 多设备：`add-device <名字>` 给一台设备单独一个 UUID 和一组订阅地址（交付信息里单独列出，只发给这台设备），`remove-device <名字>` 吊销它，它立即连不上、订阅地址也被删除，其它设备不受影响。现有的那套凭据就是 `default`，订阅地址不变。设备名只允许小写字母、数字和 `-`，最多 32 个字符，每台 VPS 最多 32 台（含 default）。`ownexit direct devices` 列出设备与订阅地址。换了电脑后本机没有某台设备的订阅记录时，重跑一次 `setup_direct.sh` 会补生成；旧电脑上生成的设备订阅目录不会被自动删除。有设备后请保持本机为 0.7.0 及以上：旧版本改参数时会丢掉设备。
 - 换凭据：`setup_direct.sh rotate-keys` 在 VPS 上重新生成全部设备的 UUID、Reality 密钥对和 short id，端口、SNI、订阅地址不变；新配置起不来会自动恢复原配置。旧节点立刻失效，所有设备都要重新拉订阅。可以和 `rotate-token` 一起用（`rotate-keys rotate-token`），同时换掉订阅地址；不能和 `migrate` / `uninstall` 同用（233boy 旧版先迁移再换）。中途断开时重跑同一条命令即可，已经换过的不会再换一次。
@@ -152,7 +153,7 @@ curl -x http://127.0.0.1:7890 https://ipinfo.io   # 另开终端验证
 | `reason=password-disabled` | 服务器关闭了密码登录 | 在控制台开启密码登录，或手工把 `~/.ssh/ownexit/` 下对应的 `.pub` 内容加进 VPS 的 `~/.ssh/authorized_keys` |
 | `reason=unreachable` | IP、SSH 端口不对，或安全组没放行 | 核对 IP 和端口；SSH 本身连不上时用服务商的网页终端（VNC）排查 |
 | 公钥推送成功但免密仍失败 | 服务商模板把 sshd 的公钥认证关了 | `connect_to.sh` 会自动把 `PubkeyAuthentication no` 改回 `yes` 并重启 sshd（需 root）；仍失败就在网页终端里手工改 |
-| 客户端能连上但上不了网 | 代理端口没放行，或 SNI 域名不通 | 检查服务商安全组；运行 `setup_direct.sh log` 看日志，必要时用 `up --sni` / `up --proxy-port` 换 SNI 或端口 |
+| 客户端能连上但上不了网 | 代理端口没放行，或 SNI 域名不通 | 检查服务商安全组；运行 `setup_direct.sh log` 看日志，必要时用 `up --sni` / `change-port` 换 SNI 或端口 |
 | 提示“服务器上是用 233boy 脚本装的旧版”（退出码 2） | 这台 VPS 是用旧版 ownexit（233boy 脚本）部署的 | 运行 `setup_direct.sh migrate`，见第 9 节 |
 | 提示“上次未完成的操作恢复失败” | 迁移等操作中途 VPS 断电，恢复时新服务也起不来 | 按提示看 `setup_direct.sh log`；迁移备份在 `/var/backups/ownexit-direct/` |
 | 国内网站也走了代理 | 客户端的 GeoIP / GeoSite 数据库没下载完 | 在客户端设置里手动更新一次数据库 |

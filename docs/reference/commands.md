@@ -30,6 +30,7 @@
 | 子命令 | 作用 |
 | ---- | ---- |
 | `up` | 部署 / 复用（可带 `--host` `--sni` `--proxy-port` `--sub-ttl` `--allow-tun`）；不能与下面的维护子命令同用 |
+| `change-port` | 只换代理端口（可带 `--proxy-port`，不给时随机选）；UUID、密钥、订阅地址不变。换之前先在 VPS 上临时监听候选端口、从本机测能否连上，只用能连上的；本机经 TUN、VPS 没有 python3、VPS 上 ufw 已启用时跳过这一步，`--no-probe` 关闭 |
 | `rotate-keys` | 重新生成全部设备的 UUID 与 Reality 密钥 / short id |
 | `rotate-token` | 重新生成订阅 TOKEN 与端口 |
 | `add-device` | 新增一台设备，跟设备名（`[a-z0-9][a-z0-9-]{0,31}`，不能是 default） |
@@ -54,6 +55,7 @@
 | `--port` | `-P` | SSH 端口，默认 22 |
 | `--sni` | | Reality 伪装域名（新装默认 www.amazon.com） |
 | `--proxy-port` | | 代理端口（新装默认 20000-59999 随机） |
+| `--no-probe` | | 只用于 `change-port`：换之前不先从本机测新端口能否连上 |
 | `--sub-ttl` | | 订阅服务启动后多久自动关闭（`<正整数>[s/m/h]`，不带单位按分钟，1 分钟到 24 小时）；不给则不自动关闭 |
 | `--migrate` | | 2.0 已移除：退出 2，提示改用 `migrate` 子命令 |
 | `--uninstall` | | 2.0 已移除：退出 2，提示改用 `uninstall` 子命令 |
@@ -63,15 +65,15 @@
 | `--remove-device` | | 2.0 已移除：退出 2，提示改用 `remove-device` 子命令 |
 | `--allow-tun` | | 本机到 VPS 的路由经代理 TUN 时默认拒绝部署（退出 1），加它只警告继续 |
 
-互斥规则：`migrate`、`uninstall`、`rotate-token` 三者互斥；`rotate-keys` 不能与 `migrate` / `uninstall` 同用；`add-device` 与 `remove-device` 互斥，且不能与 `migrate` / `uninstall` 同用；`--sni` / `--proxy-port` / `--sub-ttl` 不能与 `uninstall` 同用；`up` 不能与维护子命令同用。
+互斥规则：`migrate`、`uninstall`、`rotate-token` 三者互斥；`rotate-keys` 不能与 `migrate` / `uninstall` 同用；`add-device` 与 `remove-device` 互斥，且不能与 `migrate` / `uninstall` 同用；`--sni` / `--proxy-port` / `--sub-ttl` 不能与 `uninstall` 同用；`up` 不能与维护子命令同用；`change-port` 不能与 `up`、其它维护子命令、`--sni`、`--sub-ttl` 同用；`--no-probe` 只能与 `change-port` 同用。
 
 ### 退出码
 
 | 码 | 含义 |
 | ---- | ---- |
 | 0 | 全部通过 |
-| 1 | 部署失败或有验证项未通过；部署前自检发现到 VPS 的路由经 TUN 且未加 `--allow-tun` |
-| 2 | 参数错误、缺参数（非终端运行时）、服务器是 233boy 旧版需要 `migrate`、调用了 2.0 已移除的旧参数、设备操作被拒（已存在 / 不存在 / 超过上限） |
+| 1 | 部署失败或有验证项未通过；部署前自检发现到 VPS 的路由经 TUN 且未加 `--allow-tun`；`change-port` 本机连不上候选端口（或指定端口）、探测期间 SSH 不可达、探测结果无法识别或停止临时监听失败（VPS 未改端口） |
+| 2 | 参数错误、缺参数（非终端运行时）、服务器是 233boy 旧版需要 `migrate`、调用了 2.0 已移除的旧参数、设备操作被拒（已存在 / 不存在 / 超过上限）；`change-port` 用在还没部署的服务器上、指定端口就是当前端口或已被占用 |
 
 ### 输出
 
@@ -134,6 +136,7 @@
 | `--to` | migrate-exit | 新出口机 IPv4；与 `--abort`、`--abandon-cleanup` 互斥 |
 | `--to-port` | migrate-exit | 新出口机 SSH 端口，默认 22；只能与 `--to` 同用 |
 | `--port` | change-port | 中转新的对外端口（1-65535，不能是当前端口，且在中转上空闲）；不带时在 20000-59999 里随机选 |
+| `--no-probe` | change-port | 换之前不先从本机测新端口能否连上 |
 | `--abort` | migrate-exit | 中转切换之前放弃迁移，恢复原配置 |
 | `--abandon-cleanup` | migrate-exit | 迁移已提交、旧出口机永久失联时放弃清理 |
 
@@ -156,7 +159,7 @@
 | `banlist` | 对照本地与中转的黑名单 |
 | `rebaseline` | 重新登记中转机上的既有 sing-box |
 | `rotate-keys` | 更换全部设备的 UUID 与 Reality 密钥 / short id |
-| `change-port` | 只把中转对外端口换成新端口（可跟 `--port <n>`），凭据、设备、出口机不变；客户端只改节点端口或重新导入，多链聚合需重新 render；本链现有连接断开一次；中途失败重跑收敛 |
+| `change-port` | 只把中转对外端口换成新端口（可跟 `--port <n>`、`--no-probe`），凭据、设备、出口机不变；换之前先在中转上临时监听候选端口、从本机测能否连上，只用能连上的（本机经 TUN、中转没有 python3 时跳过）；客户端只改节点端口或重新导入，多链聚合需重新 render；本链现有连接断开一次；中途失败重跑收敛 |
 | `add-device` | 新增一台设备（跟设备名） |
 | `remove-device` | 吊销一台设备（跟设备名） |
 | `list-devices` | 只读列出设备 |
@@ -169,7 +172,7 @@
 | 0 | 成功，或 `status` 为 deployed / not_deployed |
 | 1 | 运行时失败（远端操作、本地提交等） |
 | 2 | 参数错误（含调用 2.0 已移除的 `rehost-exit`，提示改用 `migrate-exit --to <新 IP>`）、配置与 state 不一致、设备操作被拒；省略 `--id` 时没有配置或有多条；`up` 已有配置但地址或 `--exit-bind` 不同；`qr` 没有这台设备；设置了 `EXIT_BIND_IPV4` 的链迁到另一台出口机；`change-port` 指定的端口等于当前端口，或新端口在中转上已被占用 |
-| 3 | 预检 / 检查失败、远端不可达或主机指纹不符（`preflight` 的失败一律为 3；`init` / `up` 配免密或探测失败也是 3）；`deploy` / `up` 部署前自检发现路由经 TUN 且未加 `--allow-tun`；`preflight` / `deploy` / `up` / `migrate-exit` 发现 `EXIT_BIND_IPV4` 不在出口机网卡上，或出口机没有 `ip` 命令无法核对（`verify` 发现时按下一行为 5） |
+| 3 | 预检 / 检查失败、远端不可达或主机指纹不符（`preflight` 的失败一律为 3；`init` / `up` 配免密或探测失败也是 3）；`deploy` / `up` 部署前自检发现路由经 TUN 且未加 `--allow-tun`；`change-port` 本机连不上候选端口（或指定端口）、探测期间 SSH 不可达、探测结果无法识别或停止临时监听失败（中转未改端口）；`preflight` / `deploy` / `up` / `migrate-exit` 发现 `EXIT_BIND_IPV4` 不在出口机网卡上，或出口机没有 `ip` 命令无法核对（`verify` 发现时按下一行为 5） |
 | 4 | `deploy` / `up` 的部署阶段失败（远端不可达仍为 3；迁移进行中被拒也是 4）；`migrate-exit` 发现新出口机上已有本链文件 |
 | 5 | `status` 不健康（busy / stale_lock / incomplete / unreachable / orphaned / drifted）、`verify` 失败；`qr` 链未部署、锁忙 / 陈旧、节点文件与 state 不一致；其它命令的锁、state 损坏、未完成事务或收尾 verify 失败；出口机迁移进行中时 rebaseline / rotate-keys / change-port / add-device / remove-device 被拒；`change-port` 发现中转 socket drift、本机设备节点与 devices.env 不一致或远端健康预检失败（远端未改动） |
 | 6 | `rollback` 预校验或执行失败（含出口机迁移进行中被拒） |

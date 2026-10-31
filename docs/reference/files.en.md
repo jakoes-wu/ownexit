@@ -135,7 +135,7 @@ The configuration must contain the first 13 required keys; the only other keys a
 
 Subscription URL: `http://<VPS address>:<SUB_PORT>/<TOKEN>/<file name>`. The default device uses the TOKEN in `state.env`; each extra device uses its own TOKEN. Since 1.3.0 there is also an adaptive URL `http://<VPS address>:<SUB_PORT>/<TOKEN>/sub` (not a file): a User-Agent containing clash / mihomo / stash / verge gets `clash.yaml`, one containing sing-box / singbox or starting with sfa/, sfi/ or sfm/ gets `sing-box.json`, and everything else gets `shadowrocket.txt`. Every other path returns 404.
 
-Internal (not part of the public interface): the binary layout under `/opt/ownexit-direct/bin/` and the operation working directory under `/var/lib/ownexit-direct/`.
+Internal (not part of the public interface): the binary layout under `/opt/ownexit-direct/bin/` and the operation working directory under `/var/lib/ownexit-direct/`; and `ownexit-portprobe-<random>.service` (the transient unit change-port uses for its probe, created by `systemd-run`, never written to disk, lives at most about 90 seconds).
 
 ### Direct client.env keys
 
@@ -172,7 +172,7 @@ File names, node names, group names and "importable by the matching client" are 
 | Relay | `ownexit-chain-relay-<id>.socket` / `ownexit-chain-relay-<id>.service` | systemd-socket-proxyd forwarding |
 | Relay | `<the units above>.d/50-ownexit-chain-blacklist.conf` | Blocklist drop-in (`IPAddressDeny=`) |
 
-Internal (not part of the public interface): the binary layout under `/opt/ownexit-chain/bin/`, the helper files starting with `<id>.rotate.` and the `.stage-*` staging directories under `/etc/ownexit-chain/`.
+Internal (not part of the public interface): the binary layout under `/opt/ownexit-chain/bin/`, the helper files starting with `<id>.rotate.` and the `.stage-*` staging directories under `/etc/ownexit-chain/`; and `ownexit-portprobe-<random>.service` (the transient unit change-port uses for its probe, created by `systemd-run`, never written to disk, lives at most about 90 seconds).
 
 ## Node and group names
 

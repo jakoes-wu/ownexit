@@ -69,7 +69,7 @@ chain/setup_chain.sh --id main verify     # 完整验证出口
 chain/setup_chain.sh --id main conns      # 中转机上有哪些来源 IP 在连
 chain/setup_chain.sh --id main ban 203.0.113.7    # 拉黑陌生来源
 chain/setup_chain.sh --id main rotate-keys   # 更换全部设备的 UUID 与 Reality 密钥 / short id
-chain/setup_chain.sh --id main change-port   # 只换中转对外端口（可加 --port <n>），凭据不变
+chain/setup_chain.sh --id main change-port   # 只换中转对外端口（可加 --port <n>、--no-probe），凭据不变
 chain/setup_chain.sh --id main add-device phone      # 新增一台设备（节点在状态目录 devices/node-phone.txt）
 chain/setup_chain.sh --id main remove-device phone   # 吊销一台设备
 chain/setup_chain.sh --id main rollback   # 拆除这条链，两台机器恢复到部署前
@@ -81,6 +81,8 @@ ownexit doctor --chain main --ip-check    # 诊断本机与这条链，并在出
 `rotate-keys` 只换出口机上的凭据并重启出口机的 sing-box（中断 1-3 秒），中转、端口和部署都不变；换完所有客户端要重新导入，用了多链聚合的要重新 `render`。`add-device` / `remove-device` 给每台设备单独一个 UUID，吊销一台不影响其它设备；部署时的那套凭据就是 `default`。中途断开时重跑同一条命令收敛。
 
 `change-port` 只把中转对外端口换成新端口，凭据、设备、出口机都不变；本链现有连接断开一次。换完按提示把客户端节点 `Exit-via-Relay-<链>`（及设备节点）的端口改成新值，或重新导入节点文件，用了多链聚合的要重新 `render`。中途断开时重跑 `change-port` 收敛。
+
+换之前会先在中转机上临时监听几个候选端口（最长 90 秒后自动退出），从本机测能否连上，只用能连上的；都连不上时退出 3、中转机不动。本机经代理 TUN、中转机没有 python3 时跳过这一步，`--no-probe` 关闭。刚中断过的 `change-port`，中转机上可能还有临时监听，约 90 秒后自动消失，这期间重跑报“端口被占用”就等一会再试。中转机上同时跑着直连（`ownexit direct`）时，按这个顺序换：先 `chain change-port`，再 `ownexit direct change-port`，最后 `chain rebaseline`。
 
 ## 6. 中转机被墙了怎么办
 

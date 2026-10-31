@@ -51,6 +51,14 @@ DO_MIGRATE=0
 DO_UNINSTALL=0
 WANT_SNI=""
 WANT_PROXY_PORT=""
+# change-port 子命令：只换代理端口（不给 --proxy-port 时随机选），换之前先从本机测新端口能否连上。
+CHANGE_PORT=0
+# --no-probe：change-port 不做本机回程探测。
+NO_PROBE=0
+# direct_probe_ports 的出参：ok / skipped、能连上的候选（按候选顺序）、其中第一个。
+PROBE_STATUS=""
+PROBE_REACHABLE=""
+PROBE_PORT=""
 # --sub-ttl：订阅服务自动关闭的时长（原值，如 30m）；空 = 不自动关闭（默认，与 1.3.0 相同）。
 WANT_SUB_TTL=""
 SUB_TTL_SECONDS=""
@@ -83,6 +91,8 @@ Deploy (no subcommand means up; the first run asks once for the VPS root passwor
   ownexit direct up --sub-ttl 30m                       # the subscription service turns itself off after 30 minutes
 
 Maintenance:
+  ownexit direct change-port [--proxy-port 34567]   change only the proxy port (random without --proxy-port); before switching it
+                                            tests from this computer which candidate ports it can reach (--no-probe skips that)
   ownexit direct rotate-token               subscription URL may have leaked: get a new subscription URL
   ownexit direct rotate-keys                node credentials may have leaked: new UUID / Reality key / short id (every device re-imports)
   ownexit direct rotate-keys rotate-token   replace both
@@ -108,6 +118,7 @@ Options:
   --sni <domain>              Reality camouflage domain; default for new installs ${DIRECT_SNI_DEFAULT}. Not every HTTPS site works
                               (www.microsoft.com does not in tests); confirm one device can connect after changing it
   --proxy-port <port>         proxy port; random in 20000-59999 for new installs
+  --no-probe                  change-port only: do not test from this computer whether the new port is reachable first
   --sub-ttl <duration>        how long after starting the subscription service turns itself off (for example 30m, 2h;
                               minutes when no unit is given, 1 minute to 24 hours); without it, run ownexit direct sub stop after importing
   --allow-tun                 refused by default when the route from this computer to the VPS goes through a proxy TUN (SSH would be cut
@@ -118,7 +129,8 @@ Options:
 migrate, uninstall and rotate-token exclude each other; rotate-keys cannot be combined with migrate / uninstall;
 add-device and remove-device exclude each other and cannot be combined with migrate / uninstall; --sni / --proxy-port / --sub-ttl
 cannot be combined with uninstall; up cannot be combined with maintenance subcommands; day-to-day operations cannot be combined with
-deployment / maintenance options (arguments after a day-to-day operation are handled by it).
+deployment / maintenance options (arguments after a day-to-day operation are handled by it). change-port can only be combined with
+--proxy-port, --no-probe, --allow-tun and the SSH target options; --no-probe only goes with change-port.
 
 Removed in 2.0 (calling them exits 2 and prints the new form):
   --rotate-token / --rotate-keys / --add-device <name> / --remove-device <name> / --migrate / --uninstall
@@ -142,6 +154,8 @@ EOF
   ownexit direct up --sub-ttl 30m                       # 订阅服务 30 分钟后自动关闭
 
 维护:
+  ownexit direct change-port [--proxy-port 34567]   只换代理端口（不给 --proxy-port 时随机选）；换之前先从本机测哪些
+                                            候选端口能连上，只用能连上的（--no-probe 跳过）
   ownexit direct rotate-token               怀疑订阅链接泄露：换一个新的订阅地址
   ownexit direct rotate-keys                怀疑节点凭据泄露：换一套新的 UUID / Reality 密钥 / short id（所有设备都要重新导入）
   ownexit direct rotate-keys rotate-token   两者一起换
@@ -167,6 +181,7 @@ EOF
   --sni <域名>                Reality 伪装域名；新装默认 ${DIRECT_SNI_DEFAULT}。不是每个 HTTPS 站点都能用
                               （实测 www.microsoft.com 不可用），改完先用一台设备确认能连上
   --proxy-port <端口>         代理端口；新装默认在 20000-59999 随机
+  --no-probe                  只用于 change-port：换之前不先从本机测新端口能否连上
   --sub-ttl <时长>            订阅服务启动后多久自动关闭（例：30m、2h；不带单位按分钟，1 分钟到 24 小时）；
                               不给则不自动关闭，导入后手动 ownexit direct sub stop
   --allow-tun                 本机到 VPS 的路由经代理 TUN 时默认拒绝（部署途中 SSH 会被切断），加它只警告继续；
@@ -175,7 +190,8 @@ EOF
 
 migrate、uninstall、rotate-token 三者互斥；rotate-keys 不能与 migrate / uninstall 同用；
 add-device 与 remove-device 互斥，且不能与 migrate / uninstall 同用；--sni / --proxy-port / --sub-ttl 不能与 uninstall 同用；
-up 不能与维护子命令同用；日常操作不能与部署 / 维护参数同用（日常操作之后的参数交给它自己处理）。
+up 不能与维护子命令同用；日常操作不能与部署 / 维护参数同用（日常操作之后的参数交给它自己处理）。change-port 只能与
+--proxy-port、--no-probe、--allow-tun 及 SSH 目标参数同用；--no-probe 只能与 change-port 同用。
 
 2.0 已移除的写法（调用时退出 2 并提示新写法）:
   --rotate-token / --rotate-keys / --add-device <名> / --remove-device <名> / --migrate / --uninstall
@@ -262,6 +278,8 @@ while [[ $# -gt 0 ]]; do
     --allow-tun)      ALLOW_TUN=1; SAW_DEPLOY_ARG=1; shift ;;
     # 子命令（1.5.0 起的写法）：后面的互斥检查与执行路径都按这组变量判断。
     up)               SAW_UP=1; SAW_DEPLOY_ARG=1; shift ;;
+    change-port)      CHANGE_PORT=1; SAW_DEPLOY_ARG=1; shift ;;
+    --no-probe)       NO_PROBE=1; SAW_DEPLOY_ARG=1; shift ;;
     rotate-keys)      ROTATE_KEYS=1; SAW_DEPLOY_ARG=1; shift ;;
     rotate-token)     ROTATE_TOKEN=1; SAW_DEPLOY_ARG=1; shift ;;
     migrate)          DO_MIGRATE=1; SAW_DEPLOY_ARG=1; shift ;;
@@ -280,6 +298,11 @@ done
 if [[ "${SAW_UP}" == 1 ]] && { (( DO_MIGRATE + DO_UNINSTALL + ROTATE_TOKEN + ROTATE_KEYS > 0 )) || [[ -n "${WANT_ADD_DEVICE}${WANT_REMOVE_DEVICE}" ]]; }; then
   die_usage "$(L "up 只用于部署，不能与 migrate / uninstall / rotate-token / rotate-keys / add-device / remove-device 同用" "up is only for deploying and cannot be combined with migrate / uninstall / rotate-token / rotate-keys / add-device / remove-device")"
 fi
+# change-port 只换代理端口：别的维护操作、换伪装域名、订阅定时关闭都各有命令，混在一起会让“只改端口、UUID 与密钥不变”的承诺说不清。
+if [[ "${CHANGE_PORT}" == 1 ]] && { (( SAW_UP + DO_MIGRATE + DO_UNINSTALL + ROTATE_TOKEN + ROTATE_KEYS > 0 )) || [[ -n "${WANT_ADD_DEVICE}${WANT_REMOVE_DEVICE}${WANT_SNI}${WANT_SUB_TTL}" ]]; }; then
+  die_usage "$(L "change-port 只换代理端口，不能与 up / rotate-keys / rotate-token / migrate / uninstall / add-device / remove-device / --sni / --sub-ttl 同用" "change-port only changes the proxy port and cannot be combined with up / rotate-keys / rotate-token / migrate / uninstall / add-device / remove-device / --sni / --sub-ttl")"
+fi
+[[ "${NO_PROBE}" == 0 || "${CHANGE_PORT}" == 1 ]] || die_usage "$(L "--no-probe 只能与 change-port 同用" "--no-probe can only be used with change-port")"
 (( DO_MIGRATE + DO_UNINSTALL + ROTATE_TOKEN <= 1 )) || die_usage "$(L "migrate、uninstall、rotate-token 只能选一个" "Choose only one of migrate, uninstall and rotate-token")"
 # 迁移承诺“沿用旧凭据”，与轮换矛盾；卸载后无凭据可换。要换旧版的凭据：先 migrate，再 rotate-keys。
 (( DO_MIGRATE + DO_UNINSTALL + ROTATE_KEYS <= 1 )) || die_usage "$(L "rotate-keys 不能与 migrate / uninstall 同用（旧版先 migrate 再 rotate-keys）" "rotate-keys cannot be combined with migrate / uninstall (for an old install, migrate first, then rotate-keys)")"
@@ -728,6 +751,270 @@ server_port_in_use() {
   vssh "ss -H -ltn | awk '{print \$4}' | grep -Eq '[:.]$1\$'" >/dev/null 2>&1
 }
 
+# 限时 TCP 连通性探测：能建立连接返回 0。与 chain/setup_chain.sh 的 tcp_probe 同一实现。
+tcp_probe() {
+  local host port seconds
+  host="$1"
+  port="$2"
+  seconds="$3"
+  if [[ "$(uname -s)" == Darwin ]]; then
+    nc -4 -n -z -G "${seconds}" "${host}" "${port}" >/dev/null 2>&1
+  else
+    timeout "${seconds}" bash -c 'exec 3<>"/dev/tcp/$0/$1"' "${host}" "${port}" >/dev/null 2>&1
+  fi
+}
+
+# change-port 换端口前的远端临时监听，与 chain/setup_chain.sh 同文（docs/feature/feature-port-reachability-probe.md §5.1.1）。
+# start：用 systemd-run 起一个最长活 90 秒的临时 service，用 python3 监听候选端口，只回报属于该 service 进程的监听；
+# stop：停掉它。SSH 断开或本机被打断时靠 RuntimeMaxSec 兜底，--collect 让它退出后不留单元。
+# 监听代码经 ExecStart 传给 systemd，systemd 会展开其中的 $ 和 %，所以代码里不能出现这两个字符。
+write_port_probe_script() {
+  local output
+  output="$1"
+  cat > "${output}" <<'PORT_PROBE'
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+mode="$1"
+unit="$2"
+shift 2
+case "${mode}" in
+  start)
+    py="$(command -v python3 || true)"
+    if [[ -z "${py}" ]]; then
+      printf 'PROBE=nopython\n'
+      exit 0
+    fi
+    code='import select, socket, sys
+socks = []
+for arg in sys.argv[1:]:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("0.0.0.0", int(arg)))
+        s.listen(16)
+    except OSError:
+        s.close()
+        continue
+    socks.append(s)
+if not socks:
+    sys.exit(3)
+while True:
+    ready = select.select(socks, [], [])[0]
+    for s in ready:
+        try:
+            s.accept()[0].close()
+        except OSError:
+            pass'
+    if ! systemd-run --quiet --collect --unit="${unit}" --property=RuntimeMaxSec=90 "${py}" -c "${code}" "$@" >/dev/null 2>&1; then
+      printf 'PROBE=startfail\n'
+      exit 0
+    fi
+    want="$#"
+    tries=0
+    listen=''
+    state=''
+    while (( tries < 20 )); do
+      state="$(systemctl show -p ActiveState --value "${unit}" 2>/dev/null || true)"
+      [[ "${state}" == active || "${state}" == activating ]] || break
+      pid="$(systemctl show -p MainPID --value "${unit}" 2>/dev/null || true)"
+      if [[ -n "${pid}" && "${pid}" != 0 ]]; then
+        # 只认这个 service 进程名下的监听，别的程序占着的端口不算。
+        listen="$(ss -H -ltnp 2>/dev/null | awk -v pid="${pid}" 'index($0, "pid=" pid ",") {n = split($4, a, ":"); print a[n]}' | sort -un || true)"
+        [[ "$(printf '%s\n' "${listen}" | awk 'NF {n++} END {print n + 0}')" -lt "${want}" ]] || break
+      fi
+      sleep 0.5
+      tries="$((tries + 1))"
+    done
+    if [[ "${state}" != active && "${state}" != activating ]]; then
+      printf 'PROBE=exited\n'
+      exit 0
+    fi
+    printf 'PROBE=ready\n'
+    printf '%s\n' "${listen}" | awk 'NF {print "LISTEN=" $1}'
+    ;;
+  stop)
+    # 单元可能已被 RuntimeMaxSec 回收，stop / reset-failed 返回非 0 不算失败，以最后的状态为准。
+    systemctl stop "${unit}" >/dev/null 2>&1 || true
+    systemctl reset-failed "${unit}" >/dev/null 2>&1 || true
+    state="$(systemctl show -p ActiveState --value "${unit}" 2>/dev/null || true)"
+    case "${state}" in
+      active|activating) printf 'PROBE=stopfail\n' ;;
+      *) printf 'PROBE=stopped\n' ;;
+    esac
+    ;;
+  *)
+    printf 'PROBE=badmode\n'
+    exit 2
+    ;;
+esac
+PORT_PROBE
+  chmod 600 "${output}"
+}
+
+# 探测候选端口：测试用 OWNEXIT_TEST_PROBE_CANDIDATES 固定；否则 20000-59999 内随机 8 个、互不相同，跳过参数里给的端口。
+probe_random_candidates() {
+  local list attempt hex candidate x skip
+  if [[ -n "${OWNEXIT_TEST_PROBE_CANDIDATES:-}" ]]; then
+    printf '%s\n' "${OWNEXIT_TEST_PROBE_CANDIDATES}"
+    return 0
+  fi
+  list=''
+  attempt=0
+  while (( attempt < 200 )) && [[ "$(wc -w <<< "${list}" | tr -d ' ')" -lt 8 ]]; do
+    attempt="$((attempt + 1))"
+    hex="$(openssl rand -hex 2)"
+    candidate="$((20000 + (16#${hex} % 40000)))"
+    skip=0
+    for x in "$@" ${list}; do
+      [[ "${x}" != "${candidate}" ]] || skip=1
+    done
+    [[ "${skip}" == 1 ]] || list="${list:+${list} }${candidate}"
+  done
+  printf '%s\n' "${list}"
+}
+
+# 直连没有统一的本机临时目录：探测脚本临时写到 mktemp 文件，正常返回与退出前都删掉。
+DIRECT_PROBE_SCRIPT=""
+direct_probe_die() {
+  [[ -z "${DIRECT_PROBE_SCRIPT}" ]] || rm -f "${DIRECT_PROBE_SCRIPT}"
+  die "$@"
+}
+
+# change-port 换端口前的本机回程探测（docs/feature/feature-port-reachability-probe.md §5.1.2）：
+# 在 VPS 上临时监听候选端口，从本机测 TCP 握手，只把能连上的交给调用方。出参写全局 PROBE_STATUS / PROBE_REACHABLE /
+# PROBE_PORT，必须在主 shell 里直接调用：放进 $(...) 的话 die 只结束子 shell，换端口会在“都连不上”时照样继续。
+# 用法：direct_probe_ports <VPS IP> <对照端口，可为空> <候选端口…>
+direct_probe_ports() {
+  local host current iface ufw_status unit out rc kind listen p current_ok k n
+  host="$1"
+  current="$2"
+  shift 2
+  PROBE_STATUS=skipped
+  PROBE_REACHABLE=""
+  PROBE_PORT=""
+  if [[ "${NO_PROBE}" == 1 ]]; then
+    echo "[*] [portprobe] skipped reason=no-probe"
+    return 0
+  fi
+  if [[ ! "${host}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "$(L "[!] [portprobe] skipped reason=not-ipv4：${host} 不是 IPv4 地址，跳过探测" "[!] [portprobe] skipped reason=not-ipv4: ${host} is not an IPv4 address; probe skipped")"
+    return 0
+  fi
+  iface="$(route_interface "${host}" || true)"
+  if [[ -z "${iface}" ]]; then
+    echo "$(L "[!] [portprobe] skipped reason=no-route：查不到本机到 ${host} 的出接口，跳过探测" "[!] [portprobe] skipped reason=no-route: cannot find this computer's outgoing interface to ${host}; probe skipped")"
+    return 0
+  fi
+  if interface_is_tunnel "${iface}"; then
+    echo "$(L "[!] [portprobe] skipped reason=tun：本机到 ${host} 经 TUN（${iface}），本机测出的结果不代表真实网络，跳过探测" "[!] [portprobe] skipped reason=tun: this computer reaches ${host} through a TUN (${iface}); a local test would not reflect the real network; probe skipped")"
+    return 0
+  fi
+  # ufw 已启用时临时端口会被它挡住，测出来全是“连不上”；判定写法与后面放行端口处相同。
+  if ufw_status="$(vssh "command -v ufw >/dev/null 2>&1 && ufw status | head -n 1 || echo none")"; then rc=0; else rc="$?"; fi
+  [[ "${rc}" -ne 255 ]] || die "$(L "探测端口时 SSH 不可达，VPS 未改端口；稍后重跑" "SSH became unreachable while probing ports; the VPS port was not changed; rerun later")"
+  if [[ "${ufw_status}" == *active* && "${ufw_status}" != *inactive* ]]; then
+    echo "$(L "[!] [portprobe] skipped reason=ufw：VPS 上 ufw 已启用，会挡住临时监听的端口，跳过探测" "[!] [portprobe] skipped reason=ufw: ufw is enabled on the VPS and would block the temporary ports; probe skipped")"
+    return 0
+  elif [[ "${ufw_status}" != none && "${ufw_status}" != *inactive* ]]; then
+    echo "$(L "[!] [portprobe] skipped reason=ufw-unknown：无法确认 VPS 的防火墙状态（${ufw_status}），跳过探测" "[!] [portprobe] skipped reason=ufw-unknown: cannot determine the VPS firewall state (${ufw_status}); probe skipped")"
+    return 0
+  fi
+  unit="ownexit-portprobe-$(openssl rand -hex 4)"
+  DIRECT_PROBE_SCRIPT="$(mktemp "${TMPDIR:-/tmp}/ownexit-portprobe.XXXXXX")"
+  write_port_probe_script "${DIRECT_PROBE_SCRIPT}"
+  echo "[*] [portprobe] start host=${host} unit=${unit} candidates=$(tr ' ' ',' <<< "$*")"
+  if out="$(vssh bash -s -- start "${unit}" "$@" < "${DIRECT_PROBE_SCRIPT}")"; then rc=0; else rc="$?"; fi
+  [[ "${rc}" -ne 255 ]] || direct_probe_die "$(L "探测端口时 SSH 不可达，VPS 未改端口；VPS 上的临时监听最多 90 秒后自动退出，稍后重跑" "SSH became unreachable while probing ports; the VPS port was not changed; the temporary listener on the VPS exits by itself within 90 seconds; rerun later")"
+  kind="$(awk -F= '$1 == "PROBE" {print $2; exit}' <<< "${out}")"
+  [[ "${rc}" -eq 0 && -n "${kind}" ]] || direct_probe_die "$(L "探测结果无法识别（rc=${rc}），VPS 未改端口；VPS 上的临时监听最多 90 秒后自动退出；可加 --no-probe 跳过" "The probe result could not be understood (rc=${rc}); the VPS port was not changed; the temporary listener on the VPS exits by itself within 90 seconds; add --no-probe to skip it")"
+  if [[ "${OWNEXIT_TEST_PROBE_STOP_AFTER:-}" == start ]]; then
+    rm -f "${DIRECT_PROBE_SCRIPT}"
+    echo "$(L "[!] 测试钩子：change-port 在探测 start 之后停止" "[!] Test hook: change-port stops after the probe start")" >&2
+    exit 99
+  fi
+  listen="$(awk -F= '$1 == "LISTEN" {print $2}' <<< "${out}" | tr '\n' ' ')"
+  case "${kind}" in
+    nopython)
+      rm -f "${DIRECT_PROBE_SCRIPT}"
+      echo "$(L "[!] [portprobe] skipped reason=nopython：VPS 上没有 python3，跳过探测，按原方式选端口" "[!] [portprobe] skipped reason=nopython: the VPS has no python3; probe skipped, choosing the port as before")"
+      return 0 ;;
+    startfail)
+      direct_probe_stop "${unit}"
+      echo "$(L "[!] [portprobe] skipped reason=startfail：VPS 上的临时监听没起来，跳过探测，按原方式选端口" "[!] [portprobe] skipped reason=startfail: the temporary listener on the VPS did not start; probe skipped, choosing the port as before")"
+      return 0 ;;
+    ready) ;;
+    exited) listen="" ;;
+    *) direct_probe_die "$(L "探测结果无法识别（PROBE=${kind}），VPS 未改端口；VPS 上的临时监听最多 90 秒后自动退出；可加 --no-probe 跳过" "The probe result could not be understood (PROBE=${kind}); the VPS port was not changed; the temporary listener on the VPS exits by itself within 90 seconds; add --no-probe to skip it")" ;;
+  esac
+  if [[ -z "${listen// /}" ]]; then
+    direct_probe_stop "${unit}"
+    echo "$(L "[!] [portprobe] skipped reason=nolisten：VPS 上的临时监听没有监听到任何候选端口，跳过探测，按原方式选端口" "[!] [portprobe] skipped reason=nolisten: the temporary listener on the VPS is not listening on any candidate port; probe skipped, choosing the port as before")"
+    return 0
+  fi
+  echo "[*] [portprobe] listen=$(tr ' ' ',' <<< "${listen% }")"
+  current_ok=""
+  if [[ -n "${current}" ]]; then
+    if tcp_probe "${host}" "${current}" 3; then current_ok=yes; else current_ok=no; fi
+    echo "[*] [portprobe] current=${current} reachable=${current_ok}"
+  fi
+  n=0
+  k=0
+  # 按候选顺序测，指定端口时只有一个候选；没出现在 LISTEN 里的候选（bind 失败、被占用）不算。
+  for p in "$@"; do
+    [[ " ${listen} " == *" ${p} "* ]] || continue
+    n="$((n + 1))"
+    if tcp_probe "${host}" "${p}" 3; then
+      k="$((k + 1))"
+      PROBE_REACHABLE="${PROBE_REACHABLE:+${PROBE_REACHABLE} }${p}"
+    fi
+  done
+  direct_probe_stop "${unit}"
+  PROBE_PORT="${PROBE_REACHABLE%% *}"
+  echo "[*] [portprobe] result reachable=${k}/${n} chosen=${PROBE_PORT:--}"
+  if [[ -n "${PROBE_PORT}" ]]; then
+    PROBE_STATUS=ok
+    [[ "${current_ok}" != yes ]] || echo "$(L "[!] 当前端口 ${current} 本机就能连上，换端口不一定能解决问题" "[!] This computer can already reach the current port ${current}; changing the port may not fix the problem")"
+    return 0
+  fi
+  if [[ -n "${WANT_PROXY_PORT}" ]]; then
+    die "$(L "本机连不上 ${host}:${WANT_PROXY_PORT}，VPS 未改端口；换一个 --proxy-port，或加 --no-probe 跳过" "This computer cannot reach ${host}:${WANT_PROXY_PORT}; the VPS port was not changed; pick another --proxy-port, or add --no-probe to skip the probe")"
+  elif [[ "${current_ok}" == yes ]]; then
+    die "$(L "本机能连上当前端口 ${current}，但候选端口都连不上，VPS 未改端口；可能是 VPS 本机防火墙只放行了当前端口，也可能是这批候选被拦；重跑会换一批候选" "This computer can reach the current port ${current} but none of the candidate ports; the VPS port was not changed; the VPS's own firewall may only allow the current port, or this batch of candidates is blocked; a rerun tries a new batch")"
+  else
+    die "$(L "本机到 ${host} 的这些端口都连不上，VPS 未改端口；可能是本机网络或 VPS 的云防火墙 / 安全组拦截；换个网络再试，或确认安全组后加 --no-probe" "This computer cannot reach any of these ports on ${host}; the VPS port was not changed; the local network or the VPS's cloud firewall / security group may be blocking them; try another network, or check the security group and add --no-probe")"
+  fi
+}
+
+# 停掉 direct_probe_ports 起的临时监听并删掉本机临时脚本；停不掉就退出 1（此时 VPS 还没改端口）。
+direct_probe_stop() {
+  local unit out rc
+  unit="$1"
+  if out="$(vssh bash -s -- stop "${unit}" < "${DIRECT_PROBE_SCRIPT}")"; then rc=0; else rc="$?"; fi
+  if [[ "${rc}" -eq 0 && "${out}" == *PROBE=stopped* ]]; then
+    rm -f "${DIRECT_PROBE_SCRIPT}"
+    echo "[*] [portprobe] stopped unit=${unit}"
+    return 0
+  fi
+  direct_probe_die "$(L "停止 VPS 上的临时监听 ${unit} 失败（rc=${rc}），VPS 未改端口；它最多 90 秒后自动退出，稍后重跑" "Stopping the temporary listener ${unit} on the VPS failed (rc=${rc}); the VPS port was not changed; it exits by itself within 90 seconds; rerun later")"
+}
+
+# 不经探测随机选一个 VPS 上空闲的代理端口（排除当前端口与订阅端口），最多试 20 次。
+direct_random_free_port() {
+  local attempt hex candidate
+  attempt=0
+  while (( attempt < 20 )); do
+    attempt="$((attempt + 1))"
+    hex="$(openssl rand -hex 2)"
+    candidate="$((20000 + (16#${hex} % 40000)))"
+    [[ "${candidate}" != "${CUR_PORT}" && "${candidate}" != "${SUB_PORT}" ]] || continue
+    server_port_in_use "${candidate}" && continue
+    printf '%s\n' "${candidate}"
+    return 0
+  done
+  return 1
+}
+
 CHANGED_PARAMS="${CHANGED_PARAMS_RECOVERED:-0}"
 DO_ROTATE=0
 case "${STATE}" in
@@ -735,6 +1022,7 @@ case "${STATE}" in
     [[ "${DO_MIGRATE}" == 0 ]] || { echo "$(L "[!] 服务器上没有可迁移的 233boy 旧版" "[!] There is no old 233boy install on the server to migrate")" >&2; exit 2; }
     [[ "${ROTATE_KEYS}" == 0 ]] || echo "$(L "[*] 新装本来就会生成全新凭据，忽略 rotate-keys" "[*] A new install generates fresh credentials anyway; ignoring rotate-keys")"
     [[ -z "${WANT_ADD_DEVICE}${WANT_REMOVE_DEVICE}" ]] || die_usage "$(L "服务器上还没有部署：先运行 ownexit direct up 完成部署，再新增 / 吊销设备" "Nothing is deployed on the server yet: run ownexit direct up to deploy first, then add / revoke devices")"
+    [[ "${CHANGE_PORT}" == 0 ]] || die_usage "$(L "服务器上还没有部署：先运行 ownexit direct up" "Nothing is deployed on the server yet: run ownexit direct up first")"
     ensure_sub_params
     if [[ -n "${WANT_PROXY_PORT}" ]]; then
       [[ "${WANT_PROXY_PORT}" != "${SUB_PORT}" ]] || die_usage "$(L "--proxy-port 与订阅端口 ${SUB_PORT} 相同，请换一个" "--proxy-port is the same as the subscription port ${SUB_PORT}; choose another")"
@@ -758,6 +1046,33 @@ case "${STATE}" in
     read_client_env
     CUR_SNI="$(kv_get "${CLIENT_ENV}" SNI)"
     CUR_PORT="$(kv_get "${CLIENT_ENV}" PORT)"
+    # change-port：先选出（并尽量探测过的）新端口填进 WANT_PROXY_PORT，之后完全走下面的改参数路径，UUID 与密钥不变。
+    if [[ "${CHANGE_PORT}" == 1 ]]; then
+      if [[ -n "${WANT_PROXY_PORT}" ]]; then
+        [[ "${WANT_PROXY_PORT}" != "${CUR_PORT}" ]] || die_usage "$(L "--proxy-port ${WANT_PROXY_PORT} 就是当前端口；换一个端口" "--proxy-port ${WANT_PROXY_PORT} is the current port; pick another one")"
+        [[ "${WANT_PROXY_PORT}" != "${SUB_PORT}" ]] || die_usage "$(L "--proxy-port 与订阅端口 ${SUB_PORT} 相同，请换一个" "--proxy-port is the same as the subscription port ${SUB_PORT}; choose another")"
+        ! server_port_in_use "${WANT_PROXY_PORT}" || die_usage "$(L "VPS 上端口 ${WANT_PROXY_PORT} 已被占用；刚中断过 change-port 的，约 90 秒后再试" "Port ${WANT_PROXY_PORT} is already in use on the VPS; if change-port was just interrupted, try again in about 90 seconds")"
+        # 连不上时在这里退出 1，VPS 零改动；探测做不了（skipped）时照旧用指定端口。
+        direct_probe_ports "${HOST}" "${CUR_PORT}" "${WANT_PROXY_PORT}"
+      else
+        read -r -a PROBE_CANDIDATES <<< "$(probe_random_candidates "${CUR_PORT}" "${SUB_PORT}")"
+        direct_probe_ports "${HOST}" "${CUR_PORT}" ${PROBE_CANDIDATES[@]+"${PROBE_CANDIDATES[@]}"}
+        if [[ "${PROBE_STATUS}" == ok ]]; then
+          # python 绑 0.0.0.0 成功不等于 ss 口径空闲（例如只有 IPv6 监听），按改参数路径的口径再查一次。
+          for PROBE_PICK in ${PROBE_REACHABLE}; do
+            if ! server_port_in_use "${PROBE_PICK}"; then
+              WANT_PROXY_PORT="${PROBE_PICK}"
+              break
+            fi
+          done
+          [[ -n "${WANT_PROXY_PORT}" ]] || echo "$(L "[!] [portprobe] 能连上的候选在 VPS 上都被占用，改为随机选空闲端口（未经探测）" "[!] [portprobe] every reachable candidate is in use on the VPS; picking a random free port instead (not probed)")"
+        fi
+        if [[ -z "${WANT_PROXY_PORT}" ]]; then
+          WANT_PROXY_PORT="$(direct_random_free_port)" || die "$(L "VPS 上选不出空闲端口" "No free port could be chosen on the VPS")"
+        fi
+      fi
+      echo "$(L "[*] change-port：新代理端口 ${WANT_PROXY_PORT}" "[*] change-port: new proxy port ${WANT_PROXY_PORT}")"
+    fi
     NEW_SNI=""; NEW_PORT=""
     [[ -z "${WANT_SNI}" || "${WANT_SNI}" == "${CUR_SNI}" ]] || NEW_SNI="${WANT_SNI}"
     [[ -z "${WANT_PROXY_PORT}" || "${WANT_PROXY_PORT}" == "${CUR_PORT}" ]] || NEW_PORT="${WANT_PROXY_PORT}"
@@ -769,7 +1084,7 @@ case "${STATE}" in
     if [[ -n "${NEW_SNI}" || -n "${NEW_PORT}" || "${DO_ROTATE}" == 1 || -n "${WANT_ADD_DEVICE}${WANT_REMOVE_DEVICE}" ]]; then
       if [[ -n "${NEW_PORT}" ]]; then
         [[ "${NEW_PORT}" != "${SUB_PORT}" ]] || die_usage "$(L "--proxy-port 与订阅端口 ${SUB_PORT} 相同，请换一个" "--proxy-port is the same as the subscription port ${SUB_PORT}; choose another")"
-        ! server_port_in_use "${NEW_PORT}" || die_usage "$(L "VPS 上端口 ${NEW_PORT} 已被占用" "Port ${NEW_PORT} is already in use on the VPS")"
+        ! server_port_in_use "${NEW_PORT}" || die_usage "$(L "VPS 上端口 ${NEW_PORT} 已被占用；刚中断过 change-port 的，约 90 秒后再试" "Port ${NEW_PORT} is already in use on the VPS; if change-port was just interrupted, try again in about 90 seconds")"
       fi
       if [[ "${DO_ROTATE}" == 1 ]]; then
         CRED_NOTE="$(L "凭据=重新生成 UUID / Reality 密钥 / short id" "credentials=new UUID / Reality key / short id")"
