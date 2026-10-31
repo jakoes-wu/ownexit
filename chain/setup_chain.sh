@@ -2682,7 +2682,9 @@ set -euo pipefail
 umask 077
 export LC_ALL=C
 # 被保护的既有单元由本机按 RELAY_COHOSTS_SINGBOX 传入（yes→sing-box.service，ownexit-direct→ownexit-direct.service）；
-# 输出只取决于 systemctl、/proc、ss 的结果，yes 时与旧版逐字相同，已部署链的基线不会误报漂移。
+# 输出只取决于 systemctl、/proc、ss 的结果。ExecStart 只取 path 与 argv（start_time、pid 等运行时字段会随重启和
+# daemon-reload 变化，不能参与比对），监听行去掉首尾空白（ss 末列按全场最长的进程串补空格）。
+# 2.3.0 及更早版本保存的基线（EXECSTART_SHA256 整行哈希、监听行可能带行尾空格）由本机 baseline_file_matches 兼容比对。
 unit="$1"
 
 metadata() {
@@ -2803,7 +2805,9 @@ printf '%s\n' '__UNIT__'
 {
   printf 'MAINPID_CMDLINE_SHA256=%s\n' "$(sha256sum "/proc/$pid/cmdline" | awk '{print $1}')"
   printf 'MAINPID_CWD=%s\n' "$cwd"
-  printf 'EXECSTART_SHA256=%s\n' "$(systemctl show "$unit" -p ExecStart --value | sha256sum | awk '{print $1}')"
+  # 每一项从 ignore_errors 起到右花括号的字段（启动时间、pid、退出码）都是运行时状态，删掉后只剩 { path=… ; argv[]=… }。
+  # 键名换成 EXECSTART_COMMAND_SHA256，比对端据此认出新旧格式；改回旧键名会让旧基线走错比对分支。
+  printf 'EXECSTART_COMMAND_SHA256=%s\n' "$(systemctl show "$unit" -p ExecStart --value | sed -E 's/ ; ignore_errors=[^}]*\}/ }/g' | sha256sum | awk '{print $1}')"
   fragment="$(systemctl show "$unit" -p FragmentPath --value)"
   [[ -n "$fragment" ]] && metadata "$fragment"
   systemctl show "$unit" -p DropInPaths --value | tr ' ' '\n' | sed '/^$/d' | while IFS= read -r item; do metadata "$item"; done
@@ -2825,7 +2829,7 @@ printf 'UID_MAPPED=%s\nGID_MAPPED=%s\n' "$uid_map" "$gid_map"
 printf '%s\n' '__LISTENERS__'
 {
   ss -H -ltnup 2>/dev/null | awk -v pid="$pid" 'index($0, "pid=" pid ",") {print}' \
-    | sed -E 's/pid=[0-9]+,//g; s/fd=[0-9]+//g; s/ino:[0-9]+//g; s/[[:space:]][[:space:]]*/ /g'
+    | sed -E 's/pid=[0-9]+,//g; s/fd=[0-9]+//g; s/ino:[0-9]+//g; s/[[:space:]][[:space:]]*/ /g; s/^ //; s/ $//'
 } | sort
 printf '%s\n' '__STATUS__'
 printf 'ACTIVE=%s\n' "$(systemctl is-active "$unit")"
@@ -4544,7 +4548,27 @@ cd /
 env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LD_LIBRARY_PATH= LD_PRELOAD= "$binary" check -c "$config" >/dev/null
 env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LD_LIBRARY_PATH= LD_PRELOAD= "$binary" run -c "$config" >"$log" 2>&1 &
 pid="$!"
-[[ "$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)" == "$binary" ]] || exit 121
+# 后台子进程要先 fork 出 shell、再 exec env、再 exec sing-box，刚拿到 pid 时 exe 可能还是 bash 或 env；
+# 立刻只判一次会在负载下误报 121（实测空闲 3/200、满负载 37/200），所以最多等 5 秒等 exec 完成。
+exe_ok=0
+exe_wait=0
+while (( exe_wait < 50 )); do
+  if [[ "$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)" == "$binary" ]]; then
+    exe_ok=1
+    break
+  fi
+  kill -0 "$pid" 2>/dev/null || exit 121
+  sleep 0.1
+  exe_wait=$((exe_wait + 1))
+done
+if [[ "$exe_ok" != 1 ]]; then
+  # cleanup 只收拾 exe 已是 sing-box 的进程；这里进程还活着但不是 sing-box，命令行含本次配置路径才是本次拉起的，才 kill。
+  cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+  if [[ "$cmd" == *"$config"* ]]; then
+    kill "$pid" 2>/dev/null || true
+  fi
+  exit 121
+fi
 started=0
 attempt=0
 while (( attempt < 50 )); do
@@ -4989,6 +5013,38 @@ deployment_residue_absent() {
   [[ "${rc}" -eq 0 ]]
 }
 
+# 比较中转基线的一个文件：$1 文件名，$2 本次采集的文件，$3 本机保存的文件；一致返回 0。
+# 兼容 2.3.0 及更早版本保存的基线（2.x 必须能读 1.x 起写下的内部文件，见 docs/reference/compatibility.md）：
+#   - relay-listeners.txt：旧版 sed 没去掉 ss 末列的补齐空格，两边都去掉行尾空白再比；
+#   - relay-unit-manifest.txt：保存的是旧格式（含 EXECSTART_SHA256=，整行哈希带启动时间和 pid）时，
+#     两边都不比 ExecStart 这一行；unit 文件、drop-in 与主进程命令行的改动仍由其余行查出。
+# 删掉这段兼容会让所有已部署的链在升级后报基线变化。
+baseline_file_matches() {
+  local name current saved
+  name="$1"
+  current="$2"
+  saved="$3"
+  case "${name}" in
+    relay-listeners.txt)
+      sed -E 's/[[:space:]]+$//' "${current}" >"${OP_TMP}/baseline-cmp-current" || return 1
+      sed -E 's/[[:space:]]+$//' "${saved}" >"${OP_TMP}/baseline-cmp-saved" || return 1
+      cmp -s "${OP_TMP}/baseline-cmp-current" "${OP_TMP}/baseline-cmp-saved"
+      ;;
+    relay-unit-manifest.txt)
+      if grep -q '^EXECSTART_SHA256=' "${saved}" 2>/dev/null; then
+        sed -e '/^EXECSTART_SHA256=/d' -e '/^EXECSTART_COMMAND_SHA256=/d' "${current}" >"${OP_TMP}/baseline-cmp-current" || return 1
+        sed -e '/^EXECSTART_SHA256=/d' -e '/^EXECSTART_COMMAND_SHA256=/d' "${saved}" >"${OP_TMP}/baseline-cmp-saved" || return 1
+        cmp -s "${OP_TMP}/baseline-cmp-current" "${OP_TMP}/baseline-cmp-saved"
+      else
+        cmp -s "${current}" "${saved}"
+      fi
+      ;;
+    *)
+      cmp -s "${current}" "${saved}"
+      ;;
+  esac
+}
+
 probe_relay_baseline() {
   local current file expected_active expected_enabled rc
   current="${OP_TMP}/baseline-current"
@@ -5003,7 +5059,7 @@ probe_relay_baseline() {
   [[ "${RELAY_BASELINE_SERVICE_ACTIVE}" == "${expected_active}" ]] || return 41
   [[ "${RELAY_BASELINE_SERVICE_ENABLED}" == "${expected_enabled}" ]] || return 41
   for file in relay-config-manifest.txt relay-unit-manifest.txt relay-binary-manifest.txt relay-listeners.txt; do
-    cmp -s "${current}/${file}" "${CHAIN_STATE_DIR}/baseline/${file}" || return 41
+    baseline_file_matches "${file}" "${current}/${file}" "${CHAIN_STATE_DIR}/baseline/${file}" || return 41
   done
 }
 
@@ -5181,7 +5237,12 @@ if [[ "$active" != active && "$allow_start" == yes ]]; then
 fi
 [[ "$active" == active ]] || exit 170
 pid="$(systemctl show "$service_name" -p MainPID --value)"
-[[ "$pid" =~ ^[1-9][0-9]*$ && "$(readlink -f "/proc/$pid/exe")" == "$proxyd" ]] || exit 171
+[[ "$pid" =~ ^[1-9][0-9]*$ ]] || exit 171
+exe="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
+# 系统更新替换了 systemd-socket-proxyd，正在跑的仍是旧进程（exe 显示 "<路径> (deleted)"）；线路照常可用，
+# 单独返回 178，让本机提示重启 relay service，而不是笼统报 unit / 进程漂移。
+[[ "$exe" != "$proxyd (deleted)" ]] || exit 178
+[[ "$exe" == "$proxyd" ]] || exit 171
 requires="$(systemctl show "$service_name" -p Requires --value)"
 case " $requires " in *" $socket_name "*) ;; *) exit 172 ;; esac
 printf 'VERIFY_RELAY=ok\n'
@@ -5219,6 +5280,12 @@ probe_remote_resources() {
     rc=0
   else
     rc="$?"
+  fi
+  # 178 = 中转转发程序已被系统更新替换、旧进程还在跑；单独返回 34，status 据此给出“重启 relay service”的下一步。
+  # 这不是基线变化，提示里明确不要用 rebaseline 掩盖。
+  if [[ "${rc}" -eq 178 ]]; then
+    log_warn "$(L "[relay-proxyd] reason=relay-process-stale chain=${CHAIN_ID} 中转上的 ${SOCKET_PROXYD_PATH} 已被系统更新替换，正在运行的还是旧进程；请在中转上运行 systemctl restart ownexit-chain-relay-${CHAIN_ID}.service 后重试，不要用 rebaseline 掩盖" "[relay-proxyd] reason=relay-process-stale chain=${CHAIN_ID} ${SOCKET_PROXYD_PATH} on the relay was replaced by a system update and the running process is still the old one; run systemctl restart ownexit-chain-relay-${CHAIN_ID}.service on the relay and retry. Do not use rebaseline to hide this")"
+    return 34
   fi
   [[ "${rc}" -eq 0 ]] || { [[ "${rc}" -eq 255 ]] && return 21; return 31; }
   [[ "${output}" == VERIFY_RELAY=ok ]] || return 31
@@ -9763,6 +9830,8 @@ status_chain() {
     21) printf 'status=unreachable role=relay reason=resource-probe next=retry-status\n'; return 5 ;;
     22) printf 'status=unreachable role=exit reason=resource-probe next=retry-status\n'; return 5 ;;
     33) printf 'status=drifted reason=exit-op-pending next=rerun-interrupted-command\n'; return 5 ;;
+    # 34 = 中转转发程序被系统更新替换、旧进程仍在跑；status 不替用户重启服务，只给出下一步。
+    34) printf 'status=drifted role=relay reason=relay-process-stale next=restart-relay-service\n'; return 5 ;;
     *) printf 'status=drifted reason=remote-resource-unit-process-or-listener next=run-verify\n'; return 5 ;;
   esac
   printf 'status=deployed health=healthy deployment=%s\n' "${DEPLOYMENT_ID:0:12}"
