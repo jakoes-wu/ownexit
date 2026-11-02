@@ -157,6 +157,8 @@ GLOBAL_LOCK=''
 ACTIVE_CHILD_FILE=''
 LOCAL_PROCESS_FILE=''
 OP_TMP=''
+# 本次操作的 SSH 复用插口目录（/tmp/ownexit-mux.XXXXXX）。单独放 /tmp：macOS 的 OP_TMP 在 $TMPDIR 下，路径太长放不下插口（上限 104 字节）。
+MUX_DIR=''
 SSH_CONFIG=''
 SSH_DIRECT_CONFIG=''
 OPERATION_ID=''
@@ -1103,6 +1105,9 @@ init_operation_tmp() {
   start_hash="$(printf '%s' "${start}" | sha256_text)"
   OP_TMP="$(mktemp -d "${TMPDIR:-/tmp}/ownexit-chain.${CHAIN_ID}.${LOCK_OPERATION_ID}.$$.${start_hash}.${command_hash}.XXXXXX")"
   chmod 700 "${OP_TMP}"
+  # 扫除一天前留下的空插口目录：在建插口目录与写 mux-dir 之间被杀、或被不认识 mux-dir 的旧版清理过，过期清理都找不到它。
+  # 只删本用户、700、已空的目录；写 /tmp/ 带斜杠，macOS 的 /tmp 是软链，find 不跟随命令行软链。
+  find /tmp/ -maxdepth 1 -name 'ownexit-mux.*' -type d -user "$(id -u)" -perm 700 -empty -mmin +1440 -exec rmdir {} \; 2>/dev/null || true
   owner="${OP_TMP}/operation-owner.env"
   owner_temp="${OP_TMP}/.operation-owner.${LOCK_OPERATION_ID}.tmp"
   ( set -o noclobber; : > "${owner_temp}" ) 2>/dev/null || return 1
@@ -1120,6 +1125,12 @@ init_operation_tmp() {
   sync
   link "${owner_temp}" "${owner}" || return 1
   rm -f "${owner_temp}"
+  # 插口目录必须在 owner 落盘之后建：owner 还没落盘时，cleanup_incomplete_operation_tmp 见到 .operation-owner.*.tmp 以外的文件就拒绝清理。
+  # 路径另写 mux-dir 文件，不加进 owner：operation_tmp_owner_matches 要求 owner 正好是固定 7 个键，新旧版本都靠它校验，加键会让清理全部判失败、锁不释放。
+  MUX_DIR="$(mktemp -d /tmp/ownexit-mux.XXXXXX)" || return 1
+  chmod 700 "${MUX_DIR}"
+  [[ -d "${MUX_DIR}" && ! -L "${MUX_DIR}" && "$(stat_uid "${MUX_DIR}")" == "$(id -u)" && "$(stat_mode "${MUX_DIR}")" == 700 ]] || return 1
+  ( umask 077; printf '%s\n' "${MUX_DIR}" > "${OP_TMP}/mux-dir" ) || return 1
   SSH_CONFIG="${OP_TMP}/ssh_config"
   SSH_DIRECT_CONFIG="${OP_TMP}/ssh_direct_config"
 }
@@ -1342,6 +1353,11 @@ cleanup_stale_operation_tmp() {
   chain_id="$(kv_get "${owner}" CHAIN_ID)"
   base="$(basename "${directory}")"
   [[ "${base}" == ownexit-chain."${chain_id}".* ]] || return 1
+  # 先关掉那次操作留下的 SSH 复用进程，再删目录；mux-dir 由 close_mux_dir 自己核格式与权限。
+  # 旧版写下的目录没有 mux-dir，或文件校验不过，都只跳过关闭、照旧删 OP_TMP，不能让清理失败（失败会锁死后续所有命令）。
+  if require_secure_user_file "${directory}/mux-dir" 600; then
+    close_mux_dir "$(head -n 1 "${directory}/mux-dir" 2>/dev/null || true)"
+  fi
   find "${directory}" -depth -mindepth 1 ! -path "${owner}" -delete || return 1
   rm -f "${owner}"
   rmdir "${directory}"
@@ -1873,19 +1889,46 @@ test_exact_link_primitive() {
 }
 
 render_ssh_config() {
+  local relay_key_tag exit_key_tag relay_fp_ok exit_fp_ok
+  # 插口名带私钥标记：%C 只按本机名、目标、端口、用户算，不含私钥；同一次操作里同一 host:port 换了私钥（迁移、换密钥）
+  # 必须换新插口重新认证，不能沿用旧私钥认证过的连接。标记取已与私钥核对过的指纹，先算好再写文件，
+  # 不放进 printf 参数里现算：那样哈希失败会被吞成空串的哈希，生成一个看似正常的配置。
+  relay_fp_ok=0
+  exit_fp_ok=0
+  relay_key_tag=''
+  exit_key_tag=''
+  if [[ "${RELAY_SSH_KEY_FINGERPRINT}" =~ ^SHA256:[A-Za-z0-9+/]+$ ]]; then
+    relay_key_tag="$(printf '%s' "${RELAY_SSH_KEY_FINGERPRINT}" | sha256_text | cut -c1-8)" || relay_key_tag=''
+    [[ "${relay_key_tag}" =~ ^[0-9a-f]{8}$ ]] && relay_fp_ok=1
+  fi
+  if [[ "${EXIT_SSH_KEY_FINGERPRINT}" =~ ^SHA256:[A-Za-z0-9+/]+$ ]]; then
+    exit_key_tag="$(printf '%s' "${EXIT_SSH_KEY_FINGERPRINT}" | sha256_text | cut -c1-8)" || exit_key_tag=''
+    [[ "${exit_key_tag}" =~ ^[0-9a-f]{8}$ ]] && exit_fp_ok=1
+  fi
+  if [[ -z "${MUX_DIR}" ]]; then
+    # 没有插口目录时 ControlPath 会落到根目录；正常流程里 init_operation_tmp 一定先建好它。
+    log_warn "[ssh-mux] mux-dir unset"
+    return 1
+  fi
+  if [[ "${relay_fp_ok}" != 1 || "${exit_fp_ok}" != 1 ]]; then
+    log_warn "[ssh-mux] key-tag failed relay_fp_ok=${relay_fp_ok} exit_fp_ok=${exit_fp_ok}"
+    return 1
+  fi
   {
     printf 'Host chain-relay\n'
     printf '    HostName %s\n' "${RELAY_HOST}"
     printf '    User root\n'
     printf '    Port %s\n' "${RELAY_SSH_PORT}"
     printf '    IdentityFile %s\n' "${RELAY_SSH_KEY}"
-    printf '    ProxyCommand none\n\n'
+    printf '    ProxyCommand none\n'
+    printf '    ControlPath %s/r-%s-%%C\n\n' "${MUX_DIR}" "${relay_key_tag}"
     printf 'Host chain-exit\n'
     printf '    HostName %s\n' "${EXIT_HOST}"
     printf '    User root\n'
     printf '    Port %s\n' "${EXIT_SSH_PORT}"
     printf '    IdentityFile %s\n' "${EXIT_SSH_KEY}"
-    printf '    ProxyJump chain-relay\n\n'
+    printf '    ProxyJump chain-relay\n'
+    printf '    ControlPath %s/e-%s-%%C\n\n' "${MUX_DIR}" "${exit_key_tag}"
     printf 'Host *\n'
     printf '    IdentitiesOnly yes\n'
     printf '    BatchMode yes\n'
@@ -1903,6 +1946,10 @@ render_ssh_config() {
     printf '    RequestTTY no\n'
     printf '    RemoteCommand none\n'
     printf '    PermitLocalCommand no\n'
+    # 同一台服务器的多次调用复用一条已认证连接，减少“握手中途被断”的机会。ControlPersist 给异常退出兜底：
+    # 最后一个会话结束 120 秒后复用进程自行退出（中转那条要等出口机那条先退出再计时，最坏约 240 秒）。
+    printf '    ControlMaster auto\n'
+    printf '    ControlPersist 120\n'
   } > "${SSH_CONFIG}"
   chmod 600 "${SSH_CONFIG}"
   {
@@ -1913,6 +1960,9 @@ render_ssh_config() {
     printf '    IdentityFile %s\n' "${EXIT_SSH_KEY}"
     printf '    ProxyJump none\n'
     printf '    ProxyCommand none\n'
+    # 直连探测只连一次，不建复用进程；写在复制进来的 Host * 之前，先匹配到的生效。
+    printf '    ControlMaster no\n'
+    printf '    ControlPath none\n'
     sed -n '/^Host \*/,$p' "${SSH_CONFIG}"
   } > "${SSH_DIRECT_CONFIG}"
   chmod 600 "${SSH_DIRECT_CONFIG}"
@@ -1948,6 +1998,7 @@ ssh_with_readonly_retry() {
     fi
     rm -f "${out_file}"
     delay=$(( attempt * 3 ))
+    reset_mux_connections
     log_warn "$(L "[ssh-retry] role=${role} attempt=${attempt}/3 rc=255，${delay} 秒后重试（只读命令）" "[ssh-retry] role=${role} attempt=${attempt}/3 rc=255, retrying in ${delay} s (read-only command)")"
     sleep "${delay}"
   done
@@ -1977,8 +2028,111 @@ scp_exit() {
   run_managed_external scp scp -q -F "${SSH_CONFIG}" "$@"
 }
 
+# 对一个复用插口发一条控制命令（exit / check），最多等 3 秒。只经本机插口通信、不走网络，所以不进 run_managed_external；
+# 但复用进程活着却不应答（被暂停、卡死）时 ssh -O 会一直等，必须自带超时，否则收尾卡住、锁释放不了。
+# -F /dev/null：不读用户 ~/.ssh/config（其中的 Match exec 会被执行）。返回 ssh 的退出码；超时被 kill 时返回 143 / 137。
+mux_control_with_timeout() {
+  # 整段放进 stderr 丢到 /dev/null 的子 shell：bash 3.2 回收被信号结束的后台任务时，把 Terminated 提示打到
+  # shell 自身的 stderr，只给 kill / wait 加 2>/dev/null 挡不住（T11 实测）。子 shell 的退出码即本函数返回值。
+  (
+  local socket command pid _
+  socket="$1"
+  command="$2"
+  ssh -F /dev/null -o ControlPath="${socket}" -O "${command}" ownexit-mux </dev/null >/dev/null 2>&1 &
+  pid="$!"
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    kill -0 "${pid}" 2>/dev/null || break
+    sleep 0.2
+  done
+  # kill 与 wait 都丢 stderr：非交互 bash 回收被信号结束的后台任务时会打一行 Terminated 提示，混进用户输出。
+  if kill -0 "${pid}" 2>/dev/null; then
+    kill "${pid}" 2>/dev/null || true
+    # SIGTERM 后再给 1 秒；仍不退出就强杀，保证 wait 有上限、收尾不卡住。
+    for _ in 1 2 3 4 5; do
+      kill -0 "${pid}" 2>/dev/null || break
+      sleep 0.2
+    done
+    if kill -0 "${pid}" 2>/dev/null; then
+      kill -9 "${pid}" 2>/dev/null || true
+    fi
+  fi
+  # 显式取退出码，不依赖调用方恰好处在 || 语境里（那里 errexit 被关闭）。
+  if wait "${pid}" 2>/dev/null; then
+    exit 0
+  else
+    exit "$?"
+  fi
+  ) 2>/dev/null
+}
+
+# 关闭一个插口目录里的所有 SSH 复用进程并删掉目录。操作结束清理与过期清理共用；任何情况都返回 0，
+# 不能因为关不掉复用进程就让清理失败（清理失败会保留锁，此后命令都无法开始）。
+# 按插口逐个关、不按别名关：同一次操作里 EXIT_HOST / 端口 / 私钥可能变过（migrate-exit），按当前别名算出的插口会漏掉旧的。
+# 关不掉的插口留着也无害：下一次操作用新目录，不会连到它；复用进程最迟约 240 秒后自行退出，空目录一天后由 init_operation_tmp 扫除。
+close_mux_dir() {
+  local directory prefix socket rc remaining stuck _
+  directory="${1:-}"
+  [[ -n "${directory}" ]] || return 0
+  [[ -e "${directory}" || -L "${directory}" ]] || return 0
+  # 路径来自 mux-dir 文件或全局变量，删除前必须核实它确实是本脚本建的插口目录。
+  if [[ ! "${directory}" =~ ^/tmp/ownexit-mux\.[A-Za-z0-9]{6}$ || ! -d "${directory}" || -L "${directory}" || "$(stat_uid "${directory}")" != "$(id -u)" || "$(stat_mode "${directory}")" != 700 ]]; then
+    log_warn "$(L "[ssh-mux] 插口目录不符合预期，不处理 dir=${directory}" "[ssh-mux] Socket directory is not as expected; leaving it alone dir=${directory}")"
+    return 0
+  fi
+  # 先关出口机（e-），再关中转（r-）：出口机的跳转挂在中转的复用连接上。
+  for prefix in e r; do
+    for socket in "${directory}/${prefix}-"*; do
+      [[ -S "${socket}" ]] || continue
+      mux_control_with_timeout "${socket}" exit || true
+    done
+  done
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    remaining=0
+    for socket in "${directory}"/*; do
+      [[ -S "${socket}" ]] && remaining=1
+    done
+    [[ "${remaining}" == 1 ]] || break
+    sleep 0.2
+  done
+  stuck=0
+  for socket in "${directory}"/*; do
+    [[ -S "${socket}" ]] || continue
+    if mux_control_with_timeout "${socket}" check; then
+      rc=0
+    else
+      rc="$?"
+    fi
+    # 只有 255（连不上插口：复用进程已异常死掉、只剩插口文件）才删插口；否则这种目录不空，扫除永远删不掉。
+    # 超时被 kill（143 / 137）说明复用进程还活着只是卡住，保留插口，由它日后自行退出时删。
+    if [[ "${rc}" -eq 255 ]]; then
+      rm -f "${socket}"
+    else
+      stuck=1
+    fi
+  done
+  if ! rmdir "${directory}" 2>/dev/null; then
+    log_warn "$(L "[ssh-mux] 复用连接未能确认关闭 dir=${directory} stuck=${stuck}" "[ssh-mux] Could not confirm the multiplexed connections closed dir=${directory} stuck=${stuck}")"
+  fi
+  return 0
+}
+
+# 重试前调用（三处：ssh_with_readonly_retry、主机指纹探测、remote_test_path）：上一次 255 可能是
+# 复用连接已假死（静默断线时保活约 45 秒才判断线），不关掉它，重试会继续发给这条死连接。
+# 先出口机后中转：出口机经中转跳转，两台都关。只关连接、保留插口目录，重试时按配置重新建立。
+reset_mux_connections() {
+  local prefix socket
+  [[ -n "${MUX_DIR}" && -d "${MUX_DIR}" && ! -L "${MUX_DIR}" ]] || return 0
+  for prefix in e r; do
+    for socket in "${MUX_DIR}/${prefix}-"*; do
+      [[ -S "${socket}" ]] || continue
+      mux_control_with_timeout "${socket}" exit || true
+    done
+  done
+  return 0
+}
+
 check_ssh_effective_config() {
-  local alias output
+  local alias output control_path expected_prefix
   alias="$1"
   output="$(ssh -G -F "${SSH_CONFIG}" "${alias}" 2>/dev/null)"
   printf '%s\n' "${output}" | grep -qx 'updatehostkeys false' || return 1
@@ -1987,6 +2141,16 @@ check_ssh_effective_config() {
   printf '%s\n' "${output}" | grep -qx 'stricthostkeychecking true' || return 1
   printf '%s\n' "${output}" | grep -qx 'serveraliveinterval 15' || return 1
   printf '%s\n' "${output}" | grep -qx 'serveralivecountmax 2' || return 1
+  printf '%s\n' "${output}" | grep -qx 'controlmaster auto' || return 1
+  printf '%s\n' "${output}" | grep -qx 'controlpersist 120' || return 1
+  # ssh -G 输出的 controlpath 已展开 %C，只能按前缀核：插口必须落在本次操作的插口目录、角色前缀正确。
+  control_path="$(printf '%s\n' "${output}" | awk '$1 == "controlpath" { print $2; exit }')"
+  case "${alias}" in
+    chain-relay) expected_prefix="${MUX_DIR}/r-" ;;
+    chain-exit) expected_prefix="${MUX_DIR}/e-" ;;
+    *) return 1 ;;
+  esac
+  [[ -n "${MUX_DIR}" && "${control_path}" == "${expected_prefix}"* ]] || return 1
 }
 
 fingerprint_private_key() {
@@ -2009,12 +2173,14 @@ negotiated_hostkey_fingerprint() {
     chmod 600 "${debug_file}" || return 1
     # ProxyJump 子进程会继承 verbose 等级，但不会继承外层 ssh 的 LogFile；因此 -E 文件只含目标会话日志，
     # 避免从合并 stderr 的第一条 `Server host key` 误取中转机指纹。
-    if run_managed_external ssh ssh -vv -E "${debug_file}" -n -F "${SSH_CONFIG}" "${alias}" true >/dev/null 2>&1; then
+    # 不走复用连接：必须做一次真实握手，-E 日志里才有本次协商的 `Server host key`。跳转那一跳仍按配置复用中转连接。
+    if run_managed_external ssh ssh -vv -E "${debug_file}" -n -o ControlMaster=no -o ControlPath=none -F "${SSH_CONFIG}" "${alias}" true >/dev/null 2>&1; then
       rc=0
     else
       rc="$?"
     fi
     [[ "${rc}" -eq 255 && "${MANAGED_LAST_TIMEOUT}" != 1 && "${attempt}" -lt "${max_attempts}" ]] || break
+    reset_mux_connections
     log_warn "$(L "[ssh-retry] role=${alias#chain-} attempt=${attempt}/3 rc=255，$(( attempt * 3 )) 秒后重试（只读命令，主机指纹探测）" "[ssh-retry] role=${alias#chain-} attempt=${attempt}/3 rc=255, retrying in $(( attempt * 3 )) s (read-only command, host fingerprint probe)")"
     sleep "$(( attempt * 3 ))"
   done
@@ -2517,6 +2683,7 @@ remote_test_path() {
       if ssh_exit test ! "${flag}" "${path}"; then rc=0; else rc="$?"; fi
     fi
     [[ "${rc}" -eq 255 && "${attempt}" -eq 1 ]] || break
+    reset_mux_connections
     log_warn "$(L "${role} SSH 连接被断开，2 秒后重试一次（检查 ${path}）" "${role} SSH connection dropped; retrying once in 2 seconds (checking ${path})")"
     sleep 2
   done
@@ -7224,7 +7391,8 @@ migrate_probe_same_host() {
   # 这条链绑定了出站地址时，出口 IP 要从绑定地址量；该值已由 validate_config_values 收紧为 IPv4 字面量，可以拼进远端命令。
   bind_arg=''
   [[ -z "${EXIT_BIND_IPV4}" ]] || bind_arg=" --interface ${EXIT_BIND_IPV4}"
-  render_ssh_config
+  # 本函数只在 if 里被调用，set -e 不生效：生成失败必须显式中止，否则拿旧配置探测、连不上会被当成“换了机器”。
+  render_ssh_config || die 1 "$(L '本机 ssh 配置生成失败' 'Generating the local ssh configuration failed')"
   conf="${OP_TMP}/ssh-probe-same-host.${LOCK_OPERATION_ID}.conf"
   log="${OP_TMP}/ssh-probe-same-host.${LOCK_OPERATION_ID}.log"
   out="${OP_TMP}/ssh-probe-same-host.${LOCK_OPERATION_ID}.out"
@@ -7242,6 +7410,10 @@ migrate_probe_same_host() {
     printf '    StrictHostKeyChecking no\n'
     printf '    UserKnownHostsFile /dev/null\n'
     printf '    GlobalKnownHostsFile /dev/null\n'
+    # 这条连接不核 known_hosts，不能被复用。ControlPath 现在只写在 chain-relay / chain-exit 段，这里仍显式关闭，
+    # 防止以后有人把 ControlPath 挪进 Host *。跳转那一跳照旧走中转的复用连接、严格校验。
+    printf '    ControlMaster no\n'
+    printf '    ControlPath none\n'
     printf '    UpdateHostKeys no\n\n'
     sed -n '/^Host chain-relay/,$p' "${SSH_CONFIG}"
   } > "${conf}" || die 1 "$(L '同机探测 ssh 配置写入失败' 'Writing the same-machine probe ssh configuration failed')"
@@ -9857,6 +10029,8 @@ cleanup_operation_tmp() {
     return 0
   fi
   operation_tmp_owner_matches "${OP_TMP}" "${LOCK_OPERATION_ID}" "${OPERATION_CONFIG_SHA256}" || return 1
+  # 收尾 SSH 都已跑完，这里才关复用进程；close_mux_dir 总是返回 0，不影响锁释放。
+  close_mux_dir "${MUX_DIR}"
   find "${OP_TMP}" -depth -mindepth 1 ! -path "${OP_TMP}/operation-owner.env" -delete || return 1
   rm -f "${OP_TMP}/operation-owner.env"
   rmdir "${OP_TMP}"

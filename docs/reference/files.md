@@ -41,7 +41,7 @@
 | `${TMPDIR:-/tmp}/multi-chain-client-qr.*/qr-<n>-<节点名>.png` | `ownexit multi render` 的二维码（`--qr-out` 可指定目录；含明文凭据，扫完即删） |
 | `<缓存目录>/chains/<id>/downloads/` | 固定版本 sing-box 官方包缓存 |
 
-内部文件（不属于公开接口，但 2.x 必须能读 1.x 与 2.x 写下的版本）：`<状态目录>/chains/<id>/` 下的 `transaction.env`、`baseline/`、`audit/`、`operation.lock`、`active-child.env`、`local-process.env`、各类以 `.` 开头的临时文件（含 `.migrate-exit.env.*.tmp`），`<状态目录>/` 下的 `shared.lock`。
+内部文件（不属于公开接口，但 2.x 必须能读 1.x 与 2.x 写下的版本）：`<状态目录>/chains/<id>/` 下的 `transaction.env`、`baseline/`、`audit/`、`operation.lock`、`active-child.env`、`local-process.env`、各类以 `.` 开头的临时文件（含 `.migrate-exit.env.*.tmp`），`<状态目录>/` 下的 `shared.lock`；本机临时目录 `${TMPDIR:-/tmp}/ownexit-chain.<id>.*`（每次操作一个，内含 `operation-owner.env`、`mux-dir` 等，结束即删）与 `/tmp/ownexit-mux.XXXXXX/`（SSH 复用插口，操作结束即关闭并删除）。
 
 ### 链配置键
 

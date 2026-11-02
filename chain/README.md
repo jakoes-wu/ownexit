@@ -133,7 +133,7 @@ chain/setup_chain.sh --id main list-devices
 
 `verify --with-fail-closed` 会短暂停止本链的中转 socket，确认新连接拿不到任何有效出口 IP，再恢复 socket 并重跑完整的出口验证。远端 90 秒的 timer 是控制进程崩溃时的第二道恢复保险。
 
-隔离 SSH 配置固定 `ConnectTimeout=12`、`ServerAliveInterval=15`、`ServerAliveCountMax=2`；持锁后的每个 SSH / scp 另有控制端 600 秒总超时，超时按“远端不可达”分类。`status` 通常只读，但在状态、身份、平台、基线和残留都通过后，如果 socket active 而 relay service inactive，会执行一次 `systemctl start` 并复查；它不会写远端文件。
+隔离 SSH 配置固定 `ConnectTimeout=12`、`ServerAliveInterval=15`、`ServerAliveCountMax=2`，并在一次操作内复用同一台服务器的连接（`ControlMaster auto`、`ControlPersist 120`，插口放在 `/tmp/ownexit-mux.XXXXXX/`，操作结束即关闭并删除）；持锁后的每个 SSH / scp 另有控制端 600 秒总超时，超时按“远端不可达”分类。`status` 通常只读，但在状态、身份、平台、基线和残留都通过后，如果 socket active 而 relay service inactive，会执行一次 `systemctl start` 并复查；它不会写远端文件。
 
 ## 状态与退出码
 

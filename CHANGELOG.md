@@ -6,6 +6,11 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+### Changed / 变更
+
+- Chain operations now reuse one SSH connection per server for the whole operation (OpenSSH `ControlMaster`), so later steps no longer redo the handshake. This makes deploys less likely to fail on networks that cut connections mid-handshake. Sockets live in `/tmp/ownexit-mux.XXXXXX/` and are closed and removed when the operation ends; a leftover connection exits on its own within about 4 minutes.
+- 链式操作在一次操作内复用同一台服务器的 SSH 连接（OpenSSH `ControlMaster`），后续步骤不再重新握手，在“握手中途被断”的网络下部署更不容易失败。插口放在 `/tmp/ownexit-mux.XXXXXX/`，操作结束即关闭并删除；异常退出时留下的连接最迟约 4 分钟后自行退出。
+
 ## [2.3.1] - 2026-10-30
 
 ### Fixed / 修复

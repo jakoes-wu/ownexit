@@ -135,7 +135,7 @@ The blocklist lives in a managed drop-in for the relay's two chain-specific unit
 
 `verify --with-fail-closed` briefly stops this chain's relay socket, confirms that new connections get no working exit IP, then restores the socket and reruns the full exit check. A 90-second timer on the server is the second line of recovery in case the controlling process crashes.
 
-The isolated SSH configuration fixes `ConnectTimeout=12`, `ServerAliveInterval=15` and `ServerAliveCountMax=2`; once the lock is held, every SSH / scp also has a 600-second overall timeout on the control machine, and a timeout is classified as "server unreachable". `status` is normally read-only, but when state, identities, platform, baseline and leftovers all pass and the socket is active while the relay service is inactive, it runs `systemctl start` once and checks again; it never writes remote files.
+The isolated SSH configuration fixes `ConnectTimeout=12`, `ServerAliveInterval=15` and `ServerAliveCountMax=2`, and reuses one connection per server within an operation (`ControlMaster auto`, `ControlPersist 120`; sockets live in `/tmp/ownexit-mux.XXXXXX/` and are closed and removed when the operation ends); once the lock is held, every SSH / scp also has a 600-second overall timeout on the control machine, and a timeout is classified as "server unreachable". `status` is normally read-only, but when state, identities, platform, baseline and leftovers all pass and the socket is active while the relay service is inactive, it runs `systemctl start` once and checks again; it never writes remote files.
 
 ## Status and exit codes
 
