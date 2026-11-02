@@ -41,7 +41,7 @@ This file lists the files, keys and paths ownexit reads and writes on your compu
 | `${TMPDIR:-/tmp}/multi-chain-client-qr.*/qr-<n>-<node name>.png` | QR codes from `ownexit multi render` (`--qr-out` chooses the directory; they contain plain-text credentials, delete after scanning) |
 | `<cache dir>/chains/<id>/downloads/` | Cache of the pinned official sing-box packages |
 
-Internal files (not part of the public interface, but 2.x must be able to read what 1.x and 2.x wrote): under `<state dir>/chains/<id>/`, `transaction.env`, `baseline/`, `audit/`, `operation.lock`, `active-child.env`, `local-process.env` and the various temporary files starting with `.` (including `.migrate-exit.env.*.tmp`); under `<state dir>/`, `shared.lock`.
+Internal files (not part of the public interface, but 2.x must be able to read what 1.x and 2.x wrote): under `<state dir>/chains/<id>/`, `transaction.env`, `baseline/`, `audit/`, `operation.lock`, `active-child.env`, `local-process.env` and the various temporary files starting with `.` (including `.migrate-exit.env.*.tmp`); under `<state dir>/`, `shared.lock`; on the control machine, the per-operation temporary directory `${TMPDIR:-/tmp}/ownexit-chain.<id>.*` (holds `operation-owner.env`, `mux-dir` and others; removed when the operation ends) and `/tmp/ownexit-mux.XXXXXX/` (SSH multiplexing sockets, closed and removed when the operation ends).
 
 ### Chain configuration keys
 
