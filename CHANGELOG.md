@@ -6,6 +6,8 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-11-05
+
 ### Changed / 变更
 
 - Chain operations now reuse one SSH connection per server for the whole operation (OpenSSH `ControlMaster`), so later steps no longer redo the handshake. This makes deploys less likely to fail on networks that cut connections mid-handshake. Sockets live in `/tmp/ownexit-mux.XXXXXX/` and are closed and removed when the operation ends; a leftover connection exits on its own within about 4 minutes.
